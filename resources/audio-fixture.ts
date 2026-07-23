@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { getFfmpegCommand, getFfprobeCommand } from "./media-tools";
+const fixtureFfmpeg = () => process.env.FFMPEG_PATH || "ffmpeg";
+const fixtureFfprobe = () => process.env.FFPROBE_PATH || "ffprobe";
 
 export type AudioFixtureOptions = {
   outDir: string;
@@ -42,10 +43,10 @@ function run(command: string[]) {
 }
 
 export function assertAudioFixtureDependencies() {
-  run([getFfmpegCommand(), "-hide_banner", "-version"]);
-  const filters = run([getFfmpegCommand(), "-hide_banner", "-filters"]);
+  run([fixtureFfmpeg(), "-hide_banner", "-version"]);
+  const filters = run([fixtureFfmpeg(), "-hide_banner", "-filters"]);
   if (!filters.stdout.includes(" flite ") && !filters.stderr.includes(" flite ")) {
-    throw new Error("This ffmpeg build does not include the flite text-to-speech filter.");
+    throw new Error("This ffmpeg build does not include the flite text-to-speech filter. Install a flite-enabled ffmpeg (e.g. apt install ffmpeg) or set FFMPEG_PATH.");
   }
 }
 
@@ -99,7 +100,7 @@ export function generateAudioFixture(options: AudioFixtureOptions): AudioFixture
     ].join(";");
 
     run([
-      getFfmpegCommand(),
+      fixtureFfmpeg(),
       "-hide_banner",
       "-y",
       "-filter_complex",
@@ -123,7 +124,7 @@ export function generateAudioFixture(options: AudioFixtureOptions): AudioFixture
   }
 
   const probe = run([
-    getFfprobeCommand(),
+    fixtureFfprobe(),
     "-v",
     "error",
     "-show_entries",
