@@ -8,10 +8,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      FFPROBE_PATH: /usr/bin/ffprobe
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: bun install --frozen-lockfile
       - run: bun run test

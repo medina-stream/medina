@@ -14,12 +14,13 @@ import { getRecordings } from "./recording";
 import { intervalsDefinition } from "./intervals";
 import { getPodcastFeedKey, getPodcastEpisodeKey, podcastFeedDefinition, podcastEpisodeDefinition } from "./podcast";
 import { recordingsDefinition } from "./recordings";
+import { getFfmpegCommand } from "./media-tools";
 
 const originalEnv = { ...process.env };
 
 async function generateAudioFile(outputPath: string) {
   const proc = Bun.spawn([
-    "ffmpeg",
+    getFfmpegCommand(),
     "-f", "lavfi",
     "-i", "sine=frequency=880:duration=1",
     "-q:a", "4",

@@ -315,7 +315,7 @@ export async function probeIngest(inputPath: string): Promise<IngestProbeResult 
   const proc = Bun.spawn([
     command,
     "-v",
-    "quiet",
+    "error",
     "-print_format",
     "json",
     "-show_format",
@@ -332,6 +332,9 @@ export async function probeIngest(inputPath: string): Promise<IngestProbeResult 
   ]);
 
   if (exitCode !== 0) {
+    if (stderr.includes("Invalid data found when processing input")) {
+      return null;
+    }
     throw new IngestProbeError(`ffprobe failed for ${inputPath}: ${stderr.trim() || `exit ${exitCode}`}`);
   }
 
