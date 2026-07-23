@@ -1,0 +1,33 @@
+#!/usr/bin/env bun
+
+import { describeBucketKey, describeBucketList } from "#lib/bucket";
+import { createBucketFromEnv } from "#lib/bucket-bun";
+
+function usage() {
+  console.error(`Usage:
+  bin/admin bucket list
+  bin/admin bucket get <key>`);
+}
+
+async function main() {
+  const bucket = createBucketFromEnv();
+  const [scope, action, key] = Bun.argv.slice(2);
+
+  if (scope === "bucket" && action === "list") {
+    console.log(await describeBucketList(bucket));
+    return;
+  }
+
+  if (scope === "bucket" && action === "get" && key) {
+    console.log(await describeBucketKey(bucket, key));
+    return;
+  }
+
+  usage();
+  process.exit(1);
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : error);
+  process.exit(1);
+});

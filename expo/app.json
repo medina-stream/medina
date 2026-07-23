@@ -1,0 +1,82 @@
+{
+  "expo": {
+    "name": "Medina",
+    "slug": "medina",
+    "version": "0.1.0",
+    "runtimeVersion": "0.1.0",
+    "updates": {
+      "url": "https://u.expo.dev/0fcc6538-9178-4057-9163-ee61947452f9",
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    },
+    "scheme": "medina",
+    "icon": "./assets/icon.png",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "ios": {
+      "icon": "./assets/icon.png",
+      "supportsTablet": false,
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ],
+        "NSMicrophoneUsageDescription": "Medina needs microphone access to record audio."
+      },
+      "bundleIdentifier": "com.scottraymond.medina"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0f172a"
+      },
+      "permissions": [
+        "RECORD_AUDIO",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_MICROPHONE",
+        "WAKE_LOCK",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.POST_NOTIFICATIONS",
+        "FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
+      "package": "com.scottraymond.medina"
+    },
+    "web": {
+      "favicon": "./assets/icon.png"
+    },
+    "experiments": {
+      "baseUrl": "/app"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Medina needs microphone access to record audio.",
+          "enableBackgroundRecording": true
+        }
+      ],
+      "expo-asset",
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "defaultChannel": "medina",
+          "color": "#4aa8ff"
+        }
+      ],
+      "expo-status-bar"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "0fcc6538-9178-4057-9163-ee61947452f9"
+      }
+    },
+    "userInterfaceStyle": "automatic"
+  }
+}

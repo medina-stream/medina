@@ -1,0 +1,53 @@
+[class*="_navigationMenuRoot"] {
+  top: auto !important;
+  left: 50% !important;
+  max-width: min(390px, calc(100vw - 32px)) !important;
+  bottom: max(24px, env(safe-area-inset-bottom)) !important;
+  height: 64px !important;
+  border-radius: 999px !important;
+  padding: 8px !important;
+  gap: 1px !important;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22) !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  overflow: hidden !important;
+}
+
+[class*="_navigationMenuTrigger"] {
+  align-items: center !important;
+  border-radius: 999px !important;
+  display: flex !important;
+  height: 48px !important;
+  justify-content: center !important;
+  min-width: 48px !important;
+  flex: 1 1 0 !important;
+  padding: 0 4px !important;
+}
+
+[class*="_navigationMenuTrigger"] [class*="_tabText"] {
+  color: transparent !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
+}
+
+[class*="_navigationMenuTrigger"][id*="trigger-journal"] [class*="_tabText"]::before {
+  content: "\f127";
+}
+
+[class*="_navigationMenuTrigger"][id*="trigger-transcripts"] [class*="_tabText"]::before {
+  content: "\f16c";
+}
+
+[class*="_navigationMenuTrigger"][id*="trigger-settings"] [class*="_tabText"]::before {
+  content: "\f1d3";
+}
+
+[class*="_navigationMenuTrigger"] [class*="_tabText"]::before {
+  color: var(--expo-router-tabs-text-color, #8b8b8b);
+  font-family: Feather !important;
+  font-size: 22px !important;
+  line-height: 22px !important;
+}
+
+[class*="_navigationMenuTrigger"][data-state=active] [class*="_tabText"]::before {
+  color: var(--expo-router-tabs-active-text-color, #fff);
+}

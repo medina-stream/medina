@@ -1,0 +1,18 @@
+node_modules/
+.expo/
+dist/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+
+# Parent repo directories (EAS archives from git root)
+example-lifelog/
+data/
+docs/
+scripts/
+web/
+sdk/

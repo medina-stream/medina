@@ -1,0 +1,49 @@
+{
+  "name": "medina",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/medina-stream/medina.git"
+  },
+  "type": "module",
+  "imports": {
+    "#server/*": "./server/*.ts",
+    "#lib/*": "./lib/*.ts"
+  },
+  "scripts": {
+    "dev": "bun scripts/ensure-streams-config.ts && bun scripts/dev.ts",
+    "dev:server": "bun scripts/ensure-streams-config.ts && bun --hot server/index.ts",
+    "dev:app": "bun scripts/dev-app.ts",
+    "test": "bun scripts/ensure-streams-config.ts && bun test ./server/*.test.ts ./lib/*.test.ts ./bin/*.test.ts ./resources/*.test.ts",
+    "repl": "bun scripts/ensure-streams-config.ts && bun ./scripts/repl.ts",
+    "build:app": "bun scripts/build-app.ts",
+    "refresh:app-static": "npm ci --prefix expo && bun scripts/build-app.ts",
+    "start": "bun scripts/ensure-streams-config.ts && NODE_ENV=production bun server/index.ts",
+    "smoke:ingest": "bun scripts/ensure-streams-config.ts && bun scripts/smoke-ingest-materialization.ts",
+    "migrate": "bun -e \"import('./lib/db.ts').then(m => m.migrate())\"",
+    "generate-migration": "bunx migralite -m lib/migrations -g \"migration\"",
+    "nas:scan": "python3 scripts/nas-scan.py",
+    "todos": "bun scripts/ensure-streams-config.ts && bun resources/todos.ts todos/list.json",
+    "speech:analyze": "bun scripts/ensure-streams-config.ts && bun resources/speech-analysis.ts",
+    "speakers:analyze": "bun scripts/ensure-streams-config.ts && bun scripts/analyze-speaker-chunks.ts",
+    "audit:public": "bun scripts/audit-public-boundary.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "3",
+    "@ai-sdk/openai": "^3.0.67",
+    "@aws-sdk/client-s3": "^3.1025.0",
+    "@aws-sdk/s3-request-presigner": "^3.1025.0",
+    "@resvg/resvg-js": "^2.6.2",
+    "ai": "^6.0.194",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
+    "hono": "^4.12.9",
+    "tz-lookup": "^6.1.25"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "migralite": "^1.2.0"
+  }
+}

@@ -1,0 +1,73 @@
+# dependencies (bun install)
+node_modules
+!static/app/assets/node_modules/
+!static/app/assets/node_modules/**
+
+# output
+out
+tmp/
+*.tgz
+gdrive-export
+
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+_.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
+
+.dev.vars
+
+
+# MinIO data directory
+data/
+minio-data
+
+# Garage local dev storage
+garage.toml
+bucket-data/
+garage-data/
+.garage-data/
+.garage-meta/
+*.db
+*.db-shm
+*.db-wal
+api/*.db*
+logs/
+
+# Python virtual environments
+.venv/
+
+# Expo
+.expo/
+expo/android/
+expo/ios/
+test-root/static-app-fixture/
+
+# Local stream routing config
+# medina.config.ts may contain local bucket credentials or tokens.
+/medina.config.ts
+dist/
+
+# devenv local cache
+.devenv/
