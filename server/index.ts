@@ -42,6 +42,7 @@ const server = serve({
   },
   websocket: eventsWebSocket,
   routes: {
+	  "/hello": (req) => new Response("hello!"),
     "/": (req) => serveHomePage(req),
     "/app": (req) => serveApp(req),
     "/app/": (req) => serveApp(req),
