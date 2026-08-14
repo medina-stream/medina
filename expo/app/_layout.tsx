@@ -40,6 +40,7 @@ export default function RootLayout() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="day/[dayId]" />
         <Stack.Screen name="events" />
+        <Stack.Screen name="sync" />
         <Stack.Screen name="sources/index" />
         <Stack.Screen name="sources/[sourceId]" />
         <Stack.Screen name="speakers" />
