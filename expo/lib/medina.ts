@@ -129,22 +129,17 @@ async function readErrorMessage(res: Response): Promise<string | null> {
 }
 
 async function validateProtectedAccess(): Promise<void> {
-  const token = getMedinaToken();
-  if (!token) {
-    throw new Error("Token is required. Enter your Medina token.");
-  }
-
   const url = new URL(`${getServerUrl()}/events.json`);
   url.searchParams.set("limit", "1");
   const res = await fetch(url.toString(), {
-    headers: getMedinaAuthHeaders(token),
+    headers: getMedinaAuthHeaders(),
   });
   if (res.ok) return;
 
   const message = await readErrorMessage(res);
-  if (res.status === 401) throw new Error(message || "Token is required. Enter your Medina token.");
-  if (res.status === 403) throw new Error(message || "Invalid Medina token.");
-  throw new Error(message || `Token validation failed: ${res.status}`);
+  if (res.status === 401) throw new Error(message || "Authentication required. Enter a token or sign in through the server's proxy.");
+  if (res.status === 403) throw new Error(message || "You are not authorized to access this Medina server.");
+  throw new Error(message || `Access validation failed: ${res.status}`);
 }
 
 export async function getEvents(limit?: number): Promise<ServerEvent[]> {
