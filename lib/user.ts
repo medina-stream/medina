@@ -1,7 +1,13 @@
-import { extractMedinaToken, tailscaleUserLoginHeader, tailscaleUserNameHeader, tailscaleUserProfilePicHeader } from "./authz";
+import {
+  exeDevEmailHeader,
+  extractMedinaToken,
+  tailscaleUserLoginHeader,
+  tailscaleUserNameHeader,
+  tailscaleUserProfilePicHeader,
+} from "./authz";
 
 export const defaultProfilePicUrl = "/default-profile.jpg";
-export type UserAuthMethod = "tailscale" | "token" | "agent";
+export type UserAuthMethod = "tailscale" | "exe" | "token" | "agent";
 
 export type UserCredential =
   | { type: "email"; value: string }
@@ -66,6 +72,18 @@ export function userFromRequest(request: Request, users: User[]): CurrentUser | 
       credentials: [{ type: "tailscale", value: login }],
       tokens: [],
     }, "tailscale");
+  }
+
+  const exeDevEmail = request.headers.get(exeDevEmailHeader);
+  if (exeDevEmail) {
+    const matched = users.find((user) => user.credentials.some((credential) => credential.type === "email" && credential.value.toLowerCase() === exeDevEmail.toLowerCase()));
+    if (matched) return withMethod(matched, "exe");
+    return withMethod({
+      username: exeDevEmail,
+      profile_pic_url: defaultProfilePicUrl,
+      credentials: [{ type: "email", value: exeDevEmail }],
+      tokens: [],
+    }, "exe");
   }
 
   const secret = extractMedinaToken(request);

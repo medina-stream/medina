@@ -69,6 +69,7 @@ See:
 - [Configuration](./docs/configuration.md)
 - [Stream routing](./docs/stream-routing.md)
 - [Tailscale auth](./docs/auth-tailscale.md)
+- [exe.dev auth](./docs/auth-exe.md)
 
 ## Common commands
 

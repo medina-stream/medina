@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { authorizeStreamRequest, normalizeStreamHost, streamFromRequest, type Stream } from "./stream";
-import { tailscaleUserLoginHeader } from "./authz";
+import { exeDevEmailHeader, tailscaleUserLoginHeader } from "./authz";
 import { createMemoryBucket } from "./bucket.test";
 
 const defaultUser = { username: "default", profile_pic_url: "/default-profile.jpg", credentials: [], tokens: [{ token: "secret" }] };
@@ -85,6 +85,19 @@ describe("authorizeStreamRequest", () => {
     const stream = makeStream("example.com");
     expect(authorizeStreamRequest(stream, request("https://example.com/", { [tailscaleUserLoginHeader]: "alice@example.com" }))).toMatchObject({ allowed: false, reason: "tailscale-login-forbidden", status: 403 });
   });
+
+  test("accepts matching exe.dev stream user email credentials", () => {
+    const stream = makeStream("example.com", {
+      users: [{ ...defaultUser, credentials: [{ type: "email", value: "alice@example.com" }] }],
+    });
+    expect(authorizeStreamRequest(stream, request("https://example.com/", { [exeDevEmailHeader]: "Alice@Example.com" }))).toMatchObject({ allowed: true, reason: "exe" });
+  });
+
+  test("rejects unmatched exe.dev identities", () => {
+    const stream = makeStream("example.com");
+    expect(authorizeStreamRequest(stream, request("https://example.com/", { [exeDevEmailHeader]: "alice@example.com" }))).toMatchObject({ allowed: false, reason: "exe-email-forbidden", status: 403 });
+  });
+
 });
 
 import {

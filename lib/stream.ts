@@ -1,4 +1,4 @@
-import { constantTimeTokenEquals, extractMedinaToken, tailscaleUserLoginHeader, type AuthzDecision } from "./authz";
+import { constantTimeTokenEquals, exeDevEmailHeader, extractMedinaToken, tailscaleUserLoginHeader, type AuthzDecision } from "./authz";
 import type { Bucket, BucketConnection } from "./bucket";
 import type { User } from "./user";
 
@@ -117,11 +117,23 @@ export function authorizeStreamRequest(stream: Stream, req: Request): AuthzDecis
     if (allowed) return { allowed: true, reason: "tailscale" };
   }
 
+  const exeDevEmail = req.headers.get(exeDevEmailHeader)?.trim();
+  if (exeDevEmail) {
+    const allowed = stream.users.some((user) => user.credentials.some((credential) =>
+      credential.type === "email" && credential.value.toLowerCase() === exeDevEmail.toLowerCase()
+    ));
+    if (allowed) return { allowed: true, reason: "exe" };
+  }
+
   const token = extractMedinaToken(req);
   if (!token) {
-    return tailscaleLogin
-      ? { allowed: false, message: `Tailscale user ${tailscaleLogin} is not allowed for this stream.`, reason: "tailscale-login-forbidden", status: 403 }
-      : { allowed: false, message: "Missing Medina token or Tailscale identity.", reason: "missing-token", status: 401 };
+    if (tailscaleLogin) {
+      return { allowed: false, message: `Tailscale user ${tailscaleLogin} is not allowed for this stream.`, reason: "tailscale-login-forbidden", status: 403 };
+    }
+    if (exeDevEmail) {
+      return { allowed: false, message: `exe.dev user ${exeDevEmail} is not allowed for this stream.`, reason: "exe-email-forbidden", status: 403 };
+    }
+    return { allowed: false, message: "Missing Medina token, Tailscale, or exe.dev identity.", reason: "missing-token", status: 401 };
   }
 
   for (const user of stream.users) {

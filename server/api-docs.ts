@@ -23,7 +23,7 @@ Everything else is stream-protected according to \`medina.config.ts\`. Token-cap
 - \`X-Medina-Token: <token>\`
 - \`?token=<token>\`
 
-Tailscale-protected streams accept the proxy identity headers configured by Tailscale Serve.
+Tailscale-protected streams accept the proxy identity headers configured by Tailscale Serve. exe.dev-proxied requests are also accepted when \`X-ExeDev-Email\` matches a stream user's \`email\` credential.
 
 ## Discovery and health JSON
 

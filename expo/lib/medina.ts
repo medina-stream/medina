@@ -49,7 +49,7 @@ export type IntervalSummary = {
 export type ServerStatus = {
   bucket_id: string | null;
   current_user: {
-    auth_method: "token" | "tailscale" | "agent";
+    auth_method: "token" | "tailscale" | "exe" | "agent";
     credentials: Array<{ type: string; value: string }>;
     profile_pic_url: string;
     username: string;

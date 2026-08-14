@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { isValidUser, userFromEnv, userFromRequest } from "./user";
-import { tailscaleUserLoginHeader } from "./authz";
+import { exeDevEmailHeader, tailscaleUserLoginHeader } from "./authz";
 
 test("returns the configured default user", () => {
   expect(userFromEnv({
@@ -55,6 +55,22 @@ test("links token authorization to the user that owns the token", () => {
     username: "default",
   }])).toMatchObject({
     auth_method: "token",
+    username: "default",
+  });
+});
+
+test("links exe.dev authorization by email credential", () => {
+  const request = new Request("https://example.test/recordings.json", {
+    headers: { [exeDevEmailHeader]: "owner@example.com" },
+  });
+
+  expect(userFromRequest(request, [{
+    credentials: [{ type: "email", value: "owner@example.com" }],
+    profile_pic_url: "/default-profile.jpg",
+    tokens: [],
+    username: "default",
+  }])).toMatchObject({
+    auth_method: "exe",
     username: "default",
   });
 });

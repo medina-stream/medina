@@ -12,7 +12,7 @@ MEDINA_TOKEN=replace-with-a-long-random-secret
 ```
 
 `MEDINA_ROOT` is the public URL/host expected by the default stream template. Requests for other hosts are rejected unless they are configured as aliases.
-`MEDINA_TOKEN` authenticates the default user through Bearer, Basic, or `X-Medina-Token` authentication.
+`MEDINA_TOKEN` authenticates the default user through Bearer, Basic, or `X-Medina-Token` authentication. When Medina is behind an exe.dev proxy, its `X-ExeDev-Email` header also authenticates a user whose `email` credential matches; see [exe.dev auth](./auth-exe.md).
 
 ```bash
 curl -u "default:$MEDINA_TOKEN" "$MEDINA_ROOT/status.json"

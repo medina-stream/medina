@@ -561,6 +561,32 @@ describe("stream-aware status and auth", () => {
     process.env = { ...originalEnv, DATA_DIR: testDataDir };
   });
 
+  test("reports a status user from exe.dev identity headers", async () => {
+    process.env = { ...originalEnv, DATA_DIR: testDataDir };
+    const apiModuleUrl = new URL(`./api.ts?status-exe-user-test=${Date.now()}-${Math.random()}`, import.meta.url).href;
+    const module = await import(apiModuleUrl);
+    module.streams.splice(0, module.streams.length, {
+      buckets: { default: { bucketName: "users", endpoint: "https://storage.example", region: "auto" } },
+      host: "localhost",
+      users: [{ ...testUser, credentials: [{ type: "email", value: "owner@example.com" }] }],
+    });
+
+    const response = await module.default.request("https://localhost/status.json", {
+      headers: { "X-ExeDev-Email": "Owner@Example.com" },
+    });
+
+    expect(response.status).toBe(200);
+    const status = await response.json() as { current_user: Record<string, unknown> };
+    expect(status).toMatchObject({
+      current_user: {
+        auth_method: "exe",
+        credentials: [{ type: "email", value: "owner@example.com" }],
+        username: "default",
+      },
+    });
+    expect(status.current_user).not.toHaveProperty("tokens");
+    process.env = { ...originalEnv, DATA_DIR: testDataDir };
+  });
   test("reports the default user when the token is sent with Basic auth", async () => {
     process.env = { ...originalEnv, DATA_DIR: testDataDir };
     const apiModuleUrl = new URL(`./api.ts?status-basic-user-test=${Date.now()}-${Math.random()}`, import.meta.url).href;

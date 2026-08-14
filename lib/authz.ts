@@ -2,6 +2,7 @@ export const medinaTokenHeader = "X-Medina-Token";
 export const tailscaleUserLoginHeader = "Tailscale-User-Login";
 export const tailscaleUserNameHeader = "Tailscale-User-Name";
 export const tailscaleUserProfilePicHeader = "Tailscale-User-Profile-Pic";
+export const exeDevEmailHeader = "X-ExeDev-Email";
 export const tailscaleAuthLoginsEnvVar = "MEDINA_TAILSCALE_AUTH_LOGINS";
 
 export type AuthMode = "public" | "token" | "token_or_tailscale" | "tailscale";
@@ -14,7 +15,7 @@ export type AuthPolicy = {
 
 export type AuthzDecision = {
   allowed: boolean;
-  reason: "public" | "token" | "tailscale" | "missing-token" | "bad-token" | "missing-tailscale-login" | "tailscale-login-forbidden" | "misconfigured-token";
+  reason: "public" | "token" | "tailscale" | "exe" | "missing-token" | "bad-token" | "missing-tailscale-login" | "tailscale-login-forbidden" | "exe-email-forbidden" | "misconfigured-token";
   status?: 401 | 403 | 500;
   message?: string;
 };

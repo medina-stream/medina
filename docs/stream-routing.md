@@ -38,3 +38,5 @@ API requests are authorized after stream selection. Tokens can be sent as:
 Authorization: Bearer your-token
 X-Medina-Token: your-token
 ```
+
+An exe.dev-proxied request may instead use the injected `X-ExeDev-Email` header when it matches a stream user's `email` credential. See [exe.dev auth](./auth-exe.md).
