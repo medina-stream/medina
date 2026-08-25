@@ -1,18 +1,9 @@
-import type { Hono } from "hono";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { readJson, writeJson } from "../lib/artifact";
-import { type IngestSummary, stream } from "../stream";
+import { writeJson, readJson } from "../lib/artifact";
+import { type Ingest } from "../lib/ingest";
+import { type IngestSummary, stream } from "../lib/stream";
 
-export type Ingest = {
-  id: string;
-  key: string;
-  filename: string;
-  contentType: string;
-  size: number;
-  receivedAt: string;
-  metadata: Record<string, string>;
-};
-export type Triage = IngestSummary & {
+export type TriageResult = IngestSummary & {
   receivedAt: string;
   detectedType: string;
   signals: string[];
@@ -45,11 +36,7 @@ function signals(ingest: Ingest, detectedType: string, hash: string) {
   return result;
 }
 
-function metadata(request: Request) {
-  return Object.fromEntries([...request.headers].filter(([name]) => name.startsWith("x-medina-")));
-}
-
-export class IngestWorkflow extends WorkflowEntrypoint<Env, Ingest> {
+export class Triage extends WorkflowEntrypoint<Env, Ingest> {
   async run(event: WorkflowEvent<Ingest>, step: WorkflowStep) {
     const triage = await step.do("triage ingest", async () => {
       const object = await this.env.ARTIFACTS.get(event.payload.key);
@@ -60,7 +47,7 @@ export class IngestWorkflow extends WorkflowEntrypoint<Env, Ingest> {
       const findings = signals(event.payload, detectedType, hash);
       const status = findings.includes("executable-name") || findings.includes("unsafe-filename") ? "retained" : "accepted";
       const triageKey = `triage/${event.payload.id}.json`;
-      const result: Triage = {
+      const result: TriageResult = {
         id: event.payload.id,
         filename: event.payload.filename,
         contentType: event.payload.contentType,
@@ -84,34 +71,10 @@ export class IngestWorkflow extends WorkflowEntrypoint<Env, Ingest> {
   }
 }
 
-export async function triageArtifact(env: Env, key: string) {
-  return readJson<Triage>(env.ARTIFACTS, key);
+export async function startTriage(env: Env, ingest: Ingest) {
+  return env.TRIAGE.create({ id: ingest.id, params: ingest });
 }
 
-export function mountTriageSdr(app: Hono<{ Bindings: Env }>) {
-  app.post("/ingests", async (c) => {
-    const body = await c.req.raw.arrayBuffer();
-    if (!body.byteLength) return c.json({ error: "ingest body is required" }, 400);
-    const ingest: Ingest = {
-      id: crypto.randomUUID(),
-      key: "",
-      filename: c.req.header("x-medina-filename") ?? "upload.bin",
-      contentType: c.req.header("content-type") ?? "application/octet-stream",
-      size: body.byteLength,
-      receivedAt: new Date().toISOString(),
-      metadata: metadata(c.req.raw),
-    };
-    ingest.key = `in/${ingest.id}`;
-    await c.env.ARTIFACTS.put(ingest.key, body, {
-      httpMetadata: { contentType: ingest.contentType },
-      customMetadata: { filename: ingest.filename, receivedAt: ingest.receivedAt },
-    });
-    const instance = await c.env.INGEST.create({ id: ingest.id, params: ingest });
-    return c.json({ id: instance.id, key: ingest.key, status: "triage-pending" }, 202);
-  });
-
-  app.get("/ingests/:id", async (c) => {
-    const triage = await triageArtifact(c.env, `triage/${c.req.param("id")}.json`);
-    return triage ? c.json(triage) : c.json({ error: "Unknown ingest." }, 404);
-  });
+export async function triageArtifact(env: Env, key: string) {
+  return readJson<TriageResult>(env.ARTIFACTS, key);
 }

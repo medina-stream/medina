@@ -8,8 +8,5 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Stream"] }],
   "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "medina-artifacts" }],
-  "workflows": [
-    { "name": "medina-directory-refresh", "binding": "DIRECTORY_REFRESH", "class_name": "DirectoryRefreshWorkflow" },
-    { "name": "medina-ingest", "binding": "INGEST", "class_name": "IngestWorkflow" }
-  ]
+  "workflows": [{ "name": "medina-triage", "binding": "TRIAGE", "class_name": "Triage" }]
 }

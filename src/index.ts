@@ -1,33 +1,53 @@
 import { Hono } from "hono";
-import { directoryArtifact, directorySource, mountDirectorySdr } from "./sdr/directory";
-import { mountTriageSdr, triageArtifact } from "./sdr/triage";
-import { stream } from "./stream";
+import { createIngest } from "../lib/ingest";
+import { stream } from "../lib/stream";
+import { GdriveSource, ingestGdriveFile } from "../resources/GdriveSource";
+import { startTriage, triageArtifact } from "../resources/Triage";
 
 const app = new Hono<{ Bindings: Env }>();
 
+function metadata(request: Request) {
+  return Object.fromEntries([...request.headers].filter(([name]) => name.startsWith("x-medina-")));
+}
+
 app.get("/", async (c) => {
-  const state = await stream(c.env).state();
-  if (state.ingests.last) return c.json(await triageArtifact(c.env, state.ingests.last.triageKey));
-  const source = await directorySource(c.env);
-  if (!source.head) return c.json({ product: null, message: "No artifact yet." });
-  return c.json(await directoryArtifact(c.env, source.head));
+  const last = (await stream(c.env).state()).ingests.last;
+  return c.json(last ? await triageArtifact(c.env, last.triageKey) : { product: null, message: "No triaged ingest yet." });
 });
 
 app.get("/state", async (c) => c.json(await stream(c.env).state()));
 
-mountDirectorySdr(app);
-mountTriageSdr(app);
+app.get("/sources/gdrive", (c) => c.json(GdriveSource));
 
-app.get("/workflows/:id", async (c) => {
-  const id = c.req.param("id");
-  const ingest = await c.env.INGEST.get(id);
-  const status = await ingest.status();
-  if (status.status !== "unknown") return c.json(status);
-  const refresh = await c.env.DIRECTORY_REFRESH.get(id);
-  return c.json(await refresh.status());
+app.post("/ingests", async (c) => {
+  const body = await c.req.raw.arrayBuffer();
+  if (!body.byteLength) return c.json({ error: "ingest body is required" }, 400);
+  const ingest = await createIngest(c.env, body, {
+    filename: c.req.header("x-medina-filename") ?? "upload.bin",
+    contentType: c.req.header("content-type") ?? "application/octet-stream",
+    metadata: metadata(c.req.raw),
+  });
+  const workflow = await startTriage(c.env, ingest);
+  return c.json({ id: workflow.id, key: ingest.key, status: "triage-pending" }, 202);
 });
 
-export { DirectoryRefreshWorkflow } from "./sdr/directory";
-export { IngestWorkflow } from "./sdr/triage";
-export { Stream } from "./stream";
+app.post("/sources/gdrive", async (c) => {
+  const body = await c.req.raw.arrayBuffer();
+  if (!body.byteLength) return c.json({ error: "ingest body is required" }, 400);
+  return c.json(await ingestGdriveFile(c.env, body, {
+    filename: c.req.header("x-medina-filename") ?? "upload.bin",
+    contentType: c.req.header("content-type") ?? "application/octet-stream",
+    metadata: { ...metadata(c.req.raw), "x-medina-source": "gdrive" },
+  }), 202);
+});
+
+app.get("/ingests/:id", async (c) => {
+  const triage = await triageArtifact(c.env, `triage/${c.req.param("id")}.json`);
+  return triage ? c.json(triage) : c.json({ error: "Unknown ingest." }, 404);
+});
+
+app.get("/workflows/:id", async (c) => c.json(await (await c.env.TRIAGE.get(c.req.param("id"))).status()));
+
+export { Stream } from "../lib/stream";
+export { Triage } from "../resources/Triage";
 export default app;
