@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
-    "start": "wrangler dev --local",
-    "dev": "wrangler dev --local",
+    "start": "wrangler dev --local --test-scheduled",
+    "dev": "wrangler dev --local --test-scheduled",
     "cf-typegen": "wrangler types"
   },
   "devDependencies": {

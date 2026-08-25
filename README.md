@@ -1,26 +1,20 @@
 # Medina rethink
 
-A single-stream Hono Worker built from small Resources:
+A single-stream Worker that progressively turns Drive files into durable artifacts:
 
 ```text
-Google Drive source → raw ingest → Triage → immutable R2 artifacts → Stream head → product
+hourly schedule → GdriveSource → Stream candidate queue → direct R2 download → Triage → product
 ```
 
-- [`resources/GdriveSource.ts`](./resources/GdriveSource.ts) is a source Resource. The external hourly sync downloads one Drive file and posts its bytes here; the Resource creates a raw `in/<id>` artifact and starts Triage.
-- [`resources/Triage.ts`](./resources/Triage.ts) is a derived Resource. It hashes and inspects the raw artifact, writes `triage/<id>.json`, then accepts or retains it in the Stream.
-- [`src/index.ts`](./src/index.ts) is only the Hono/HTTP adapter and Worker entrypoint.
-- [`lib/`](./lib/) owns shared artifact, ingest, and Stream mechanics.
+- [`resources/GdriveSource.ts`](./resources/GdriveSource.ts) lists Drive metadata, records new file versions in the Stream DO, claims the newest candidate, and downloads it straight to R2.
+- [`resources/Triage.ts`](./resources/Triage.ts) hashes and inspects raw ingests, writes `triage/<id>.json`, then accepts or retains them in the Stream.
+- [`server/index.ts`](./server/index.ts) is a read-only Hono app plus the scheduled Worker handler.
+- [`lib/`](./lib/) owns Drive API, artifact, ingest, and Stream mechanics.
 
-```sh
-curl -X POST http://127.0.0.1:8000/sources/gdrive \
-  -H 'content-type: audio/mp4' \
-  -H 'x-medina-filename: voice-note.m4a' \
-  --data-binary @voice-note.m4a
-```
+The Stream DO stores only compact Drive observations and ingest state. R2 stores raw bytes and immutable result artifacts. The hourly cron starts `GdriveSource`; no Medina HTTP upload routes exist.
 
-- `POST /sources/gdrive` creates an ingest from Drive provenance and starts Triage.
-- `POST /ingests` starts Triage for a generic raw upload.
-- `GET /ingests/:id` reads the triage artifact.
-- `GET /` displays the last triaged ingest; `GET /state` displays compact Stream state.
+- `GET /` displays the last triaged ingest.
+- `GET /state` displays the Stream’s candidates and ingest state.
+- `GET /ingests/:id` reads a triage artifact.
 
-The Google Drive sync operator and one-hour systemd timer live separately in `/home/exedev/medina-ops`.
+For local development, `npm run dev` enables Wrangler’s `GET /__scheduled` test route. No VM sync process is active.

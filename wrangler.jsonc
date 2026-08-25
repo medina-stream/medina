@@ -8,5 +8,14 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Stream"] }],
   "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "medina-artifacts" }],
-  "workflows": [{ "name": "medina-triage", "binding": "TRIAGE", "class_name": "Triage" }]
+  "workflows": [
+    { "name": "medina-gdrive-source", "binding": "GDRIVE_SOURCE", "class_name": "GdriveSource" },
+    { "name": "medina-gdrive-ingest", "binding": "GDRIVE_INGEST", "class_name": "GdriveIngest" },
+    { "name": "medina-triage", "binding": "TRIAGE", "class_name": "Triage" }
+  ],
+  "triggers": { "crons": ["0 * * * *"] },
+  "vars": {
+    "GOOGLE_TOKEN_URL": "https://googlesa-sco-lifelogtest.int.exe.xyz/token",
+    "GDRIVE_FOLDER_ID": "1jPV5VAlHuU-9FtGewJZPqDM5ekoKgG5q"
+  }
 }

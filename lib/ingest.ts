@@ -8,14 +8,16 @@ export type Ingest = {
   metadata: Record<string, string>;
 };
 
-type IngestAttributes = Omit<Ingest, "id" | "key" | "size" | "receivedAt">;
+type IngestAttributes = Omit<Ingest, "id" | "key" | "size" | "receivedAt"> & { id?: string; size?: number };
 
-export async function createIngest(env: Env, body: ArrayBuffer, attributes: IngestAttributes): Promise<Ingest> {
+export async function createIngest(env: Env, body: ArrayBuffer | ReadableStream<Uint8Array>, attributes: IngestAttributes): Promise<Ingest> {
   const ingest: Ingest = {
-    ...attributes,
-    id: crypto.randomUUID(),
+    filename: attributes.filename,
+    contentType: attributes.contentType,
+    metadata: attributes.metadata,
+    id: attributes.id ?? crypto.randomUUID(),
     key: "",
-    size: body.byteLength,
+    size: attributes.size ?? 0,
     receivedAt: new Date().toISOString(),
   };
   ingest.key = `in/${ingest.id}`;
