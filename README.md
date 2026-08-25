@@ -14,4 +14,4 @@ hourly schedule → GdriveSource → Stream candidate queue → direct R2 downlo
 
 The public API is only `GET /`, which serves Root summaries. Internal triage artifacts, Stream scheduling state, workflow state, and bucket inspection have no public routes.
 
-For local development, `npm run dev` enables Wrangler’s `GET /__scheduled` test route. No VM sync process is active.
+No VM sync process is active. Local cron behavior can be exercised with a separate temporary Wrangler test session; it is not exposed by the running app.
