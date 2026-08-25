@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "medina-workers-rethink",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-25",
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "STREAM", "class_name": "Stream" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Stream"] }
+  ],
+  "workflows": [
+    {
+      "name": "medina-materialize",
+      "binding": "MATERIALIZE",
+      "class_name": "MaterializeWorkflow"
+    }
+  ],
+  "upload_source_maps": true
+}
