@@ -21,9 +21,9 @@ async function google(env: Env, path: string) {
   return response;
 }
 
-export async function listDriveFiles(env: Env) {
+export async function listDriveFiles(env: Env, folderId: string) {
   const query = new URLSearchParams({
-    q: `'${env.GDRIVE_FOLDER_ID}' in parents and trashed = false`,
+    q: `'${folderId}' in parents and trashed = false`,
     orderBy: "modifiedTime desc",
     pageSize: "100",
     fields: "files(id,name,mimeType,modifiedTime,md5Checksum,size)",

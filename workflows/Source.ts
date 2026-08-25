@@ -2,25 +2,26 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import { downloadDriveFile, listDriveFiles } from "../lib/gdrive";
 import { createIngest } from "../lib/ingest";
 import { stream } from "../lib/stream";
-import { startTriage } from "./Triage";
+import type { Source } from "../resources/EasyVoice";
+import { startTriage } from "../resources/Triage";
 
-export class GdriveSource extends WorkflowEntrypoint<Env, Record<string, never>> {
-  async run(_event: WorkflowEvent<Record<string, never>>, step: WorkflowStep) {
-    const files = await step.do("discover Drive files", () => listDriveFiles(this.env));
-    await step.do("observe Drive files", async () => {
+export class SourceRefresh extends WorkflowEntrypoint<Env, Source> {
+  async run(event: WorkflowEvent<Source>, step: WorkflowStep) {
+    const files = await step.do("discover source", () => listDriveFiles(this.env, event.payload.folderId));
+    await step.do("observe source", async () => {
       const result = await stream(this.env).observeDrive(files);
       return { observed: result.observed, pending: result.pending };
     });
-    return step.do("start download", async () => {
-      const instance = await this.env.GDRIVE_INGEST.create({ params: {} });
+    return step.do("start ingest", async () => {
+      const instance = await this.env.SOURCE_INGEST.create({ params: event.payload });
       return { id: instance.id };
     });
   }
 }
 
-export class GdriveIngest extends WorkflowEntrypoint<Env, Record<string, never>> {
-  async run(_event: WorkflowEvent<Record<string, never>>, step: WorkflowStep) {
-    const candidate = await step.do("claim Drive file", async () => {
+export class SourceIngest extends WorkflowEntrypoint<Env, Source> {
+  async run(event: WorkflowEvent<Source>, step: WorkflowStep) {
+    const candidate = await step.do("claim source file", async () => {
       const claimed = await stream(this.env).claimDrive();
       if (!claimed) return null;
       return {
@@ -35,16 +36,16 @@ export class GdriveIngest extends WorkflowEntrypoint<Env, Record<string, never>>
     });
     if (!candidate) return { status: "idle" };
 
-    return step.do("download Drive file", async () => {
+    return step.do("download source file", async () => {
       const response = await downloadDriveFile(this.env, candidate.id);
-      if (!response.body) throw new Error(`Drive file ${candidate.id} has no body`);
+      if (!response.body) throw new Error(`Source file ${candidate.id} has no body`);
       const ingest = await createIngest(this.env, response.body, {
-        id: `gdrive-${candidate.id}-${(candidate.md5Checksum ?? candidate.modifiedTime).replace(/[^a-zA-Z0-9_-]/g, "")}`,
+        id: `${event.payload.name}-${candidate.id}-${(candidate.md5Checksum ?? candidate.modifiedTime).replace(/[^a-zA-Z0-9_-]/g, "")}`,
         filename: candidate.name,
         contentType: candidate.mimeType,
         size: Number(candidate.size ?? 0),
         metadata: {
-          "x-medina-source": "gdrive",
+          "x-medina-source": event.payload.name,
           "x-medina-gdrive-id": candidate.id,
           "x-medina-gdrive-modified-at": candidate.modifiedTime,
         },

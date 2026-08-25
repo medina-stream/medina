@@ -6,7 +6,8 @@ A single-stream Worker that progressively turns Drive files into a compact publi
 hourly schedule → GdriveSource → Stream candidate queue → direct R2 download → Triage → Root
 ```
 
-- [`resources/GdriveSource.ts`](./resources/GdriveSource.ts) lists Drive metadata, records new file versions in the Stream DO, claims the newest candidate, and downloads it straight to R2.
+- [`resources/EasyVoice.ts`](./resources/EasyVoice.ts) is the tiny source declaration: a name, provider, and Drive folder ID.
+- [`workflows/Source.ts`](./workflows/Source.ts) is the generic source refresh/ingest machinery: discover, observe, claim, and download.
 - [`resources/Triage.ts`](./resources/Triage.ts) hashes and inspects raw ingests, writing private `triage/<id>.json` artifacts.
 - [`resources/Root.ts`](./resources/Root.ts) turns accepted triages into compact public summaries and publishes `root/<generation>.json`.
 - [`server/index.ts`](./server/index.ts) is a read-only Hono app plus the scheduled Worker handler.
