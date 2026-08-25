@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "medina-rethink",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-25",
+  "durable_objects": {
+    "bindings": [{ "name": "STREAM", "class_name": "Stream" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Stream"] }],
+  "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "medina-artifacts" }],
+  "workflows": [{ "name": "medina-ingest", "binding": "INGEST", "class_name": "IngestWorkflow" }]
+}
