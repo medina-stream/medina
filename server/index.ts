@@ -1,23 +1,17 @@
 import { Hono } from "hono";
 import { stream } from "../lib/stream";
-import { triageArtifact } from "../resources/Triage";
+import { rootArtifact } from "../resources/Root";
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/", async (c) => {
-  const last = (await stream(c.env).state()).ingests.last;
-  return c.json(last ? await triageArtifact(c.env, last.triageKey) : { product: null, message: "No triaged ingest yet." });
-});
-
-app.get("/state", async (c) => c.json(await stream(c.env).state()));
-
-app.get("/ingests/:id", async (c) => {
-  const triage = await triageArtifact(c.env, `triage/${c.req.param("id")}.json`);
-  return triage ? c.json(triage) : c.json({ error: "Unknown ingest." }, 404);
+  const head = (await stream(c.env).state()).root.head;
+  return c.json(head ? await rootArtifact(c.env, head.key) : { items: [] });
 });
 
 export { Stream } from "../lib/stream";
 export { GdriveSource, GdriveIngest } from "../resources/GdriveSource";
+export { Root } from "../resources/Root";
 export { Triage } from "../resources/Triage";
 export default {
   fetch: app.fetch,

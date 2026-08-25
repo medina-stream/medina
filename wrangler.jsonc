@@ -11,7 +11,8 @@
   "workflows": [
     { "name": "medina-gdrive-source", "binding": "GDRIVE_SOURCE", "class_name": "GdriveSource" },
     { "name": "medina-gdrive-ingest", "binding": "GDRIVE_INGEST", "class_name": "GdriveIngest" },
-    { "name": "medina-triage", "binding": "TRIAGE", "class_name": "Triage" }
+    { "name": "medina-triage", "binding": "TRIAGE", "class_name": "Triage" },
+    { "name": "medina-root", "binding": "ROOT", "class_name": "Root" }
   ],
   "triggers": { "crons": ["0 * * * *"] },
   "vars": {

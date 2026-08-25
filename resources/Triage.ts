@@ -66,7 +66,8 @@ export class Triage extends WorkflowEntrypoint<Env, Ingest> {
     });
     return step.do("route triage", async () => {
       const summary = await stream(this.env).commitTriage(triage);
-      return { id: summary.id, status: summary.status, triageKey: summary.triageKey };
+      const root = summary.status === "accepted" ? await this.env.ROOT.create({ id: summary.id, params: { triageKey: summary.triageKey } }) : null;
+      return { id: summary.id, status: summary.status, triageKey: summary.triageKey, rootId: root?.id ?? null };
     });
   }
 }

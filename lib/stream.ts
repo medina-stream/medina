@@ -20,15 +20,27 @@ type DriveCandidate = DriveFile & {
   ingestId: string | null;
 };
 
+export type RootItem = {
+  triageId: string;
+  kind: string;
+  durationSeconds: number | null;
+  start: { at: string; confidence: number; basis: string } | null;
+  source: string;
+};
+
+type RootState = { generation: number; items: RootItem[]; head: { key: string; generation: number } | null };
+
 type StreamState = {
   ingests: { count: number; accepted: number; retained: number; last: IngestSummary | null };
   gdrive: { lastObservedAt: string | null; candidates: DriveCandidate[] };
+  root: RootState;
 };
 
 function initialState(): StreamState {
   return {
     ingests: { count: 0, accepted: 0, retained: 0, last: null },
     gdrive: { lastObservedAt: null, candidates: [] },
+    root: { generation: 0, items: [], head: null },
   };
 }
 
@@ -42,6 +54,7 @@ export class Stream extends DurableObject<Env> {
     return {
       ingests: { ...initialState().ingests, ...stored?.ingests },
       gdrive: { ...initialState().gdrive, ...stored?.gdrive },
+      root: { ...initialState().root, ...stored?.root },
     };
   }
 
@@ -90,6 +103,22 @@ export class Stream extends DurableObject<Env> {
       candidate.candidateId === candidateId ? { ...candidate, status: "ingested" as const, leaseExpiresAt: null, ingestId } : candidate,
     );
     await this.ctx.storage.put("state", { ...state, gdrive: { ...state.gdrive, candidates } });
+  }
+
+  async prepareRoot(item: RootItem) {
+    const state = await this.state();
+    const items = [item, ...state.root.items.filter((current) => current.triageId !== item.triageId)].slice(0, 100);
+    const root = { ...state.root, generation: state.root.generation + 1, items };
+    await this.ctx.storage.put("state", { ...state, root });
+    return { generation: root.generation, items: root.items };
+  }
+
+  async commitRoot(generation: number, key: string) {
+    const state = await this.state();
+    if (generation < state.root.generation) return state.root.head;
+    const root = { ...state.root, head: { key, generation } };
+    await this.ctx.storage.put("state", { ...state, root });
+    return root.head;
   }
 
   async commitTriage(summary: IngestSummary): Promise<IngestSummary> {
