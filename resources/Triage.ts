@@ -1,3 +1,4 @@
+import { startAssemblyAITranscript } from "./AssemblyAITranscript";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { writeJson, readJson } from "../lib/artifact";
 import { type Ingest } from "../lib/ingest";
@@ -66,8 +67,9 @@ export class Triage extends WorkflowEntrypoint<Env, Ingest> {
     });
     return step.do("route triage", async () => {
       const summary = await stream(this.env).commitTriage(triage);
+      const transcript = summary.status === "accepted" && summary.contentType.startsWith("audio/") ? await startAssemblyAITranscript(this.env, event.payload) : null;
       const root = summary.status === "accepted" ? await this.env.ROOT.create({ id: summary.id, params: { triageKey: summary.triageKey } }) : null;
-      return { id: summary.id, status: summary.status, triageKey: summary.triageKey, rootId: root?.id ?? null };
+      return { id: summary.id, status: summary.status, triageKey: summary.triageKey, transcriptId: transcript?.id ?? null, rootId: root?.id ?? null };
     });
   }
 }

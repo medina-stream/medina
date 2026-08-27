@@ -13,6 +13,7 @@ app.get("/", async (c) => {
 });
 
 export { Stream } from "../lib/stream";
+export { AssemblyAITranscript } from "../resources/AssemblyAITranscript";
 export { Root } from "../resources/Root";
 export { Triage } from "../resources/Triage";
 export { SourceIngest, SourceRefresh } from "../workflows/Source";
