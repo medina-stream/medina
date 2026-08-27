@@ -3,6 +3,7 @@ import { readJson, writeJson } from "../lib/artifact";
 import { createAssemblyAITranscript, getAssemblyAITranscript, uploadToAssemblyAI, type AssemblyAITranscript as AssemblyAITranscriptResponse } from "../lib/assemblyai";
 import type { Ingest } from "../lib/ingest";
 import { stream } from "../lib/stream";
+import { startJournal } from "./Journal";
 
 const VERSION = "assemblyai-u35p-v1";
 
@@ -130,6 +131,7 @@ export class AssemblyAITranscript extends WorkflowEntrypoint<Env, Ingest> {
           transcriptKey: key.result,
           completedAt: normalized.completedAt,
         });
+        await startJournal(this.env, journalDay(ingest), true);
       }
       return normalized;
     });

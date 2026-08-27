@@ -18,7 +18,7 @@ export type JournalResult = {
   report: string;
 };
 
-type JournalRequest = { day: string };
+type JournalRequest = { day: string; settle?: boolean };
 type TranscriptText = JournalTranscript & { text: string };
 
 function assertDay(day: string) {
@@ -86,6 +86,7 @@ export class Journal extends WorkflowEntrypoint<Env, JournalRequest> {
   async run(event: WorkflowEvent<JournalRequest>, step: WorkflowStep) {
     const { day } = event.payload;
     assertDay(day);
+    if (event.payload.settle) await step.sleep("allow transcript burst to settle", "5 minutes");
     const inputs = await step.do("find journal inputs", async () => {
       const transcripts = await stream(this.env).journalTranscripts(day);
       return { transcripts, inputHash: await hash(transcripts.map((transcript) => transcript.transcriptKey).join("\n")) };
@@ -114,8 +115,13 @@ export class Journal extends WorkflowEntrypoint<Env, JournalRequest> {
   }
 }
 
-export function startJournal(env: Env, day: string) {
-  return env.JOURNAL.create({ params: { day } });
+export async function startJournal(env: Env, day: string, settle = false) {
+  try {
+    return await env.JOURNAL.create({ id: settle ? `journal-live-${day}` : undefined, params: { day, settle } });
+  } catch (error) {
+    if (settle && error instanceof Error && /already exists/i.test(error.message)) return null;
+    throw error;
+  }
 }
 
 export function journalArtifact(env: Env, key: string) {

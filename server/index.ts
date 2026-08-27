@@ -33,6 +33,10 @@ function page(journals: JournalResult[]) {
 </style></head><body><header><h1>Journal</h1><p>Daily reports from available Medina artifacts.</p></header><main>${sections}</main></body></html>`;
 }
 
+function utcDay(now = new Date()) {
+  return now.toISOString().slice(0, 10);
+}
+
 function utcDayBefore(now = new Date()) {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1)).toISOString().slice(0, 10);
 }
@@ -60,6 +64,7 @@ export default {
       ctx.waitUntil(reconcileJournals(env));
       return;
     }
+    ctx.waitUntil(startJournal(env, utcDay(), true));
     ctx.waitUntil(env.SOURCE_RUN.create({ params: EasyVoice(env) }));
   },
 };
