@@ -3,8 +3,7 @@
 A single-stream Worker that progressively turns Drive files into a compact public root artifact:
 
 ```text
-hourly schedule → GdriveSource → Stream candidate queue → direct R2 download → Triage ┬→ AssemblyAITranscript → Journal (on demand, per day)
-                                                                              └→ Root
+hourly schedule → SourceRun → ProcessIngest → inspect → AssemblyAITranscript → JournalDay
 ```
 
 - [`resources/EasyVoice.ts`](./resources/EasyVoice.ts) is the tiny source declaration: a name, provider, and Drive folder ID.
@@ -12,7 +11,6 @@ hourly schedule → GdriveSource → Stream candidate queue → direct R2 downlo
 - [`resources/Triage.ts`](./resources/Triage.ts) hashes and inspects raw ingests, writing private `triage/<id>.json` artifacts.
 - [`resources/AssemblyAITranscript.ts`](./resources/AssemblyAITranscript.ts) turns accepted audio ingests into normalized speaker-attributed transcripts, retaining the private vendor response alongside the Medina result.
 - [`resources/Journal.ts`](./resources/Journal.ts) creates a versioned LLM report for one calendar day from the transcript artifacts currently indexed by Stream.
-- [`resources/Root.ts`](./resources/Root.ts) turns accepted triages into compact public summaries and publishes `root/<generation>.json`.
 - [`server/index.ts`](./server/index.ts) is a read-only Hono app plus the scheduled Worker handler.
 - [`lib/`](./lib/) owns Drive API, artifact, ingest, and Stream mechanics.
 

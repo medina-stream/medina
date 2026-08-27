@@ -2,9 +2,8 @@ import { Hono } from "hono";
 import { stream } from "../lib/stream";
 import { EasyVoice } from "../resources/EasyVoice";
 import { Journal, journalArtifact, startJournal, type JournalResult } from "../resources/Journal";
-import { Root } from "../resources/Root";
-import { Triage } from "../resources/Triage";
-import { SourceIngest, SourceRefresh } from "../workflows/Source";
+import { SourceRun } from "../workflows/Source";
+import { ProcessIngest } from "../workflows/Process";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -52,9 +51,8 @@ app.get("/", async (c) => {
 export { Stream } from "../lib/stream";
 export { AssemblyAITranscript } from "../resources/AssemblyAITranscript";
 export { Journal } from "../resources/Journal";
-export { Root } from "../resources/Root";
-export { Triage } from "../resources/Triage";
-export { SourceIngest, SourceRefresh } from "../workflows/Source";
+export { ProcessIngest } from "../workflows/Process";
+export { SourceRun } from "../workflows/Source";
 export default {
   fetch: app.fetch,
   scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => {
@@ -62,6 +60,6 @@ export default {
       ctx.waitUntil(reconcileJournals(env));
       return;
     }
-    ctx.waitUntil(env.SOURCE_REFRESH.create({ params: EasyVoice(env) }));
+    ctx.waitUntil(env.SOURCE_RUN.create({ params: EasyVoice(env) }));
   },
 };

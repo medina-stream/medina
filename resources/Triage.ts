@@ -1,10 +1,15 @@
-import { startAssemblyAITranscript } from "./AssemblyAITranscript";
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { writeJson, readJson } from "../lib/artifact";
-import { type Ingest } from "../lib/ingest";
-import { type IngestSummary, stream } from "../lib/stream";
+import { readJson, writeJson } from "../lib/artifact";
+import type { Ingest } from "../lib/ingest";
 
-export type TriageResult = IngestSummary & {
+export type TriageResult = {
+  id: string;
+  filename: string;
+  contentType: string;
+  size: number;
+  hash: string;
+  triageKey: string;
+  status: "accepted" | "retained";
+  triagedAt: string;
   receivedAt: string;
   detectedType: string;
   signals: string[];
@@ -27,57 +32,24 @@ function detectType(bytes: Uint8Array, declared: string) {
   return declared || "application/octet-stream";
 }
 
-function signals(ingest: Ingest, detectedType: string, hash: string) {
-  const result: string[] = [];
-  if (ingest.size === 0) result.push("empty");
-  if (/\.(exe|dll|bat|cmd|sh|ps1)$/i.test(ingest.filename)) result.push("executable-name");
-  if (ingest.filename.includes("..") || /[\\/]/.test(ingest.filename)) result.push("unsafe-filename");
-  if (ingest.contentType && ingest.contentType !== "application/octet-stream" && ingest.contentType !== detectedType) result.push("declared-type-mismatch");
-  if (/^0+$/.test(hash)) result.push("impossible-hash");
+export async function inspectIngest(env: Env, ingest: Ingest): Promise<TriageResult> {
+  const object = await env.ARTIFACTS.get(ingest.key);
+  if (!object) throw new Error(`Missing ingest artifact ${ingest.key}`);
+  const body = await object.arrayBuffer();
+  const hash = hex(await crypto.subtle.digest("SHA-256", body));
+  const detectedType = detectType(new Uint8Array(body), ingest.contentType);
+  const signals: string[] = [];
+  if (ingest.size === 0) signals.push("empty");
+  if (/\.(exe|dll|bat|cmd|sh|ps1)$/i.test(ingest.filename)) signals.push("executable-name");
+  if (ingest.filename.includes("..") || /[\\/]/.test(ingest.filename)) signals.push("unsafe-filename");
+  if (ingest.contentType && ingest.contentType !== "application/octet-stream" && ingest.contentType !== detectedType) signals.push("declared-type-mismatch");
+  const status = signals.includes("executable-name") || signals.includes("unsafe-filename") ? "retained" : "accepted";
+  const triageKey = `triage/${ingest.id}.json`;
+  const result: TriageResult = { id: ingest.id, filename: ingest.filename, contentType: ingest.contentType, size: ingest.size, hash, triageKey, status, triagedAt: new Date().toISOString(), receivedAt: ingest.receivedAt, detectedType, signals, metadata: ingest.metadata };
+  await writeJson(env.ARTIFACTS, triageKey, result);
   return result;
 }
 
-export class Triage extends WorkflowEntrypoint<Env, Ingest> {
-  async run(event: WorkflowEvent<Ingest>, step: WorkflowStep) {
-    const triage = await step.do("triage ingest", async () => {
-      const object = await this.env.ARTIFACTS.get(event.payload.key);
-      if (!object) throw new Error(`Missing ingest artifact ${event.payload.key}`);
-      const body = await object.arrayBuffer();
-      const hash = hex(await crypto.subtle.digest("SHA-256", body));
-      const detectedType = detectType(new Uint8Array(body), event.payload.contentType);
-      const findings = signals(event.payload, detectedType, hash);
-      const status = findings.includes("executable-name") || findings.includes("unsafe-filename") ? "retained" : "accepted";
-      const triageKey = `triage/${event.payload.id}.json`;
-      const result: TriageResult = {
-        id: event.payload.id,
-        filename: event.payload.filename,
-        contentType: event.payload.contentType,
-        size: event.payload.size,
-        hash,
-        triageKey,
-        status,
-        triagedAt: new Date().toISOString(),
-        receivedAt: event.payload.receivedAt,
-        detectedType,
-        signals: findings,
-        metadata: event.payload.metadata,
-      };
-      await writeJson(this.env.ARTIFACTS, triageKey, result);
-      return result;
-    });
-    return step.do("route triage", async () => {
-      const summary = await stream(this.env).commitTriage(triage);
-      const transcript = summary.status === "accepted" && summary.contentType.startsWith("audio/") ? await startAssemblyAITranscript(this.env, event.payload) : null;
-      const root = summary.status === "accepted" ? await this.env.ROOT.create({ id: summary.id, params: { triageKey: summary.triageKey } }) : null;
-      return { id: summary.id, status: summary.status, triageKey: summary.triageKey, transcriptId: transcript?.id ?? null, rootId: root?.id ?? null };
-    });
-  }
-}
-
-export async function startTriage(env: Env, ingest: Ingest) {
-  return env.TRIAGE.create({ id: ingest.id, params: ingest });
-}
-
-export async function triageArtifact(env: Env, key: string) {
+export function triageArtifact(env: Env, key: string) {
   return readJson<TriageResult>(env.ARTIFACTS, key);
 }
