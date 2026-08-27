@@ -16,7 +16,7 @@ hourly schedule → GdriveSource → Stream candidate queue → direct R2 downlo
 - [`server/index.ts`](./server/index.ts) is a read-only Hono app plus the scheduled Worker handler.
 - [`lib/`](./lib/) owns Drive API, artifact, ingest, and Stream mechanics.
 
-The public API is only `GET /`, which serves Root summaries. Internal triage artifacts, Stream scheduling state, workflow state, and bucket inspection have no public routes.
+The public app is only `GET /`, which renders indexed Journal reports. Internal artifacts, Stream scheduling state, workflow state, and bucket inspection have no public routes.
 
 No VM sync process is active. Local cron behavior can be exercised with a separate temporary Wrangler test session; it is not exposed by the running app.
 

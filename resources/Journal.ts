@@ -108,6 +108,7 @@ export class Journal extends WorkflowEntrypoint<Env, JournalRequest> {
         report,
       };
       await writeJson(this.env.ARTIFACTS, key, result);
+      await stream(this.env).recordJournalReport({ day, journalKey: key, generatedAt: result.generatedAt });
       return result;
     });
   }
@@ -115,4 +116,8 @@ export class Journal extends WorkflowEntrypoint<Env, JournalRequest> {
 
 export function startJournal(env: Env, day: string) {
   return env.JOURNAL.create({ params: { day } });
+}
+
+export function journalArtifact(env: Env, key: string) {
+  return readJson<JournalResult>(env.ARTIFACTS, key);
 }
