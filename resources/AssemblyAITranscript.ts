@@ -3,7 +3,7 @@ import { readJson, writeJson } from "../lib/artifact";
 import { createAssemblyAITranscript, getAssemblyAITranscript, uploadToAssemblyAI, type AssemblyAITranscript as AssemblyAITranscriptResponse } from "../lib/assemblyai";
 import type { Ingest } from "../lib/ingest";
 
-const VERSION = "assemblyai-v1";
+const VERSION = "assemblyai-u35p-v1";
 
 export type TranscriptUtterance = {
   speaker: string | null;
@@ -92,7 +92,7 @@ export class AssemblyAITranscript extends WorkflowEntrypoint<Env, Ingest> {
     const submitted = await step.do("submit AssemblyAI transcript", () =>
       createAssemblyAITranscript(this.env, {
         audio_url: uploadUrl,
-        speech_models: ["universal-3-pro", "universal-2"],
+        speech_models: ["universal-3-5-pro"],
         speaker_labels: true,
         language_detection: true,
       }),

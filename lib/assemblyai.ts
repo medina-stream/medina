@@ -16,7 +16,7 @@ export type AssemblyAITranscript = {
 
 type CreateTranscript = {
   audio_url: string;
-  speech_models: ["universal-3-pro", "universal-2"];
+  speech_models: ["universal-3-5-pro"];
   speaker_labels: boolean;
   language_detection: boolean;
 };
