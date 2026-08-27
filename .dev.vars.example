@@ -3,3 +3,4 @@
 ASSEMBLYAI_API_URL=https://assemblyai.int.exe.xyz
 JOURNAL_LLM_API_URL=https://llm.int.exe.xyz/v1
 JOURNAL_LLM_MODEL=gpt-5.6-sol
+DEV_SOURCE_LIMIT=6

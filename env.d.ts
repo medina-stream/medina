@@ -5,4 +5,5 @@ interface Env {
   JOURNAL_LLM_API_URL?: string;
   JOURNAL_LLM_MODEL?: string;
   JOURNAL_LLM_API_KEY?: string;
+  DEV_SOURCE_LIMIT?: string;
 }
