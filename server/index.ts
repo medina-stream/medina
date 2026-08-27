@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { stream } from "../lib/stream";
 import { EasyVoice } from "../resources/EasyVoice";
-import { Journal, journalArtifact, type JournalResult } from "../resources/Journal";
+import { Journal, journalArtifact, startJournal, type JournalResult } from "../resources/Journal";
 import { Root } from "../resources/Root";
 import { Triage } from "../resources/Triage";
 import { SourceIngest, SourceRefresh } from "../workflows/Source";
@@ -34,6 +34,15 @@ function page(journals: JournalResult[]) {
 </style></head><body><header><h1>Journal</h1><p>Daily reports from available Medina artifacts.</p></header><main>${sections}</main></body></html>`;
 }
 
+function utcDayBefore(now = new Date()) {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1)).toISOString().slice(0, 10);
+}
+
+async function reconcileJournals(env: Env) {
+  const days = await stream(env).journalDaysNeedingReport(utcDayBefore());
+  await Promise.all(days.map((day) => startJournal(env, day)));
+}
+
 app.get("/", async (c) => {
   const reports = await stream(c.env).journalReports();
   const journals = (await Promise.all(reports.map((report) => journalArtifact(c.env, report.journalKey)))).filter((journal): journal is JournalResult => journal !== null);
@@ -48,7 +57,11 @@ export { Triage } from "../resources/Triage";
 export { SourceIngest, SourceRefresh } from "../workflows/Source";
 export default {
   fetch: app.fetch,
-  scheduled: (_event: ScheduledController, env: Env, ctx: ExecutionContext) => {
+  scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => {
+    if (event.cron === "30 0 * * *") {
+      ctx.waitUntil(reconcileJournals(env));
+      return;
+    }
     ctx.waitUntil(env.SOURCE_REFRESH.create({ params: EasyVoice(env) }));
   },
 };

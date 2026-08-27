@@ -52,7 +52,8 @@ export class SourceIngest extends WorkflowEntrypoint<Env, Source> {
       });
       const triage = await startTriage(this.env, ingest);
       await stream(this.env).finishDrive(candidate.candidateId, ingest.id);
-      return { ingestId: ingest.id, triageId: triage.id };
+      const next = await this.env.SOURCE_INGEST.create({ params: event.payload });
+      return { ingestId: ingest.id, triageId: triage.id, nextIngestId: next.id };
     });
   }
 }

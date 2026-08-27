@@ -16,7 +16,7 @@
     { "name": "medina-triage", "binding": "TRIAGE", "class_name": "Triage" },
     { "name": "medina-root", "binding": "ROOT", "class_name": "Root" }
   ],
-  "triggers": { "crons": ["0 * * * *"] },
+  "triggers": { "crons": ["0 * * * *", "30 0 * * *"] },
   "vars": {
     "GOOGLE_TOKEN_URL": "https://googlesa-sco-lifelogtest.int.exe.xyz/token",
     "ASSEMBLYAI_API_URL": "https://api.assemblyai.com",
