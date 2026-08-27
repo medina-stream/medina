@@ -2,6 +2,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import { readJson, writeJson } from "../lib/artifact";
 import { createAssemblyAITranscript, getAssemblyAITranscript, uploadToAssemblyAI, type AssemblyAITranscript as AssemblyAITranscriptResponse } from "../lib/assemblyai";
 import type { Ingest } from "../lib/ingest";
+import { stream } from "../lib/stream";
 
 const VERSION = "assemblyai-u35p-v1";
 
@@ -30,6 +31,10 @@ export type AssemblyAITranscriptResult = {
 function keys(ingest: Ingest) {
   const prefix = `transcript/${VERSION}/${ingest.id}`;
   return { result: `${prefix}.json`, vendor: `${prefix}.assemblyai.json` };
+}
+
+function journalDay(ingest: Ingest) {
+  return ingest.receivedAt.slice(0, 10);
 }
 
 function result(ingest: Ingest, partial: Omit<AssemblyAITranscriptResult, "provider" | "version" | "ingestId" | "inputKey" | "completedAt">): AssemblyAITranscriptResult {
@@ -119,6 +124,13 @@ export class AssemblyAITranscript extends WorkflowEntrypoint<Env, Ingest> {
               error: transcript.error ?? "AssemblyAI transcription failed",
             });
       await writeJson(this.env.ARTIFACTS, key.result, normalized);
+      if (normalized.status === "completed") {
+        await stream(this.env).recordJournalTranscript(journalDay(ingest), {
+          ingestId: ingest.id,
+          transcriptKey: key.result,
+          completedAt: normalized.completedAt,
+        });
+      }
       return normalized;
     });
   }

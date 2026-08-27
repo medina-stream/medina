@@ -12,6 +12,7 @@
     { "name": "medina-source-refresh", "binding": "SOURCE_REFRESH", "class_name": "SourceRefresh" },
     { "name": "medina-source-ingest", "binding": "SOURCE_INGEST", "class_name": "SourceIngest" },
     { "name": "medina-assemblyai-transcript", "binding": "ASSEMBLYAI_TRANSCRIPT", "class_name": "AssemblyAITranscript" },
+    { "name": "medina-journal", "binding": "JOURNAL", "class_name": "Journal" },
     { "name": "medina-triage", "binding": "TRIAGE", "class_name": "Triage" },
     { "name": "medina-root", "binding": "ROOT", "class_name": "Root" }
   ],

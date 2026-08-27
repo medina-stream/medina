@@ -1,6 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DriveFile } from "./gdrive";
 
+export type JournalTranscript = {
+  ingestId: string;
+  transcriptKey: string;
+  completedAt: string;
+};
+
 export type IngestSummary = {
   id: string;
   filename: string;
@@ -49,6 +55,19 @@ function candidateId(file: DriveFile) {
 }
 
 export class Stream extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS journal_transcripts (
+        day TEXT NOT NULL,
+        ingest_id TEXT PRIMARY KEY,
+        transcript_key TEXT NOT NULL,
+        completed_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS journal_transcripts_by_day ON journal_transcripts(day, completed_at, ingest_id);
+    `);
+  }
+
   async state(): Promise<StreamState> {
     const stored = await this.ctx.storage.get<Partial<StreamState>>("state");
     return {
@@ -131,6 +150,30 @@ export class Stream extends DurableObject<Env> {
     };
     await this.ctx.storage.put("state", { ...state, ingests });
     return summary;
+  }
+
+  async recordJournalTranscript(day: string, transcript: JournalTranscript) {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO journal_transcripts (day, ingest_id, transcript_key, completed_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(ingest_id) DO UPDATE SET
+         day = excluded.day,
+         transcript_key = excluded.transcript_key,
+         completed_at = excluded.completed_at`,
+      day,
+      transcript.ingestId,
+      transcript.transcriptKey,
+      transcript.completedAt,
+    );
+  }
+
+  async journalTranscripts(day: string): Promise<JournalTranscript[]> {
+    return this.ctx.storage.sql
+      .exec<JournalTranscript>(
+        "SELECT ingest_id AS ingestId, transcript_key AS transcriptKey, completed_at AS completedAt FROM journal_transcripts WHERE day = ? ORDER BY completed_at, ingest_id",
+        day,
+      )
+      .toArray();
   }
 }
 
