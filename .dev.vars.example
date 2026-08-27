@@ -1,0 +1,3 @@
+# Local Wrangler development uses the exe.dev AssemblyAI integration, which
+# injects credentials at the network edge.
+ASSEMBLYAI_API_URL=https://assemblyai.int.exe.xyz

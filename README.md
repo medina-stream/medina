@@ -18,3 +18,7 @@ hourly schedule → GdriveSource → Stream candidate queue → direct R2 downlo
 The public API is only `GET /`, which serves Root summaries. Internal triage artifacts, Stream scheduling state, workflow state, and bucket inspection have no public routes.
 
 No VM sync process is active. Local cron behavior can be exercised with a separate temporary Wrangler test session; it is not exposed by the running app.
+
+## AssemblyAI development auth
+
+For local Wrangler development, copy `.dev.vars.example` to `.dev.vars`. It targets the attached exe.dev AssemblyAI integration, which supplies credentials outside the repository. Production uses the direct AssemblyAI endpoint by default and needs either an `ASSEMBLYAI_API_KEY` Worker secret or a pre-authenticated `ASSEMBLYAI_API_URL` relay.
