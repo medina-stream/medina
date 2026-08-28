@@ -1,6 +1,6 @@
 type Message = { role: "system" | "user"; content: string };
 
-type Completion = { choices?: { message?: { content?: string | null } }[] };
+type Completion = { choices?: { message?: { content?: string | null; reasoning_content?: string | null } }[] };
 
 function endpoint(env: Env) {
   if (!env.JOURNAL_LLM_API_URL) throw new Error("JOURNAL_LLM_API_URL is not configured");
@@ -19,7 +19,8 @@ export async function completeJournal(env: Env, messages: Message[], maxTokens: 
   });
   if (!response.ok) throw new Error(`Journal LLM request failed: ${response.status} ${await response.text()}`);
   const completion = await response.json<Completion>();
-  const content = completion.choices?.[0]?.message?.content;
+  const message = completion.choices?.[0]?.message;
+  const content = message?.content || message?.reasoning_content;
   if (!content) throw new Error("Journal LLM response was missing message content");
   return content;
 }
