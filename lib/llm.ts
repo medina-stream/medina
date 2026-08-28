@@ -7,7 +7,7 @@ function endpoint(env: Env) {
   return `${env.JOURNAL_LLM_API_URL.replace(/\/$/, "")}/chat/completions`;
 }
 
-export async function completeJournal(env: Env, messages: Message[]) {
+export async function completeJournal(env: Env, messages: Message[], maxTokens: number) {
   if (!env.JOURNAL_LLM_MODEL) throw new Error("JOURNAL_LLM_MODEL is not configured");
   const response = await fetch(endpoint(env), {
     method: "POST",
@@ -15,7 +15,7 @@ export async function completeJournal(env: Env, messages: Message[]) {
       "content-type": "application/json",
       ...(env.JOURNAL_LLM_API_KEY ? { authorization: `Bearer ${env.JOURNAL_LLM_API_KEY}` } : {}),
     },
-    body: JSON.stringify({ model: env.JOURNAL_LLM_MODEL, messages }),
+    body: JSON.stringify({ model: env.JOURNAL_LLM_MODEL, messages, max_tokens: maxTokens }),
   });
   if (!response.ok) throw new Error(`Journal LLM request failed: ${response.status} ${await response.text()}`);
   const completion = await response.json<Completion>();
