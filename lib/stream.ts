@@ -56,7 +56,7 @@ export class Stream extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ day: string }>(
       `SELECT transcripts.day FROM journal_transcripts AS transcripts
        LEFT JOIN journal_reports AS reports ON reports.day = transcripts.day
-       WHERE transcripts.day < ? GROUP BY transcripts.day
+       WHERE transcripts.day <= ? GROUP BY transcripts.day
        HAVING reports.day IS NULL OR MAX(transcripts.completed_at) > reports.generated_at
        ORDER BY transcripts.day LIMIT 31`, beforeDay,
     ).toArray().map((row) => row.day);
