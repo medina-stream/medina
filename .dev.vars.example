@@ -2,5 +2,5 @@
 # which inject credentials at the network edge.
 ASSEMBLYAI_API_URL=https://assemblyai.int.exe.xyz
 JOURNAL_LLM_API_URL=https://llm.int.exe.xyz/v1
-JOURNAL_LLM_MODEL=openai/gpt-5.6-sol
+JOURNAL_LLM_MODEL=fireworks/muse-glimmer-30b
 DEV_SOURCE_LIMIT=6
