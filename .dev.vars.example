@@ -1,6 +1,6 @@
-# Local Wrangler development uses the exe.dev AssemblyAI and LLM integrations,
+# Local Wrangler development uses the exe.dev AssemblyAI and OpenAI integrations,
 # which inject credentials at the network edge.
 ASSEMBLYAI_API_URL=https://assemblyai.int.exe.xyz
-JOURNAL_LLM_API_URL=https://llm.int.exe.xyz/v1
-JOURNAL_LLM_MODEL=fireworks/kimi-k3
+JOURNAL_LLM_API_URL=https://openai.int.exe.xyz/v1
+JOURNAL_LLM_MODEL=gpt-5.5
 DEV_SOURCE_LIMIT=6

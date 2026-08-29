@@ -1,34 +1,48 @@
-# Next task: make Journal reliable and useful
+# Next task: give the Journal a spine
 
 The app runs at port 8000. `GET /` renders Journal artifacts from local R2.
 
-## Current observed output
-
-- `2026-08-25`: a cautious but somewhat useful report.
-- `2026-08-27`: **bad** — it exposes the LLM gateway's `reasoning_content` / working notes instead of a user-facing journal.
-- `2026-08-28`: empty report, because it had no transcripts.
+Journals are now reliable: clean second-person prose, no reasoning leakage, no
+empty days, indexed by recording day. What they are not yet is *useful over
+time* — every day is written from scratch, in isolation, with no memory of who
+the recurring people are or what is still unresolved.
 
 ## Fix goals
 
-1. **Never publish reasoning.** `lib/llm.ts` currently falls back from `message.content` to `message.reasoning_content`; remove that behavior. Select/use a model or API response mode that reliably supplies final `content`. Treat a missing final answer as a failed run, not a report.
-2. **Avoid empty journals.** Do not write or index a Journal artifact when a day has zero transcript inputs.
-3. **Use recording time, not ingest time.** `AssemblyAITranscript` indexes a day from `ingest.receivedAt`. Derive and persist an event/capture timestamp during inspection (filename is an acceptable temporary basis), then index Journal inputs by that day.
-4. **Make automatic triggering sensible.** A transcript completion starts a debounced day Journal; preserve that behavior, but avoid duplicate LLM work and allow a later revision when new transcripts arrive.
-5. **Keep the catalog boring.** `Stream` is intended as SQLite index/pointers only; R2 holds raw audio, transcript payloads, and Journal artifacts. Do not reintroduce queue/lease/workflow-state machinery into `lib/stream.ts`.
-6. **Use Workflows for orchestration.** Current shape is `SourceRun` → `ProcessIngest` → `AssemblyAITranscript`, plus `Journal`. Prefer durable Workflow steps/retries over hand-built state machines.
+1. **Carry continuity between days.** A journal should know what came before:
+   ongoing threads (a house sale, a court matter, a project), and whether an open
+   question from an earlier day got answered. Prefer a small, explicit carried
+   state artifact over stuffing prior reports into the prompt.
+2. **Name people consistently.** Speaker labels are `A`/`B` per recording. The
+   same person across recordings and days should end up with one stable handle,
+   and the journal should say when a name is inferred rather than heard.
+3. **Make the page readable at length.** Eighteen days of full prose in one
+   scroll is already unwieldy. Consider per-day routes, a summary line per day,
+   or both — but keep the app read-only and boring.
+4. **Keep the boring parts boring.** `Stream` stays SQLite pointers only; R2
+   holds artifacts; orchestration stays in Workflows. Anything derived must stay
+   rebuildable by the 00:30 UTC reconcile.
 
 ## Relevant files
 
-- `resources/Journal.ts` — batching, prompts, Journal artifact output.
-- `lib/llm.ts` — OpenAI-compatible gateway call; current source of reasoning leakage.
-- `resources/AssemblyAITranscript.ts` — transcript result/index registration and Journal trigger.
-- `resources/Triage.ts` — inspection facts; likely home for provisional capture-time extraction.
-- `lib/stream.ts` — SQLite journal input/report index.
-- `server/index.ts` — simple homepage renderer.
-- `.dev.vars.example` — local exe.dev LLM gateway/model configuration.
+- `resources/Journal.ts` — batching, prompts, Journal artifact output, versioning.
+- `lib/stream.ts` — journal input/report index.
+- `resources/AssemblyAITranscript.ts` — transcript artifacts, `reindexTranscripts`.
+- `server/index.ts` — homepage renderer and cron handlers.
 
 ## Local data / safety
 
-There are local R2 transcript artifacts from a broad earlier test run. Do **not** start broad source ingestion. Local development is capped with `DEV_SOURCE_LIMIT=6`, selected across the newest two source days.
+Local R2 holds ~35 transcripts from an earlier broad test run, spanning
+2026-07-23 to 2026-08-27. Do **not** start broad source ingestion;
+`DEV_SOURCE_LIMIT=6` caps local runs.
 
-Before declaring success, regenerate the affected Journal days and verify `GET /` contains only clean user-facing report text.
+Bumping the Journal `VERSION` makes the 00:30 UTC reconcile regenerate every
+indexed day, which is how you exercise a prompt change end to end:
+
+```sh
+npx wrangler dev --local --test-scheduled --port 8000
+curl "http://localhost:8000/__scheduled?cron=30+0+*+*+*"
+```
+
+A full 18-day regeneration takes a few minutes. Before declaring success, read
+the rendered page, not just the logs.

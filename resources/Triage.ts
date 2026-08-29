@@ -1,5 +1,5 @@
 import { readJson, writeJson } from "../lib/artifact";
-import type { Ingest } from "../lib/ingest";
+import { captureTime, type Ingest } from "../lib/ingest";
 
 export type TriageResult = {
   id: string;
@@ -11,6 +11,7 @@ export type TriageResult = {
   status: "accepted" | "retained";
   triagedAt: string;
   receivedAt: string;
+  capturedAt: string;
   detectedType: string;
   signals: string[];
   metadata: Record<string, string>;
@@ -45,7 +46,7 @@ export async function inspectIngest(env: Env, ingest: Ingest): Promise<TriageRes
   if (ingest.contentType && ingest.contentType !== "application/octet-stream" && ingest.contentType !== detectedType) signals.push("declared-type-mismatch");
   const status = signals.includes("executable-name") || signals.includes("unsafe-filename") ? "retained" : "accepted";
   const triageKey = `triage/${ingest.id}.json`;
-  const result: TriageResult = { id: ingest.id, filename: ingest.filename, contentType: ingest.contentType, size: ingest.size, hash, triageKey, status, triagedAt: new Date().toISOString(), receivedAt: ingest.receivedAt, detectedType, signals, metadata: ingest.metadata };
+  const result: TriageResult = { id: ingest.id, filename: ingest.filename, contentType: ingest.contentType, size: ingest.size, hash, triageKey, status, triagedAt: new Date().toISOString(), receivedAt: ingest.receivedAt, capturedAt: ingest.capturedAt || captureTime(ingest), detectedType, signals, metadata: ingest.metadata };
   await writeJson(env.ARTIFACTS, triageKey, result);
   return result;
 }

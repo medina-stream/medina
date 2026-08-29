@@ -1,9 +1,10 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { readJson, writeJson } from "../lib/artifact";
 import { createAssemblyAITranscript, getAssemblyAITranscript, uploadToAssemblyAI, type AssemblyAITranscript as AssemblyAITranscriptResponse } from "../lib/assemblyai";
-import type { Ingest } from "../lib/ingest";
+import { captureDay, captureTime, type Ingest } from "../lib/ingest";
 import { stream } from "../lib/stream";
 import { startJournal } from "./Journal";
+import { triageArtifact } from "./Triage";
 
 const VERSION = "assemblyai-u35p-v1";
 
@@ -20,6 +21,7 @@ export type AssemblyAITranscriptResult = {
   version: typeof VERSION;
   ingestId: string;
   inputKey: string;
+  capturedAt: string;
   transcriptId: string | null;
   vendorKey: string | null;
   status: "completed" | "error";
@@ -34,16 +36,13 @@ function keys(ingest: Ingest) {
   return { result: `${prefix}.json`, vendor: `${prefix}.assemblyai.json` };
 }
 
-function journalDay(ingest: Ingest) {
-  return ingest.receivedAt.slice(0, 10);
-}
-
-function result(ingest: Ingest, partial: Omit<AssemblyAITranscriptResult, "provider" | "version" | "ingestId" | "inputKey" | "completedAt">): AssemblyAITranscriptResult {
+function result(ingest: Ingest, partial: Omit<AssemblyAITranscriptResult, "provider" | "version" | "ingestId" | "inputKey" | "capturedAt" | "completedAt">): AssemblyAITranscriptResult {
   return {
     provider: "assemblyai",
     version: VERSION,
     ingestId: ingest.id,
     inputKey: ingest.key,
+    capturedAt: ingest.capturedAt || captureTime(ingest),
     completedAt: new Date().toISOString(),
     ...partial,
   };
@@ -125,13 +124,14 @@ export class AssemblyAITranscript extends WorkflowEntrypoint<Env, Ingest> {
               error: transcript.error ?? "AssemblyAI transcription failed",
             });
       await writeJson(this.env.ARTIFACTS, key.result, normalized);
-      if (normalized.status === "completed") {
-        await stream(this.env).recordJournalTranscript(journalDay(ingest), {
+      if (normalized.status === "completed" && normalized.text?.trim()) {
+        const day = captureDay(normalized.capturedAt);
+        await stream(this.env).recordJournalInput(day, {
           ingestId: ingest.id,
           transcriptKey: key.result,
-          completedAt: normalized.completedAt,
+          capturedAt: normalized.capturedAt,
         });
-        await startJournal(this.env, journalDay(ingest), true);
+        await startJournal(this.env, day, true);
       }
       return normalized;
     });
@@ -140,4 +140,28 @@ export class AssemblyAITranscript extends WorkflowEntrypoint<Env, Ingest> {
 
 export async function startAssemblyAITranscript(env: Env, ingest: Ingest) {
   return env.ASSEMBLYAI_TRANSCRIPT.create({ id: `${VERSION}-${ingest.id}`, params: ingest });
+}
+
+/**
+ * Rebuilds the Stream transcript index from R2, so the catalog stays a
+ * disposable derivative of the artifacts and older transcripts pick up capture
+ * times. Returns the days whose inputs it touched.
+ */
+export async function reindexTranscripts(env: Env) {
+  const days = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const listing = await env.ARTIFACTS.list({ prefix: `transcript/${VERSION}/`, cursor });
+    for (const object of listing.objects) {
+      if (object.key.endsWith(".assemblyai.json")) continue;
+      const transcript = await readJson<AssemblyAITranscriptResult>(env.ARTIFACTS, object.key);
+      if (transcript?.status !== "completed" || !transcript.text?.trim()) continue;
+      const capturedAt = transcript.capturedAt ?? (await triageArtifact(env, `triage/${transcript.ingestId}.json`).then((triage) => (triage ? captureTime(triage) : null)));
+      if (!capturedAt) continue;
+      await stream(env).recordJournalInput(captureDay(capturedAt), { ingestId: transcript.ingestId, transcriptKey: object.key, capturedAt });
+      days.add(captureDay(capturedAt));
+    }
+    cursor = listing.truncated ? listing.cursor : undefined;
+  } while (cursor);
+  return [...days];
 }

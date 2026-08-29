@@ -1,20 +1,25 @@
 import { DurableObject } from "cloudflare:workers";
 
-export type JournalTranscript = { ingestId: string; transcriptKey: string; completedAt: string };
+export type JournalInput = { ingestId: string; transcriptKey: string; capturedAt: string };
 export type JournalReport = { day: string; journalKey: string; generatedAt: string };
 
-/** Person-scoped SQLite catalog. Artifact payloads stay in R2. */
+/**
+ * Person-scoped SQLite catalog: pointers into R2 and nothing else. Every row is
+ * rebuildable from the artifacts, so the schema can be dropped and re-derived.
+ */
 export class Stream extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS journal_transcripts (
+      DROP TABLE IF EXISTS journal_transcripts; -- superseded by journal_inputs
+      CREATE TABLE IF NOT EXISTS journal_inputs (
         day TEXT NOT NULL,
         ingest_id TEXT PRIMARY KEY,
         transcript_key TEXT NOT NULL,
-        completed_at TEXT NOT NULL
+        captured_at TEXT NOT NULL,
+        indexed_at TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS journal_transcripts_by_day ON journal_transcripts(day, completed_at, ingest_id);
+      CREATE INDEX IF NOT EXISTS journal_inputs_by_day ON journal_inputs(day, captured_at, ingest_id);
       CREATE TABLE IF NOT EXISTS journal_reports (
         day TEXT PRIMARY KEY,
         journal_key TEXT NOT NULL,
@@ -23,18 +28,19 @@ export class Stream extends DurableObject<Env> {
     `);
   }
 
-  async recordJournalTranscript(day: string, transcript: JournalTranscript) {
+  /** Indexes one transcript under the day it was recorded. */
+  async recordJournalInput(day: string, input: JournalInput) {
     this.ctx.storage.sql.exec(
-      `INSERT INTO journal_transcripts (day, ingest_id, transcript_key, completed_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(ingest_id) DO UPDATE SET day = excluded.day, transcript_key = excluded.transcript_key, completed_at = excluded.completed_at`,
-      day, transcript.ingestId, transcript.transcriptKey, transcript.completedAt,
+      `INSERT INTO journal_inputs (day, ingest_id, transcript_key, captured_at, indexed_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(ingest_id) DO UPDATE SET day = excluded.day, transcript_key = excluded.transcript_key, captured_at = excluded.captured_at`,
+      day, input.ingestId, input.transcriptKey, input.capturedAt, new Date().toISOString(),
     );
   }
 
-  async journalTranscripts(day: string): Promise<JournalTranscript[]> {
-    return this.ctx.storage.sql.exec<JournalTranscript>(
-      "SELECT ingest_id AS ingestId, transcript_key AS transcriptKey, completed_at AS completedAt FROM journal_transcripts WHERE day = ? ORDER BY completed_at, ingest_id", day,
+  async journalInputs(day: string): Promise<JournalInput[]> {
+    return this.ctx.storage.sql.exec<JournalInput>(
+      "SELECT ingest_id AS ingestId, transcript_key AS transcriptKey, captured_at AS capturedAt FROM journal_inputs WHERE day = ? ORDER BY captured_at, ingest_id", day,
     ).toArray();
   }
 
@@ -52,14 +58,20 @@ export class Stream extends DurableObject<Env> {
     ).toArray();
   }
 
-  async journalDaysNeedingReport(beforeDay: string): Promise<string[]> {
+  /** Days whose transcripts have no current report: never journaled, journaled before newer input arrived, or journaled by an older Journal version. */
+  async journalDaysNeedingReport(throughDay: string, keyPrefix: string): Promise<string[]> {
     return this.ctx.storage.sql.exec<{ day: string }>(
-      `SELECT transcripts.day FROM journal_transcripts AS transcripts
-       LEFT JOIN journal_reports AS reports ON reports.day = transcripts.day
-       WHERE transcripts.day <= ? GROUP BY transcripts.day
-       HAVING reports.day IS NULL OR MAX(transcripts.completed_at) > reports.generated_at
-       ORDER BY transcripts.day LIMIT 31`, beforeDay,
+      `SELECT inputs.day FROM journal_inputs AS inputs
+       LEFT JOIN journal_reports AS reports ON reports.day = inputs.day
+       WHERE inputs.day <= ? GROUP BY inputs.day
+       HAVING reports.day IS NULL OR MAX(inputs.indexed_at) > reports.generated_at OR reports.journal_key NOT LIKE ? || '%'
+       ORDER BY inputs.day DESC LIMIT 31`, throughDay, keyPrefix,
     ).toArray().map((row) => row.day);
+  }
+
+  /** Unpublishes reports for days that no longer have any transcript input. */
+  async pruneJournalReports() {
+    this.ctx.storage.sql.exec("DELETE FROM journal_reports WHERE day NOT IN (SELECT day FROM journal_inputs)");
   }
 }
 
