@@ -1,12 +1,13 @@
 /**
  * The pipeline: run every source's ingest, then materialize every stale
- * resource instance. The disk is the only state; a resource instance's key
- * exists ⇔ it is current, so a pass is idempotent and does no LLM or vendor
- * work for anything already materialized.
+ * resource instance. The filesystem is the only state; a resource instance's
+ * file exists ⇔ it is current, so a pass is idempotent and does no LLM or
+ * vendor work for anything already materialized.
  */
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
-import { Disk } from "./Disk.ts"
+import * as FileSystem from "effect/FileSystem"
+import * as Files from "./Files.ts"
 import type { Resource, Source, SourceReport } from "./Resource.ts"
 
 export class RunReport extends Schema.Class<RunReport>("RunReport")({
@@ -27,7 +28,8 @@ export const RUN_REPORT_KEY = "runs/latest.json"
 
 export const runPipeline = <R>(
   sources: ReadonlyArray<Source<R>>,
-  resources: ReadonlyArray<Resource<R>>
+  resources: ReadonlyArray<Resource<R>>,
+  dataPath: (key: string) => string
 ) =>
   Effect.gen(function*() {
     const startedAt = new Date().toISOString()
@@ -51,14 +53,14 @@ export const runPipeline = <R>(
       sourceReports.push({ name: source.name, ...counts })
     }
 
-    const disk = yield* Disk
+    const fs = yield* FileSystem.FileSystem
     const materialized: Array<{ resource: string; label: string }> = []
     for (const resource of resources) {
       const instances = yield* resource.instances.pipe(
         Effect.catchCause((cause) => fail("instances", resource.name)(cause).pipe(Effect.as([])))
       )
       for (const instance of instances) {
-        if (yield* disk.exists(instance.key)) continue
+        if (yield* fs.exists(dataPath(instance.key))) continue
         yield* Effect.log(`materializing ${resource.name}/${instance.label}`)
         yield* instance.materialize.pipe(
           Effect.tap(() => Effect.sync(() => materialized.push({ resource: resource.name, label: instance.label }))),
@@ -67,8 +69,8 @@ export const runPipeline = <R>(
       }
     }
 
-    yield* disk.writeJson(
-      RUN_REPORT_KEY,
+    yield* Files.writeJson(
+      dataPath(RUN_REPORT_KEY),
       new RunReport({
         startedAt,
         finishedAt: new Date().toISOString(),

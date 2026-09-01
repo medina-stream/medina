@@ -1,8 +1,8 @@
 # Medina
 
-A personal context store: sources ingest captures onto the disk; resources
-are software-defined data that should exist there, materialized when stale.
-The vocabulary (source, capture, ingest, disk, resource, materialize,
+A personal context store: sources ingest captures into the data dir;
+resources are software-defined data that should exist there, materialized
+when stale. The vocabulary (source, capture, ingest, resource, materialize,
 freshness) comes from the notes repo — see `Medina Themes.md` and
 `Journal/2026-04-19.md` there. Start reading at `lib/Resource.ts`.
 
@@ -20,17 +20,18 @@ API reference (the RC differs from both v3 and the published docs in places).
 Generic library code lives in `lib/`; the lifelog application — sources and
 resources defined for this data — lives in `example-lifelog/`.
 
-## The disk is a directory
+## The data is just files
 
 All pipeline state lives in one directory of JSON files (`data/artifacts/`,
-gitignored, configurable via `DISK_DIR`). There is no object-store
-dependency: self-hosted Medina points the disk at a local directory; a hosted
-deployment points it at a mounted filesystem such as an Archil disk. Writes
-are atomic and reads avoid per-key stats, so network-backed mounts behave.
+gitignored, configurable via `DATA_DIR`), accessed with ordinary filesystem
+calls — no store abstraction, no object-store dependency. Self-hosted Medina
+points `DATA_DIR` at a local directory; a hosted deployment points it at a
+mounted filesystem such as an Archil disk. Writes are atomic and reads avoid
+per-file stats, so network-backed mounts behave.
 
 ## Compatibility freeze
 
-The disk contents were exported from the previous Cloudflare
+The data was exported from the previous Cloudflare
 implementation's bucket, minus the ~10 GB of raw audio — so all prior transcription
 and journaling work is reused as-is. Everything about the stored shapes is
 therefore load-bearing: key layouts (`transcript/assemblyai-u35p-v1/…`,

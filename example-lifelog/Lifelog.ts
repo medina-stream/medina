@@ -14,7 +14,8 @@ import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
-import { Disk } from "../lib/Disk.ts"
+import * as FileSystem from "effect/FileSystem"
+import * as Files from "../lib/Files.ts"
 import { AssemblyAI, type VendorTranscript } from "../lib/AssemblyAI.ts"
 import { Drive, type DriveFile } from "../lib/Drive.ts"
 import { Git } from "../lib/Git.ts"
@@ -23,6 +24,7 @@ import type { Resource, Source, SourceReport } from "../lib/Resource.ts"
 import {
   captureDay,
   captureTime,
+  dataPath,
   ingestId,
   Journal,
   JOURNAL_VERSION,
@@ -66,10 +68,10 @@ const normalize = (file: DriveFile, id: string, vendor: VendorTranscript): Trans
   })
 
 const transcribeFile = Effect.fn("transcribeFile")(function*(file: DriveFile) {
-  const disk = yield* Disk
+  const fs = yield* FileSystem.FileSystem
   const id = ingestId(AUDIO_SOURCE_NAME, file.id, file.md5Checksum ?? file.modifiedTime)
   const key = transcriptKey(id)
-  if (yield* disk.exists(key)) return "cached" as const
+  if (yield* fs.exists(dataPath(key))) return "cached" as const
   if (!file.mimeType.startsWith("audio/")) {
     yield* Effect.logDebug(`skipping non-audio file ${file.name} (${file.mimeType})`)
     return "skipped" as const
@@ -79,12 +81,12 @@ const transcribeFile = Effect.fn("transcribeFile")(function*(file: DriveFile) {
   const assemblyai = yield* AssemblyAI
   const audio = yield* drive.download(file.id)
   const vendor = yield* assemblyai.transcribe(audio)
-  yield* disk.writeJson(vendorKey(id), vendor)
-  yield* disk.writeJson(key, normalize(file, id, vendor))
+  yield* Files.writeJson(dataPath(vendorKey(id)), vendor)
+  yield* Files.writeJson(dataPath(key), normalize(file, id, vendor))
   return "transcribed" as const
 })
 
-export const audioSource = (folderId: string, latest: number): Source<Drive | AssemblyAI | Disk> => ({
+export const audioSource = (folderId: string, latest: number): Source<Drive | AssemblyAI | FileSystem.FileSystem> => ({
   name: AUDIO_SOURCE_NAME,
   ingest: Effect.gen(function*() {
     const drive = yield* Drive
@@ -126,16 +128,16 @@ const noteCaptureTime = (repo: string, path: string) => {
 
 const ingestNote = (repo: string) =>
   Effect.fn("ingestNote")(function*(file: { path: string; blobSha: string }) {
-    const disk = yield* Disk
+    const fs = yield* FileSystem.FileSystem
     if (!file.path.endsWith(".md")) return "skipped" as const
     const id = ingestId(NOTES_SOURCE_NAME, file.path, file.blobSha)
     const key = noteKey(id)
-    if (yield* disk.exists(key)) return "cached" as const
+    if (yield* fs.exists(dataPath(key))) return "cached" as const
     const git = yield* Git
     const text = yield* git.readBlob(repo, file.blobSha)
     const capturedAt = yield* noteCaptureTime(repo, file.path)
-    yield* disk.writeJson(
-      key,
+    yield* Files.writeJson(
+      dataPath(key),
       new Note({
         provider: "git",
         version: NOTE_VERSION,
@@ -150,7 +152,7 @@ const ingestNote = (repo: string) =>
     return "ingested" as const
   })
 
-export const notesSource = (repo: string): Source<Git | Disk> => ({
+export const notesSource = (repo: string): Source<Git | FileSystem.FileSystem> => ({
   name: NOTES_SOURCE_NAME,
   ingest: Effect.gen(function*() {
     const git = yield* Git
@@ -204,18 +206,18 @@ const complete = (system: string, user: string, maxTokens: number) =>
  * transcripts without `capturedAt` recover it from their triage record's
  * filename. */
 const transcriptsByDay = Effect.gen(function*() {
-  const disk = yield* Disk
-  const keys = yield* disk.list(`transcript/${TRANSCRIPT_VERSION}`)
+  const prefix = `transcript/${TRANSCRIPT_VERSION}`
+  const keys = (yield* Files.listFiles(dataPath(prefix))).map((entry) => `${prefix}/${entry}`)
   const days = new Map<string, Array<Transcript & { capturedAt: string }>>()
   for (const key of keys) {
     if (key.endsWith(".assemblyai.json")) continue
-    const decoded = yield* disk.readJson(Transcript, key)
+    const decoded = yield* Files.readJson(Transcript, dataPath(key))
     if (Option.isNone(decoded)) continue
     const transcript = decoded.value
     if (transcript.status !== "completed" || !transcript.text?.trim()) continue
     let capturedAt = transcript.capturedAt
     if (!capturedAt) {
-      const triage = yield* disk.readJson(Triage, `triage/${transcript.ingestId}.json`)
+      const triage = yield* Files.readJson(Triage, dataPath(`triage/${transcript.ingestId}.json`))
       if (Option.isNone(triage)) continue
       capturedAt = captureTime(triage.value.filename, triage.value.receivedAt)
     }
@@ -259,7 +261,6 @@ const JOURNAL_PROMPT =
 
 const materializeJournal = Effect.fn("materializeJournal")(
   function*(day: string, transcripts: ReadonlyArray<Transcript>, inputKeys: ReadonlyArray<string>, key: string) {
-    const disk = yield* Disk
     yield* Effect.log(`journaling ${day} (${transcripts.length} transcripts)`)
     const notes: Array<string> = []
     for (const [index, batch] of batches(transcripts).entries()) {
@@ -270,8 +271,8 @@ const materializeJournal = Effect.fn("materializeJournal")(
       ? yield* complete(JOURNAL_PROMPT, `Day: ${day}\n\nNotes:\n${notes.join("\n\n---\n\n")}`, 8000)
       : ""
 
-    yield* disk.writeJson(
-      key,
+    yield* Files.writeJson(
+      dataPath(key),
       new Journal({
         version: JOURNAL_VERSION,
         day,
@@ -286,7 +287,7 @@ const materializeJournal = Effect.fn("materializeJournal")(
   }
 )
 
-type JournalEnv = Disk | LanguageModel.LanguageModel
+type JournalEnv = FileSystem.FileSystem | LanguageModel.LanguageModel
 
 const journalInstance = (day: string, transcripts: ReadonlyArray<Transcript>) => {
   const inputKeys = transcripts.map((transcript) => transcriptKey(transcript.ingestId))
@@ -315,7 +316,7 @@ export const journalResource: Resource<JournalEnv> = {
 
 /** No captures can exist before this day (nothing to lifelog pre-birth) or
  * after today; those journals get a hard-coded empty response and are never
- * persisted, so lazy derefs can't fill the disk with noise. */
+ * persisted, so lazy derefs can't fill the data dir with noise. */
 const EPOCH_DAY = "1979-01-01"
 
 /** Today as a capture day, from the ambient Clock (not the wall). */
@@ -335,7 +336,7 @@ const emptyJournal = (day: string, generatedAt: string) =>
 
 /** Dereference the journal for a day: read it if current, materialize it if
  * stale or never asked for. Days outside [EPOCH_DAY, today] are answered
- * without touching the disk. */
+ * without touching the filesystem. */
 export const journalForDay = (day: string) =>
   Effect.gen(function*() {
     const now = yield* DateTime.now
@@ -343,26 +344,25 @@ export const journalForDay = (day: string) =>
       return emptyJournal(day, DateTime.formatIso(now))
     }
     const instance = yield* journalResource.instance!(day)
-    const disk = yield* Disk
-    const existing = yield* disk.readJson(Journal, instance.key)
+    const existing = yield* Files.readJson(Journal, dataPath(instance.key))
     if (Option.isSome(existing)) return existing.value
     yield* instance.materialize
-    return Option.getOrThrow(yield* disk.readJson(Journal, instance.key))
+    return Option.getOrThrow(yield* Files.readJson(Journal, dataPath(instance.key)))
   })
 
 // --- derived views ----------------------------------------------------------
 
 /**
- * A pipeline status summary, derived entirely from the disk: the last run's
+ * A pipeline status summary, derived entirely from the data dir: the last run's
  * report plus per-day input/journal freshness. Days whose journal hash doesn't
  * match the current input set are `stale` (a journal run is due).
  */
 export const pipelineStatus = Effect.gen(function*() {
-  const disk = yield* Disk
-  const lastRun = yield* disk.readJson(RunReport, RUN_REPORT_KEY).pipe(
+  const lastRun = yield* Files.readJson(RunReport, dataPath(RUN_REPORT_KEY)).pipe(
     Effect.orElseSucceed(() => Option.none<RunReport>())
   )
-  const journalKeys = yield* disk.list(`journal/${JOURNAL_VERSION}`)
+  const journalPrefix = `journal/${JOURNAL_VERSION}`
+  const journalKeys = (yield* Files.listFiles(dataPath(journalPrefix))).map((entry) => `${journalPrefix}/${entry}`)
   const days = yield* transcriptsByDay
   const byDay = [...days]
     .sort(([a], [b]) => b.localeCompare(a))
@@ -388,8 +388,8 @@ export const pipelineStatus = Effect.gen(function*() {
 })
 
 export const currentJournals = Effect.gen(function*() {
-  const disk = yield* Disk
-  const keys = yield* disk.list(`journal/${JOURNAL_VERSION}`)
+  const prefix = `journal/${JOURNAL_VERSION}`
+  const keys = (yield* Files.listFiles(dataPath(prefix))).map((entry) => `${prefix}/${entry}`)
   const days = yield* transcriptsByDay
   const journals: Array<Journal> = []
   for (const [day, transcripts] of days) {
@@ -400,7 +400,7 @@ export const currentJournals = Effect.gen(function*() {
     const fallback = keys.filter((key) => key.includes(`/${day}/`)).at(-1)
     const key = current ?? fallback
     if (!key) continue
-    const journal = yield* disk.readJson(Journal, key)
+    const journal = yield* Files.readJson(Journal, dataPath(key))
     if (Option.isSome(journal)) journals.push(journal.value)
   }
   return journals.sort((a, b) => b.day.localeCompare(a.day))

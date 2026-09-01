@@ -1,8 +1,8 @@
 /**
- * The Medina model: sources ingest captures into the disk; resources are
- * software-defined data that should exist in the disk. A resource instance's
- * key bakes in a hash of its dependencies, so key existence is the freshness
- * check: missing key ⇒ stale ⇒ materialize.
+ * The Medina model: sources ingest captures into the data dir; resources are
+ * software-defined data that should exist there. A resource instance's key
+ * (its path relative to the data dir) bakes in a hash of its dependencies, so
+ * file existence is the freshness check: missing file ⇒ stale ⇒ materialize.
  *
  * Resources are eager, lazy, or both. `instances` enumerates what should
  * exist ahead of demand (the pipeline materializes these each pass);
@@ -26,11 +26,11 @@ export interface Source<R> {
 }
 
 export interface ResourceInstance<R> {
-  /** Materialization target in the disk. */
+  /** Materialization target: a path relative to the data dir. */
   readonly key: string
   /** Human handle for the instance (the day, for a journal). */
   readonly label: string
-  /** Disk keys this instance is derived from; their hash is baked into `key`. */
+  /** Keys this instance is derived from; their hash is baked into `key`. */
   readonly dependencies: ReadonlyArray<string>
   readonly materialize: Effect.Effect<void, Error, R>
 }

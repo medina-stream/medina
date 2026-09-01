@@ -1,5 +1,5 @@
 /**
- * Resource shapes and keys: what gets materialized into the disk, plus
+ * Resource shapes and keys: what gets materialized into the data dir, plus
  * capture-time rules.
  *
  * The schemas intentionally match the JSON written by the previous
@@ -7,6 +7,13 @@
  * `data/artifacts` are reused as-is instead of re-processing audio.
  */
 import * as Schema from "effect/Schema"
+import { join } from "node:path"
+
+/** Where the data lives: a plain directory (local disk, or a mounted
+ * filesystem such as an Archil disk). Keys below are paths relative to it. */
+export const DATA_DIR = process.env.DATA_DIR ?? "data/artifacts"
+
+export const dataPath = (key: string) => join(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
 export const JOURNAL_VERSION = "journal-v4"
