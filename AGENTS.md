@@ -18,7 +18,9 @@ that repo `main` can be slightly ahead of the published RC; the installed
 
 ## State
 
-`data/artifacts/` is the bucket — all pipeline state, gitignored. Do not
+`data/artifacts/` is the bucket — all pipeline state, gitignored, just a
+directory of JSON files (no object store; see README “The bucket is a
+directory”). Do not
 delete it: it contains transcripts exported from the previous Cloudflare
 implementation whose audio would be expensive to re-process. Stored key
 shapes and JSON field names are frozen (see README “Compatibility freeze”).

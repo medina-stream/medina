@@ -1,8 +1,13 @@
 /**
- * Bucket: a keyed JSON/blob store on the local filesystem, playing the role
- * R2 played in the Cloudflare implementation. Keys keep the same shape
- * (`transcript/...`, `journal/...`), so objects exported from the old bucket
- * are readable without migration.
+ * Bucket: a keyed JSON/blob store on a directory. The directory *is* the
+ * bucket — self-hosted Medina points it at a local disk, serverless Medina
+ * at a mounted filesystem (e.g. an Archil disk). Writes are atomic
+ * (tmp + rename) and reads avoid per-key stats, so the same code behaves on
+ * both local disks and network-backed mounts.
+ *
+ * Keys keep the shape of the previous implementation (`transcript/...`,
+ * `journal/...`), so objects exported from it are readable without
+ * migration.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -41,26 +46,36 @@ export const layer = (
             return Option.some(yield* Schema.decodeUnknownEffect(schema)(JSON.parse(text)))
           }).pipe(Effect.mapError(mapError)),
 
+        // Atomic: readers (and mount propagation) never see partial JSON.
         writeJson: (key, value) =>
           Effect.gen(function*() {
             const file = resolve(key)
+            const tmp = `${file}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`
             yield* fs.makeDirectory(path.dirname(file), { recursive: true })
-            yield* fs.writeFileString(file, JSON.stringify(value, null, 2))
+            yield* fs.writeFileString(tmp, JSON.stringify(value, null, 2))
+            yield* fs.rename(tmp, file)
           }).pipe(Effect.mapError(mapError)),
 
         exists: (key) => fs.exists(resolve(key)).pipe(Effect.mapError(mapError)),
 
+        // One recursive listing, no per-key stat: cheap on network mounts.
+        // Directories are inferred (every parent of an entry is one) — the
+        // bucket never holds empty directories. In-flight tmp files are not
+        // keys.
         list: (prefix) =>
           Effect.gen(function*() {
             const dir = resolve(prefix)
             if (!(yield* fs.exists(dir))) return []
             const entries = yield* fs.readDirectory(dir, { recursive: true })
-            const keys: Array<string> = []
+            const directories = new Set<string>()
             for (const entry of entries) {
-              const stat = yield* fs.stat(path.join(dir, entry))
-              if (stat.type === "File") keys.push(path.join(prefix, entry))
+              const parent = path.dirname(entry)
+              if (parent !== ".") directories.add(parent)
             }
-            return keys.sort()
+            return entries
+              .filter((entry) => !directories.has(entry) && !/\.tmp-[^/]*$/.test(entry))
+              .map((entry) => path.join(prefix, entry))
+              .sort()
           }).pipe(Effect.mapError(mapError))
       }
     })

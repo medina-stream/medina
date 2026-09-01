@@ -20,14 +20,22 @@ API reference (the RC differs from both v3 and the published docs in places).
 Generic library code lives in `lib/`; the lifelog application — sources and
 resources defined for this data — lives in `example-lifelog/`.
 
+## The bucket is a directory
+
+All pipeline state lives in one directory of JSON files (`data/artifacts/`,
+gitignored, configurable via `BUCKET_DIR`). There is no object-store
+dependency: self-hosted Medina points the bucket at a local disk; a hosted
+deployment points it at a mounted filesystem such as an Archil disk. Writes
+are atomic and reads avoid per-key stats, so network-backed mounts behave.
+
 ## Compatibility freeze
 
-The bucket (`data/artifacts/`, gitignored) was exported from the previous
-Cloudflare implementation's R2 bucket, minus the ~10 GB of raw audio — so all
-prior transcription and journaling work is reused as-is. Everything about the
-stored shapes is therefore load-bearing: key layouts
-(`transcript/assemblyai-u35p-v1/…`, `journal/journal-v4/…`, `triage/…`) and
-JSON field names must not change without a migration.
+The bucket contents were exported from the previous Cloudflare
+implementation, minus the ~10 GB of raw audio — so all prior transcription
+and journaling work is reused as-is. Everything about the stored shapes is
+therefore load-bearing: key layouts (`transcript/assemblyai-u35p-v1/…`,
+`journal/journal-v4/…`, `triage/…`) and JSON field names must not change
+without a migration.
 
 ## Running
 
