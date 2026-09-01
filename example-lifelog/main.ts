@@ -66,7 +66,6 @@ const Routes = HttpRouter.use((router) =>
   })
 )
 
-/** Runs the pipeline immediately, then hourly. */
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const folderId = yield* Config.string("GDRIVE_FOLDER_ID")

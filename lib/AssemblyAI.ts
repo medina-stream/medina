@@ -1,7 +1,3 @@
-/**
- * AssemblyAI transcription client: upload audio, create a transcript job, and
- * poll until it settles.
- */
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -31,7 +27,6 @@ export class VendorTranscript extends Schema.Class<VendorTranscript>("VendorTran
 const Upload = Schema.Struct({ upload_url: Schema.String })
 
 export class AssemblyAI extends Context.Service<AssemblyAI, {
-  /** Uploads audio and runs a transcript job to completion (or vendor error). */
   readonly transcribe: (audio: Stream.Stream<Uint8Array, Error>) => Effect.Effect<VendorTranscript, Error>
 }>()("medina/AssemblyAI") {}
 
@@ -72,7 +67,6 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
             Effect.mapError(asError)
           )
 
-          // Poll every 10 seconds for up to 2 hours until the job settles.
           return yield* getTranscript(submitted.id).pipe(
             Effect.flatMap((transcript) =>
               transcript.status === "completed" || transcript.status === "error"
