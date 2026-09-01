@@ -1,25 +1,53 @@
-# Medina rethink
+# Medina, Effect edition
 
-A single-stream Worker that progressively turns Drive files into a compact public root artifact:
+A single Node process, built on [Effect v4 (RC)](https://effect.website/), that
+turns Google Drive voice recordings into a daily journal:
 
 ```text
-hourly schedule → SourceRun → ProcessIngest → inspect → AssemblyAITranscript → JournalDay
+hourly pass → list latest N Drive files → transcribe new audio (AssemblyAI) → journal each day (LLM) → GET /
 ```
 
-- [`resources/EasyVoice.ts`](./resources/EasyVoice.ts) is the tiny source declaration: a name, provider, and Drive folder ID.
-- [`workflows/Source.ts`](./workflows/Source.ts) is the generic source refresh/ingest machinery: discover, observe, claim, and download.
-- [`resources/Triage.ts`](./resources/Triage.ts) hashes and inspects raw ingests, writing private `triage/<id>.json` artifacts.
-- [`resources/AssemblyAITranscript.ts`](./resources/AssemblyAITranscript.ts) turns accepted audio ingests into normalized speaker-attributed transcripts, retaining the private vendor response alongside the Medina result.
-- [`resources/Journal.ts`](./resources/Journal.ts) writes one versioned LLM report per calendar day from the transcripts Stream indexes under that day.
-- [`server/index.ts`](./server/index.ts) is a read-only Hono app plus the scheduled Worker handler.
-- [`lib/`](./lib/) owns Drive API, artifact, ingest, and Stream mechanics.
+The Effect v4 sources are cloned alongside this repo at `../effect` for API
+reference (the RC differs from both v3 and the published docs in places).
 
-Days are the day a recording was *made*, taken from the source filename's `YYYYMMDDThhmmss` stamp at ingest and carried through triage and transcript artifacts. A day with no transcripts produces no artifact and no index entry, so the page never shows an empty entry. The LLM call asks for a final answer only: a response that returns reasoning but no `content` fails the run rather than publishing working notes.
+## Layout
 
-The public app is only `GET /`, which renders indexed Journal reports. An hourly cron refreshes sources; a finished transcript starts a debounced journal for its day, and later transcripts revise it. A daily **00:30 UTC** cron rebuilds the Stream index from R2 and journals every day whose report is missing, stale, or from an older Journal version.
+- [`src/Domain.ts`](./src/Domain.ts) — artifact schemas (`Transcript`, `Journal`) and capture-time rules. The JSON shapes match the previous Cloudflare implementation exactly, so artifacts carry over.
+- [`src/Artifacts.ts`](./src/Artifacts.ts) — keyed JSON store on the local filesystem (the role R2 used to play). Keys keep their old shapes (`transcript/assemblyai-u35p-v1/…`, `journal/journal-v4/…`).
+- [`src/Drive.ts`](./src/Drive.ts) — Google Drive list/download via the exe.dev service-account token mint.
+- [`src/AssemblyAI.ts`](./src/AssemblyAI.ts) — upload + transcript job + poll-until-settled.
+- [`src/Llm.ts`](./src/Llm.ts) — OpenAI-compatible chat completions that demand a final answer (reasoning-only responses fail the run).
+- [`src/Pipeline.ts`](./src/Pipeline.ts) — the pass itself: transcribe files that lack a transcript artifact, then journal days whose input set changed.
+- [`src/main.ts`](./src/main.ts) — layers wired together: HTTP server for `GET /` plus an hourly scheduled pipeline fiber.
 
-No VM sync process is active. Local cron behavior can be exercised with a separate temporary Wrangler test session; it is not exposed by the running app.
+## State model
 
-## AssemblyAI and LLM development auth
+Artifacts under `data/artifacts/` are the only state; everything else is
+derived. Idempotence is by key existence:
 
-For local Wrangler development, copy `.dev.vars.example` to `.dev.vars`. It targets the attached exe.dev AssemblyAI and OpenAI integrations, which supply credentials outside the repository. Production uses the direct AssemblyAI endpoint by default and needs either an `ASSEMBLYAI_API_KEY` Worker secret or a pre-authenticated `ASSEMBLYAI_API_URL` relay; the journal LLM likewise needs `JOURNAL_LLM_API_KEY` unless `JOURNAL_LLM_API_URL` is pre-authenticated.
+- A transcript keyed by ingest id (source + Drive file id + md5) exists ⇒ the
+  audio is never re-downloaded or re-transcribed.
+- A journal keyed by day + SHA-256 of its input transcript keys exists ⇒ the
+  LLM is not re-run. A new transcript landing on a day changes the hash and
+  produces a revised journal.
+
+The `data/artifacts` tree was exported from the previous branch's local R2
+bucket (transcripts, triage, journals — not the 10 GB of raw audio), so this
+branch reuses all prior transcription and journaling work as-is. Old
+transcripts without a `capturedAt` recover it from their `triage/<id>.json`
+artifact.
+
+Days are the day a recording was *made*, taken from the source filename's
+`YYYYMMDDThhmmss` stamp, with Drive modified time as fallback.
+
+## Running
+
+```bash
+npm install
+npm run dev    # or: npm start
+```
+
+Configuration comes from `.env` (see `.env.example`): Drive token mint URL and
+folder id, AssemblyAI and LLM endpoints (exe.dev integrations inject
+credentials at the network edge, so no keys live here), `SOURCE_LATEST` for the
+latest-N window, and `PORT`.

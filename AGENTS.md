@@ -1,41 +1,24 @@
-# Cloudflare Workers
+# Effect v4 (RC)
 
-STOP. Your knowledge of Cloudflare Workers APIs and limits may be outdated. Always retrieve current documentation before any Workers, KV, R2, D1, Durable Objects, Queues, Vectorize, AI, or Agents SDK task.
-
-## Docs
-
-- https://developers.cloudflare.com/workers/
-- MCP: `https://docs.mcp.cloudflare.com/mcp`
-
-For all limits and quotas, retrieve from the product's `/platform/limits/` page. eg. `/workers/platform/limits`
+This branch is built on Effect v4 RC (`effect@4.0.0-rc.112` and
+`@effect/platform-node@4.0.0-rc.112`). Your knowledge of Effect is likely v3;
+v4 renames and moves many APIs (e.g. `Context.Service` classes,
+`effect/unstable/http`, lowercase `Config.string`). The Effect repo is cloned
+at `../effect` — grep it for current signatures before writing code, and note
+that repo `main` can be slightly ahead of the published RC; the installed
+`node_modules/effect/dist/*.d.ts` files are the final authority.
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `npx wrangler dev` | Local development |
-| `npx wrangler deploy` | Deploy to Cloudflare |
-| `npx wrangler types` | Generate TypeScript types |
+| `npm run dev` | Local development (watch mode) |
+| `npm start` | Run the server |
+| `npm run typecheck` | Type check |
 
-Run `wrangler types` after changing bindings in wrangler.jsonc.
+## State
 
-## Node.js Compatibility
-
-https://developers.cloudflare.com/workers/runtime-apis/nodejs/
-
-## Errors
-
-- **Error 1102** (CPU/Memory exceeded): Retrieve limits from `/workers/platform/limits/`
-- **All errors**: https://developers.cloudflare.com/workers/observability/errors/
-
-## Product Docs
-
-Retrieve API references and limits from:
-`/kv/` · `/r2/` · `/d1/` · `/durable-objects/` · `/queues/` · `/vectorize/` · `/workers-ai/` · `/agents/`
-
-## Best Practices (conditional)
-
-If the application uses Durable Objects or Workflows, refer to the relevant best practices:
-
-- Durable Objects: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
-- Workflows: https://developers.cloudflare.com/workflows/build/rules-of-workflows/
+`data/artifacts/` holds all pipeline state as JSON artifacts and is
+gitignored. Do not delete it: it contains transcripts exported from the
+previous Cloudflare implementation whose audio would be expensive to
+re-process.
