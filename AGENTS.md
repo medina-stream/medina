@@ -18,7 +18,14 @@ that repo `main` can be slightly ahead of the published RC; the installed
 
 ## State
 
-`data/artifacts/` holds all pipeline state as JSON artifacts and is
-gitignored. Do not delete it: it contains transcripts exported from the
-previous Cloudflare implementation whose audio would be expensive to
-re-process.
+`data/artifacts/` is the bucket — all pipeline state, gitignored. Do not
+delete it: it contains transcripts exported from the previous Cloudflare
+implementation whose audio would be expensive to re-process. Stored key
+shapes and JSON field names are frozen (see README “Compatibility freeze”).
+
+## Vocabulary
+
+Use the project's terms: source, capture, ingest, bucket, resource,
+materialize, stale/freshness (see `lib/Resource.ts`). Don't introduce
+synonyms (artifact, asset, domain, job).
+
