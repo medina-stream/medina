@@ -1,28 +1,21 @@
 /**
- * Journal LLM: an OpenAI-compatible chat-completions client that demands a
- * final answer. A response with reasoning but no `content` fails the run, so
- * working notes never reach the page.
+ * Journal LLM built on Effect's AI stack: `@effect/ai-openai` provides a
+ * `LanguageModel` over the OpenAI Responses API. This service keeps one house
+ * rule on top: a response must carry final text — reasoning-only output fails
+ * the run, so working notes never reach the page.
  */
+import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
+import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as Schema from "effect/Schema"
-import * as HttpBody from "effect/unstable/http/HttpBody"
-import * as HttpClient from "effect/unstable/http/HttpClient"
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest"
-import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse"
+import * as Redacted from "effect/Redacted"
+import type * as HttpClient from "effect/unstable/http/HttpClient"
+import * as LanguageModel from "effect/unstable/ai/LanguageModel"
+import * as Prompt from "effect/unstable/ai/Prompt"
 
 export type Message = { readonly role: "system" | "user"; readonly content: string }
-
-const Completion = Schema.Struct({
-  choices: Schema.optional(Schema.Array(Schema.Struct({
-    finish_reason: Schema.optional(Schema.NullOr(Schema.String)),
-    message: Schema.optional(Schema.Struct({
-      content: Schema.optional(Schema.NullOr(Schema.String))
-    }))
-  })))
-})
 
 export class Llm extends Context.Service<Llm, {
   readonly model: string
@@ -31,39 +24,42 @@ export class Llm extends Context.Service<Llm, {
 
 export const layer: Layer.Layer<Llm, Config.ConfigError, HttpClient.HttpClient> = Layer.effect(Llm)(
   Effect.gen(function*() {
-    const baseUrl = (yield* Config.string("JOURNAL_LLM_API_URL")).replace(/\/$/, "")
+    const apiUrl = (yield* Config.string("JOURNAL_LLM_API_URL")).replace(/\/$/, "")
     const model = yield* Config.string("JOURNAL_LLM_MODEL")
     const apiKey = yield* Config.string("JOURNAL_LLM_API_KEY").pipe(Config.withDefault(""))
-    const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient).pipe(
-      HttpClient.mapRequest((request) =>
-        apiKey ? HttpClientRequest.setHeader(request, "authorization", `Bearer ${apiKey}`) : request
-      )
+
+    const languageModel = OpenAiLanguageModel.layer({
+      model,
+      config: { reasoning: { effort: "low" } }
+    }).pipe(
+      Layer.provide(OpenAiClient.layer({
+        apiUrl,
+        ...(apiKey ? { apiKey: Redacted.make(apiKey) } : {})
+      }))
     )
+    const services = yield* Layer.build(languageModel)
 
     return {
       model,
       complete: (messages, maxTokens) =>
-        client.post(`${baseUrl}/chat/completions`, {
-          body: HttpBody.jsonUnsafe({
-            model,
-            messages,
-            max_completion_tokens: maxTokens,
-            reasoning_effort: "low"
-          })
+        Effect.gen(function*() {
+          const llm = yield* LanguageModel.LanguageModel
+          const response = yield* llm.generateText({
+            prompt: Prompt.make(messages.map((message) =>
+              message.role === "system"
+                ? { role: "system" as const, content: message.content }
+                : { role: "user" as const, content: message.content }
+            ))
+          }).pipe(OpenAiLanguageModel.withConfigOverride({ max_output_tokens: maxTokens }))
+          const content = response.text.trim()
+          return content
+            ? content
+            : yield* Effect.fail(
+              new Error(`journal LLM returned no final content (finish: ${response.finishReason})`)
+            )
         }).pipe(
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(Completion)),
-          Effect.mapError((cause) => new Error("journal LLM request failed", { cause })),
-          Effect.flatMap((completion) => {
-            const choice = completion.choices?.[0]
-            const content = choice?.message?.content?.trim()
-            return content
-              ? Effect.succeed(content)
-              : Effect.fail(
-                new Error(
-                  `journal LLM returned no final content (finish_reason: ${choice?.finish_reason ?? "none"})`
-                )
-              )
-          })
+          Effect.provideContext(services),
+          Effect.catchTag("AiError", (error) => Effect.fail(new Error("journal LLM request failed", { cause: error })))
         )
     }
   })

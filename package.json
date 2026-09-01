@@ -8,11 +8,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "effect": "4.0.0-rc.112",
-    "@effect/platform-node": "4.0.0-rc.112"
+    "@effect/ai-openai": "^4.0.0-rc.112",
+    "@effect/platform-node": "4.0.0-rc.112",
+    "effect": "4.0.0-rc.112"
   },
   "devDependencies": {
-    "typescript": "^5.9.0",
-    "@types/node": "^24"
+    "@types/node": "^24",
+    "typescript": "^5.9.0"
   }
 }
