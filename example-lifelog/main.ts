@@ -20,7 +20,7 @@ import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
 import type { Journal } from "./Resources.ts"
-import { audioSource, currentJournals, journalResource, notesSource, pipelineStatus } from "./Lifelog.ts"
+import { audioSource, currentJournals, journalForDay, journalResource, notesSource, pipelineStatus } from "./Lifelog.ts"
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
@@ -57,6 +57,24 @@ const Routes = HttpRouter.use((router) =>
         Effect.map((journals) => HttpServerResponse.html(page(journals))),
         Effect.orDie
       )
+    )
+    yield* router.add(
+      "GET",
+      "/journal/:day",
+      Effect.gen(function*() {
+        const { day } = yield* HttpRouter.params
+        if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
+        }
+        const journal = yield* journalForDay(day).pipe(Effect.orDie)
+        // Past days are settled (new audio for them is rare); the current and
+        // future days want re-checking as inputs land.
+        const today = new Date().toISOString().slice(0, 10)
+        const cacheControl = journal.day < today
+          ? "private, max-age=86400"
+          : "private, max-age=60"
+        return HttpServerResponse.jsonUnsafe(journal, { headers: { "cache-control": cacheControl } })
+      })
     )
     yield* router.add(
       "GET",

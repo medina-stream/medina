@@ -264,7 +264,10 @@ const materializeJournal = Effect.fn("materializeJournal")(
     for (const [index, batch] of batches(transcripts).entries()) {
       notes.push(yield* complete(NOTES_PROMPT, `Day: ${day}\nBatch ${index + 1}\n${batch}`, 6000))
     }
-    const report = yield* complete(JOURNAL_PROMPT, `Day: ${day}\n\nNotes:\n${notes.join("\n\n---\n\n")}`, 8000)
+    // A day with no inputs is a valid (empty) journal; no LLM involved.
+    const report = notes.length
+      ? yield* complete(JOURNAL_PROMPT, `Day: ${day}\n\nNotes:\n${notes.join("\n\n---\n\n")}`, 8000)
+      : ""
 
     yield* bucket.writeJson(
       key,
@@ -284,20 +287,42 @@ const materializeJournal = Effect.fn("materializeJournal")(
 
 type JournalEnv = Bucket | LanguageModel.LanguageModel
 
+const journalInstance = (day: string, transcripts: ReadonlyArray<Transcript>) => {
+  const inputKeys = transcripts.map((transcript) => transcriptKey(transcript.ingestId))
+  const key = journalKey(day, sha256(inputKeys.join("\n")))
+  return {
+    key,
+    label: day,
+    dependencies: inputKeys,
+    materialize: materializeJournal(day, transcripts, inputKeys, key)
+  }
+}
+
 export const journalResource: Resource<JournalEnv> = {
   name: "journal",
+  // Eager: days that have inputs. The hourly pass keeps these current, so the
+  // present day re-materializes as new audio lands.
   instances: Effect.map(transcriptsByDay, (days) =>
-    [...days].map(([day, transcripts]) => {
-      const inputKeys = transcripts.map((transcript) => transcriptKey(transcript.ingestId))
-      const key = journalKey(day, sha256(inputKeys.join("\n")))
-      return {
-        key,
-        label: day,
-        dependencies: inputKeys,
-        materialize: materializeJournal(day, transcripts, inputKeys, key)
-      }
-    }))
+    [...days].map(([day, transcripts]) => journalInstance(day, transcripts))),
+  // Lazy: any well-formed day dereferences, past or future — an input-less
+  // day materializes instantly as an empty journal.
+  instance: (day) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(day)
+      ? Effect.map(transcriptsByDay, (days) => journalInstance(day, days.get(day) ?? []))
+      : Effect.fail(new Error(`not a day: ${day}`))
 }
+
+/** Dereference the journal for a day: read it if current, materialize it if
+ * stale or never asked for. */
+export const journalForDay = (day: string) =>
+  Effect.gen(function*() {
+    const instance = yield* journalResource.instance!(day)
+    const bucket = yield* Bucket
+    const existing = yield* bucket.readJson(Journal, instance.key)
+    if (Option.isSome(existing)) return existing.value
+    yield* instance.materialize
+    return Option.getOrThrow(yield* bucket.readJson(Journal, instance.key))
+  })
 
 // --- derived views ----------------------------------------------------------
 
