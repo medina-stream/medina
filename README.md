@@ -22,11 +22,12 @@ resources defined for this data — lives in `example-lifelog/`.
 
 ## The data is just files
 
-All pipeline state lives in one directory of JSON files (`data/artifacts/`,
-gitignored, configurable via `DATA_DIR`), accessed with ordinary filesystem
+All pipeline state lives in one directory of JSON files (`DATA_DIR`, default
+`data/artifacts/`), accessed with ordinary filesystem
 calls — no store abstraction, no object-store dependency. Self-hosted Medina
 points `DATA_DIR` at a local directory; a hosted deployment points it at a
-mounted filesystem such as an Archil disk. Writes are atomic and reads avoid
+mounted filesystem such as an Archil disk (this VM: `/mnt/archil/medina`,
+mounted by `archil-mount.service`). Writes are atomic and reads avoid
 per-file stats, so network-backed mounts behave.
 
 ## Compatibility freeze

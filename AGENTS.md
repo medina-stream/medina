@@ -18,7 +18,8 @@ that repo `main` can be slightly ahead of the published RC; the installed
 
 ## State
 
-`data/artifacts/` is the data dir — all pipeline state, gitignored, just a
+`DATA_DIR` (on this VM: `/mnt/archil/medina`, an Archil disk mounted by
+`archil-mount.service`) is the data dir — all pipeline state, just a
 directory of JSON files accessed with plain filesystem calls (see README
 “The data is just files”). Do not
 delete it: it contains transcripts exported from the previous Cloudflare

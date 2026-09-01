@@ -4,7 +4,7 @@
  *
  * The schemas intentionally match the JSON written by the previous
  * Cloudflare implementation, so existing transcripts and journals under
- * `data/artifacts` are reused as-is instead of re-processing audio.
+ * the data dir are reused as-is instead of re-processing audio.
  */
 import * as Schema from "effect/Schema"
 import { join } from "node:path"
