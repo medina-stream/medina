@@ -14,10 +14,10 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import * as Redacted from "effect/Redacted"
-import * as Artifacts from "./Artifacts.ts"
-import * as AssemblyAI from "./AssemblyAI.ts"
+import * as Artifacts from "../lib/Artifacts.ts"
+import * as AssemblyAI from "../lib/AssemblyAI.ts"
 import type { Journal } from "./Domain.ts"
-import * as Drive from "./Drive.ts"
+import * as Drive from "../lib/Drive.ts"
 import { currentJournals, pipelineStatus, runPipeline } from "./Pipeline.ts"
 
 const escapeHtml = (value: string) =>

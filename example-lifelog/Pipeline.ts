@@ -13,8 +13,8 @@ import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
-import { Artifacts } from "./Artifacts.ts"
-import { AssemblyAI, type VendorTranscript } from "./AssemblyAI.ts"
+import { Artifacts } from "../lib/Artifacts.ts"
+import { AssemblyAI, type VendorTranscript } from "../lib/AssemblyAI.ts"
 import {
   captureDay,
   captureTime,
@@ -28,7 +28,7 @@ import {
   Triage,
   vendorKey
 } from "./Domain.ts"
-import { Drive, type DriveFile } from "./Drive.ts"
+import { Drive, type DriveFile } from "../lib/Drive.ts"
 
 /**
  * One final answer from the language model. A reasoning-only response with no

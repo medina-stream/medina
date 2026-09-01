@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch --env-file=.env --experimental-strip-types src/main.ts",
-    "start": "node --env-file=.env --experimental-strip-types src/main.ts",
+    "dev": "node --watch --env-file=.env --experimental-strip-types example-lifelog/main.ts",
+    "start": "node --env-file=.env --experimental-strip-types example-lifelog/main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
