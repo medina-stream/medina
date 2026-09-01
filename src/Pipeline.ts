@@ -7,8 +7,11 @@
  * transcript keys exists ⇒ the LLM is not re-run.
  */
 import { createHash } from "node:crypto"
+import * as Config from "effect/Config"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
+import * as LanguageModel from "effect/unstable/ai/LanguageModel"
+import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import { Artifacts } from "./Artifacts.ts"
 import { AssemblyAI, type VendorTranscript } from "./AssemblyAI.ts"
 import {
@@ -25,7 +28,26 @@ import {
   vendorKey
 } from "./Domain.ts"
 import { Drive, type DriveFile } from "./Drive.ts"
-import { Llm, type Message } from "./Llm.ts"
+
+/**
+ * One final answer from the language model. A reasoning-only response with no
+ * final text fails the run, so working notes never reach the page.
+ */
+const complete = (system: string, user: string, maxTokens: number) =>
+  LanguageModel.generateText({
+    prompt: [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ]
+  }).pipe(
+    OpenAiLanguageModel.withConfigOverride({ max_output_tokens: maxTokens }),
+    Effect.flatMap((response) => {
+      const content = response.text.trim()
+      return content
+        ? Effect.succeed(content)
+        : Effect.fail(new Error(`journal LLM returned no final content (finish: ${response.finishReason})`))
+    })
+  )
 
 const SOURCE_NAME = "easy-voice"
 const MAX_BATCH_CHARS = 90_000
@@ -138,19 +160,11 @@ const journalDay = Effect.fn("journalDay")(function*(day: string, transcripts: R
   if (yield* artifacts.exists(key)) return
 
   yield* Effect.log(`journaling ${day} (${transcripts.length} transcripts)`)
-  const llm = yield* Llm
   const notes: Array<string> = []
   for (const [index, batch] of batches(transcripts).entries()) {
-    const messages: ReadonlyArray<Message> = [
-      { role: "system", content: NOTES_PROMPT },
-      { role: "user", content: `Day: ${day}\nBatch ${index + 1}\n${batch}` }
-    ]
-    notes.push(yield* llm.complete(messages, 6000))
+    notes.push(yield* complete(NOTES_PROMPT, `Day: ${day}\nBatch ${index + 1}\n${batch}`, 6000))
   }
-  const report = yield* llm.complete([
-    { role: "system", content: JOURNAL_PROMPT },
-    { role: "user", content: `Day: ${day}\n\nNotes:\n${notes.join("\n\n---\n\n")}` }
-  ], 8000)
+  const report = yield* complete(JOURNAL_PROMPT, `Day: ${day}\n\nNotes:\n${notes.join("\n\n---\n\n")}`, 8000)
 
   yield* artifacts.writeJson(
     key,
@@ -159,7 +173,7 @@ const journalDay = Effect.fn("journalDay")(function*(day: string, transcripts: R
       day,
       inputHash,
       transcriptKeys: inputKeys,
-      model: llm.model,
+      model: yield* Config.string("JOURNAL_LLM_MODEL").pipe(Config.withDefault(null)),
       generatedAt: new Date().toISOString(),
       status: "completed",
       report

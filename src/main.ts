@@ -11,11 +11,13 @@ import * as Layer from "effect/Layer"
 import * as Schedule from "effect/Schedule"
 import * as HttpRouter from "effect/unstable/http/HttpRouter"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
+import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
+import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
+import * as Redacted from "effect/Redacted"
 import * as Artifacts from "./Artifacts.ts"
 import * as AssemblyAI from "./AssemblyAI.ts"
 import type { Journal } from "./Domain.ts"
 import * as Drive from "./Drive.ts"
-import * as Llm from "./Llm.ts"
 import { currentJournals, runPipeline } from "./Pipeline.ts"
 
 const escapeHtml = (value: string) =>
@@ -68,10 +70,22 @@ const Ingest = Layer.effectDiscard(
   })
 )
 
+/** The journal language model: OpenAI Responses API via the exe.dev relay. */
+const LlmLive = Layer.unwrap(
+  Effect.gen(function*() {
+    const apiUrl = (yield* Config.string("JOURNAL_LLM_API_URL")).replace(/\/$/, "")
+    const model = yield* Config.string("JOURNAL_LLM_MODEL")
+    const apiKey = yield* Config.string("JOURNAL_LLM_API_KEY").pipe(Config.withDefault(""))
+    return OpenAiLanguageModel.layer({ model, config: { reasoning: { effort: "low" } } }).pipe(
+      Layer.provide(OpenAiClient.layer({ apiUrl, ...(apiKey ? { apiKey: Redacted.make(apiKey) } : {}) }))
+    )
+  })
+)
+
 const Services = Layer.mergeAll(
   Drive.layer,
   AssemblyAI.layer,
-  Llm.layer
+  LlmLive
 ).pipe(
   Layer.provideMerge(Artifacts.layer(process.env.ARTIFACTS_DIR ?? "data/artifacts")),
   Layer.provideMerge(NodeServices.layer),
