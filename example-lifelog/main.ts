@@ -1,10 +1,9 @@
 /**
- * Medina, the Effect edition: a Node process that hourly ingests the latest N
+ * Medina, the Effect edition: a Bun process that hourly ingests the latest N
  * Drive files, transcribes new audio with AssemblyAI, journals each day with
  * an LLM, and serves the journal at GET /.
  */
-import { createServer } from "node:http"
-import { NodeHttpClient, NodeHttpServer, NodeRuntime, NodeServices } from "@effect/platform-node"
+import { BunHttpClient, BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun"
 import * as Config from "effect/Config"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -98,8 +97,8 @@ const Services = Layer.mergeAll(
   LlmLive
 ).pipe(
   Layer.provideMerge(Artifacts.layer(process.env.ARTIFACTS_DIR ?? "data/artifacts")),
-  Layer.provideMerge(NodeServices.layer),
-  Layer.provideMerge(NodeHttpClient.layerUndici)
+  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(BunHttpClient.layer)
 )
 
 const Main = Layer.mergeAll(
@@ -107,7 +106,7 @@ const Main = Layer.mergeAll(
   Ingest
 ).pipe(
   Layer.provide(Services),
-  Layer.provide(NodeHttpServer.layer(createServer, { port: Number(process.env.PORT ?? 8000) }))
+  Layer.provide(BunHttpServer.layer({ port: Number(process.env.PORT ?? 8000) }))
 )
 
-NodeRuntime.runMain(Layer.launch(Main))
+BunRuntime.runMain(Layer.launch(Main))

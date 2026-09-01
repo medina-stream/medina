@@ -3,13 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch --env-file=.env --experimental-strip-types example-lifelog/main.ts",
-    "start": "node --env-file=.env --experimental-strip-types example-lifelog/main.ts",
+    "dev": "bun --watch example-lifelog/main.ts",
+    "start": "bun example-lifelog/main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@effect/ai-openai": "^4.0.0-rc.112",
-    "@effect/platform-node": "4.0.0-rc.112",
+    "@effect/platform-bun": "4.0.0-rc.112",
     "effect": "4.0.0-rc.112"
   },
   "devDependencies": {
