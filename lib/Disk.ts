@@ -1,6 +1,6 @@
 /**
- * Bucket: a keyed JSON/blob store on a directory. The directory *is* the
- * bucket — self-hosted Medina points it at a local disk, serverless Medina
+ * Disk: a keyed JSON/blob store on a directory. The directory *is* the
+ * disk — self-hosted Medina points it at a local disk, serverless Medina
  * at a mounted filesystem (e.g. an Archil disk). Writes are atomic
  * (tmp + rename) and reads avoid per-key stats, so the same code behaves on
  * both local disks and network-backed mounts.
@@ -17,7 +17,7 @@ import * as Option from "effect/Option"
 import * as Path from "effect/Path"
 import * as Schema from "effect/Schema"
 
-export class Bucket extends Context.Service<Bucket, {
+export class Disk extends Context.Service<Disk, {
   readonly readJson: <S extends Schema.Codec<any, any>>(
     schema: S,
     key: string
@@ -25,17 +25,17 @@ export class Bucket extends Context.Service<Bucket, {
   readonly writeJson: (key: string, value: unknown) => Effect.Effect<void, Error>
   readonly exists: (key: string) => Effect.Effect<boolean, Error>
   readonly list: (prefix: string) => Effect.Effect<ReadonlyArray<string>, Error>
-}>()("medina/Bucket") {}
+}>()("medina/Disk") {}
 
 export const layer = (
   root: string
-): Layer.Layer<Bucket, never, FileSystem.FileSystem | Path.Path> =>
-  Layer.effect(Bucket)(
+): Layer.Layer<Disk, never, FileSystem.FileSystem | Path.Path> =>
+  Layer.effect(Disk)(
     Effect.gen(function*() {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const resolve = (key: string) => path.join(root, key)
-      const mapError = (cause: unknown) => new Error(`bucket failure`, { cause })
+      const mapError = (cause: unknown) => new Error(`disk failure`, { cause })
 
       return {
         readJson: (schema, key) =>
@@ -60,7 +60,7 @@ export const layer = (
 
         // One recursive listing, no per-key stat: cheap on network mounts.
         // Directories are inferred (every parent of an entry is one) — the
-        // bucket never holds empty directories. In-flight tmp files are not
+        // disk never holds empty directories. In-flight tmp files are not
         // keys.
         list: (prefix) =>
           Effect.gen(function*() {

@@ -14,7 +14,7 @@ import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
-import { Bucket } from "../lib/Bucket.ts"
+import { Disk } from "../lib/Disk.ts"
 import { AssemblyAI, type VendorTranscript } from "../lib/AssemblyAI.ts"
 import { Drive, type DriveFile } from "../lib/Drive.ts"
 import { Git } from "../lib/Git.ts"
@@ -66,10 +66,10 @@ const normalize = (file: DriveFile, id: string, vendor: VendorTranscript): Trans
   })
 
 const transcribeFile = Effect.fn("transcribeFile")(function*(file: DriveFile) {
-  const bucket = yield* Bucket
+  const disk = yield* Disk
   const id = ingestId(AUDIO_SOURCE_NAME, file.id, file.md5Checksum ?? file.modifiedTime)
   const key = transcriptKey(id)
-  if (yield* bucket.exists(key)) return "cached" as const
+  if (yield* disk.exists(key)) return "cached" as const
   if (!file.mimeType.startsWith("audio/")) {
     yield* Effect.logDebug(`skipping non-audio file ${file.name} (${file.mimeType})`)
     return "skipped" as const
@@ -79,12 +79,12 @@ const transcribeFile = Effect.fn("transcribeFile")(function*(file: DriveFile) {
   const assemblyai = yield* AssemblyAI
   const audio = yield* drive.download(file.id)
   const vendor = yield* assemblyai.transcribe(audio)
-  yield* bucket.writeJson(vendorKey(id), vendor)
-  yield* bucket.writeJson(key, normalize(file, id, vendor))
+  yield* disk.writeJson(vendorKey(id), vendor)
+  yield* disk.writeJson(key, normalize(file, id, vendor))
   return "transcribed" as const
 })
 
-export const audioSource = (folderId: string, latest: number): Source<Drive | AssemblyAI | Bucket> => ({
+export const audioSource = (folderId: string, latest: number): Source<Drive | AssemblyAI | Disk> => ({
   name: AUDIO_SOURCE_NAME,
   ingest: Effect.gen(function*() {
     const drive = yield* Drive
@@ -126,15 +126,15 @@ const noteCaptureTime = (repo: string, path: string) => {
 
 const ingestNote = (repo: string) =>
   Effect.fn("ingestNote")(function*(file: { path: string; blobSha: string }) {
-    const bucket = yield* Bucket
+    const disk = yield* Disk
     if (!file.path.endsWith(".md")) return "skipped" as const
     const id = ingestId(NOTES_SOURCE_NAME, file.path, file.blobSha)
     const key = noteKey(id)
-    if (yield* bucket.exists(key)) return "cached" as const
+    if (yield* disk.exists(key)) return "cached" as const
     const git = yield* Git
     const text = yield* git.readBlob(repo, file.blobSha)
     const capturedAt = yield* noteCaptureTime(repo, file.path)
-    yield* bucket.writeJson(
+    yield* disk.writeJson(
       key,
       new Note({
         provider: "git",
@@ -150,7 +150,7 @@ const ingestNote = (repo: string) =>
     return "ingested" as const
   })
 
-export const notesSource = (repo: string): Source<Git | Bucket> => ({
+export const notesSource = (repo: string): Source<Git | Disk> => ({
   name: NOTES_SOURCE_NAME,
   ingest: Effect.gen(function*() {
     const git = yield* Git
@@ -204,18 +204,18 @@ const complete = (system: string, user: string, maxTokens: number) =>
  * transcripts without `capturedAt` recover it from their triage record's
  * filename. */
 const transcriptsByDay = Effect.gen(function*() {
-  const bucket = yield* Bucket
-  const keys = yield* bucket.list(`transcript/${TRANSCRIPT_VERSION}`)
+  const disk = yield* Disk
+  const keys = yield* disk.list(`transcript/${TRANSCRIPT_VERSION}`)
   const days = new Map<string, Array<Transcript & { capturedAt: string }>>()
   for (const key of keys) {
     if (key.endsWith(".assemblyai.json")) continue
-    const decoded = yield* bucket.readJson(Transcript, key)
+    const decoded = yield* disk.readJson(Transcript, key)
     if (Option.isNone(decoded)) continue
     const transcript = decoded.value
     if (transcript.status !== "completed" || !transcript.text?.trim()) continue
     let capturedAt = transcript.capturedAt
     if (!capturedAt) {
-      const triage = yield* bucket.readJson(Triage, `triage/${transcript.ingestId}.json`)
+      const triage = yield* disk.readJson(Triage, `triage/${transcript.ingestId}.json`)
       if (Option.isNone(triage)) continue
       capturedAt = captureTime(triage.value.filename, triage.value.receivedAt)
     }
@@ -259,7 +259,7 @@ const JOURNAL_PROMPT =
 
 const materializeJournal = Effect.fn("materializeJournal")(
   function*(day: string, transcripts: ReadonlyArray<Transcript>, inputKeys: ReadonlyArray<string>, key: string) {
-    const bucket = yield* Bucket
+    const disk = yield* Disk
     yield* Effect.log(`journaling ${day} (${transcripts.length} transcripts)`)
     const notes: Array<string> = []
     for (const [index, batch] of batches(transcripts).entries()) {
@@ -270,7 +270,7 @@ const materializeJournal = Effect.fn("materializeJournal")(
       ? yield* complete(JOURNAL_PROMPT, `Day: ${day}\n\nNotes:\n${notes.join("\n\n---\n\n")}`, 8000)
       : ""
 
-    yield* bucket.writeJson(
+    yield* disk.writeJson(
       key,
       new Journal({
         version: JOURNAL_VERSION,
@@ -286,7 +286,7 @@ const materializeJournal = Effect.fn("materializeJournal")(
   }
 )
 
-type JournalEnv = Bucket | LanguageModel.LanguageModel
+type JournalEnv = Disk | LanguageModel.LanguageModel
 
 const journalInstance = (day: string, transcripts: ReadonlyArray<Transcript>) => {
   const inputKeys = transcripts.map((transcript) => transcriptKey(transcript.ingestId))
@@ -315,7 +315,7 @@ export const journalResource: Resource<JournalEnv> = {
 
 /** No captures can exist before this day (nothing to lifelog pre-birth) or
  * after today; those journals get a hard-coded empty response and are never
- * persisted, so lazy derefs can't fill the bucket with noise. */
+ * persisted, so lazy derefs can't fill the disk with noise. */
 const EPOCH_DAY = "1979-01-01"
 
 /** Today as a capture day, from the ambient Clock (not the wall). */
@@ -335,7 +335,7 @@ const emptyJournal = (day: string, generatedAt: string) =>
 
 /** Dereference the journal for a day: read it if current, materialize it if
  * stale or never asked for. Days outside [EPOCH_DAY, today] are answered
- * without touching the bucket. */
+ * without touching the disk. */
 export const journalForDay = (day: string) =>
   Effect.gen(function*() {
     const now = yield* DateTime.now
@@ -343,26 +343,26 @@ export const journalForDay = (day: string) =>
       return emptyJournal(day, DateTime.formatIso(now))
     }
     const instance = yield* journalResource.instance!(day)
-    const bucket = yield* Bucket
-    const existing = yield* bucket.readJson(Journal, instance.key)
+    const disk = yield* Disk
+    const existing = yield* disk.readJson(Journal, instance.key)
     if (Option.isSome(existing)) return existing.value
     yield* instance.materialize
-    return Option.getOrThrow(yield* bucket.readJson(Journal, instance.key))
+    return Option.getOrThrow(yield* disk.readJson(Journal, instance.key))
   })
 
 // --- derived views ----------------------------------------------------------
 
 /**
- * A pipeline status summary, derived entirely from the bucket: the last run's
+ * A pipeline status summary, derived entirely from the disk: the last run's
  * report plus per-day input/journal freshness. Days whose journal hash doesn't
  * match the current input set are `stale` (a journal run is due).
  */
 export const pipelineStatus = Effect.gen(function*() {
-  const bucket = yield* Bucket
-  const lastRun = yield* bucket.readJson(RunReport, RUN_REPORT_KEY).pipe(
+  const disk = yield* Disk
+  const lastRun = yield* disk.readJson(RunReport, RUN_REPORT_KEY).pipe(
     Effect.orElseSucceed(() => Option.none<RunReport>())
   )
-  const journalKeys = yield* bucket.list(`journal/${JOURNAL_VERSION}`)
+  const journalKeys = yield* disk.list(`journal/${JOURNAL_VERSION}`)
   const days = yield* transcriptsByDay
   const byDay = [...days]
     .sort(([a], [b]) => b.localeCompare(a))
@@ -388,8 +388,8 @@ export const pipelineStatus = Effect.gen(function*() {
 })
 
 export const currentJournals = Effect.gen(function*() {
-  const bucket = yield* Bucket
-  const keys = yield* bucket.list(`journal/${JOURNAL_VERSION}`)
+  const disk = yield* Disk
+  const keys = yield* disk.list(`journal/${JOURNAL_VERSION}`)
   const days = yield* transcriptsByDay
   const journals: Array<Journal> = []
   for (const [day, transcripts] of days) {
@@ -400,7 +400,7 @@ export const currentJournals = Effect.gen(function*() {
     const fallback = keys.filter((key) => key.includes(`/${day}/`)).at(-1)
     const key = current ?? fallback
     if (!key) continue
-    const journal = yield* bucket.readJson(Journal, key)
+    const journal = yield* disk.readJson(Journal, key)
     if (Option.isSome(journal)) journals.push(journal.value)
   }
   return journals.sort((a, b) => b.day.localeCompare(a.day))

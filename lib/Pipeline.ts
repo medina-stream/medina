@@ -1,12 +1,12 @@
 /**
  * The pipeline: run every source's ingest, then materialize every stale
- * resource instance. The bucket is the only state; a resource instance's key
+ * resource instance. The disk is the only state; a resource instance's key
  * exists ⇔ it is current, so a pass is idempotent and does no LLM or vendor
  * work for anything already materialized.
  */
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
-import { Bucket } from "./Bucket.ts"
+import { Disk } from "./Disk.ts"
 import type { Resource, Source, SourceReport } from "./Resource.ts"
 
 export class RunReport extends Schema.Class<RunReport>("RunReport")({
@@ -51,14 +51,14 @@ export const runPipeline = <R>(
       sourceReports.push({ name: source.name, ...counts })
     }
 
-    const bucket = yield* Bucket
+    const disk = yield* Disk
     const materialized: Array<{ resource: string; label: string }> = []
     for (const resource of resources) {
       const instances = yield* resource.instances.pipe(
         Effect.catchCause((cause) => fail("instances", resource.name)(cause).pipe(Effect.as([])))
       )
       for (const instance of instances) {
-        if (yield* bucket.exists(instance.key)) continue
+        if (yield* disk.exists(instance.key)) continue
         yield* Effect.log(`materializing ${resource.name}/${instance.label}`)
         yield* instance.materialize.pipe(
           Effect.tap(() => Effect.sync(() => materialized.push({ resource: resource.name, label: instance.label }))),
@@ -67,7 +67,7 @@ export const runPipeline = <R>(
       }
     }
 
-    yield* bucket.writeJson(
+    yield* disk.writeJson(
       RUN_REPORT_KEY,
       new RunReport({
         startedAt,

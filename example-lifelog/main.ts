@@ -14,7 +14,7 @@ import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as Redacted from "effect/Redacted"
-import * as Bucket from "../lib/Bucket.ts"
+import * as Disk from "../lib/Disk.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
 import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
@@ -45,7 +45,7 @@ const page = (journals: ReadonlyArray<Journal>) => {
   body { max-width: 46rem; margin: 0 auto; padding: 3rem 1.25rem 6rem; line-height: 1.6; }
   h1 { font-size: 2.25rem; margin: 0; } header p, .empty { color: #777; } section { border-top: 1px solid #bbb; margin-top: 2.5rem; padding-top: 1.5rem; }
   h2 { font-size: 1.25rem; margin: 0 0 1rem; } p { margin: .75rem 0; }
-</style></head><body><header><h1>Journal</h1><p>Daily reports from available Medina bucket.</p></header><main>${sections}</main></body></html>`
+</style></head><body><header><h1>Journal</h1><p>Daily reports from available Medina disk.</p></header><main>${sections}</main></body></html>`
 }
 
 const Routes = HttpRouter.use((router) =>
@@ -87,7 +87,7 @@ const Routes = HttpRouter.use((router) =>
   })
 )
 
-type LifelogEnv = Drive.Drive | AssemblyAI.AssemblyAI | Git.Git | Bucket.Bucket | LanguageModel.LanguageModel
+type LifelogEnv = Drive.Drive | AssemblyAI.AssemblyAI | Git.Git | Disk.Disk | LanguageModel.LanguageModel
 
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
@@ -123,7 +123,7 @@ const Services = Layer.mergeAll(
   Git.layer,
   LlmLive
 ).pipe(
-  Layer.provideMerge(Bucket.layer(process.env.BUCKET_DIR ?? "data/artifacts")),
+  Layer.provideMerge(Disk.layer(process.env.DISK_DIR ?? "data/artifacts")),
   Layer.provideMerge(BunServices.layer),
   Layer.provideMerge(BunHttpClient.layer)
 )

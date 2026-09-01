@@ -1,5 +1,5 @@
 /**
- * Resource shapes and keys: what gets materialized into the bucket, plus
+ * Resource shapes and keys: what gets materialized into the disk, plus
  * capture-time rules.
  *
  * The schemas intentionally match the JSON written by the previous
