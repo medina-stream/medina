@@ -1,7 +1,8 @@
 /**
- * Shared domain types and helpers: artifact schemas and capture-time rules.
+ * Resource shapes and keys: what gets materialized into the bucket, plus
+ * capture-time rules.
  *
- * The schemas intentionally match the JSON artifacts written by the previous
+ * The schemas intentionally match the JSON written by the previous
  * Cloudflare implementation, so existing transcripts and journals under
  * `data/artifacts` are reused as-is instead of re-processing audio.
  */
@@ -48,7 +49,7 @@ export class Journal extends Schema.Class<Journal>("Journal")({
   report: Schema.String
 }) {}
 
-/** The subset of the old triage artifact needed to recover capture times. */
+/** The subset of the old triage record needed to recover capture times. */
 export class Triage extends Schema.Class<Triage>("Triage")({
   filename: Schema.String,
   receivedAt: Schema.String
