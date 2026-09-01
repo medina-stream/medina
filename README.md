@@ -16,9 +16,8 @@ reference (the RC differs from both v3 and the published docs in places).
 - [`src/Artifacts.ts`](./src/Artifacts.ts) — keyed JSON store on the local filesystem (the role R2 used to play). Keys keep their old shapes (`transcript/assemblyai-u35p-v1/…`, `journal/journal-v4/…`).
 - [`src/Drive.ts`](./src/Drive.ts) — Google Drive list/download via the exe.dev service-account token mint.
 - [`src/AssemblyAI.ts`](./src/AssemblyAI.ts) — upload + transcript job + poll-until-settled.
-- [`src/Llm.ts`](./src/Llm.ts) — OpenAI-compatible chat completions that demand a final answer (reasoning-only responses fail the run).
-- [`src/Pipeline.ts`](./src/Pipeline.ts) — the pass itself: transcribe files that lack a transcript artifact, then journal days whose input set changed.
-- [`src/main.ts`](./src/main.ts) — layers wired together: HTTP server for `GET /` plus an hourly scheduled pipeline fiber.
+- [`src/Pipeline.ts`](./src/Pipeline.ts) — the pass itself: transcribe files that lack a transcript artifact, then journal days whose input set changed. Journal text comes from Effect's `LanguageModel` (`@effect/ai-openai`), with a guard that a reasoning-only response with no final text fails the run.
+- [`src/main.ts`](./src/main.ts) — layers wired together: Drive, AssemblyAI, the OpenAI-backed `LanguageModel`, and the artifact store; an HTTP server for `GET /` plus an hourly scheduled pipeline fiber.
 
 ## State model
 
