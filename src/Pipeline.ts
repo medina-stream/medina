@@ -10,6 +10,7 @@ import { createHash } from "node:crypto"
 import * as Config from "effect/Config"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
+import * as Schema from "effect/Schema"
 import * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import { Artifacts } from "./Artifacts.ts"
@@ -79,10 +80,10 @@ const transcribeFile = Effect.fn("transcribeFile")(function*(file: DriveFile) {
   const artifacts = yield* Artifacts
   const id = ingestId(SOURCE_NAME, file.id, file.md5Checksum ?? file.modifiedTime)
   const key = transcriptKey(id)
-  if (yield* artifacts.exists(key)) return
+  if (yield* artifacts.exists(key)) return "cached" as const
   if (!file.mimeType.startsWith("audio/")) {
     yield* Effect.logDebug(`skipping non-audio file ${file.name} (${file.mimeType})`)
-    return
+    return "skipped" as const
   }
   yield* Effect.log(`transcribing ${file.name}`)
   const drive = yield* Drive
@@ -91,6 +92,7 @@ const transcribeFile = Effect.fn("transcribeFile")(function*(file: DriveFile) {
   const vendor = yield* assemblyai.transcribe(audio)
   yield* artifacts.writeJson(vendorKey(id), vendor)
   yield* artifacts.writeJson(key, normalize(file, id, vendor))
+  return "transcribed" as const
 })
 
 /** All completed, non-empty transcripts, grouped by capture day. Old artifacts
@@ -157,7 +159,7 @@ const journalDay = Effect.fn("journalDay")(function*(day: string, transcripts: R
   const inputKeys = transcripts.map((transcript) => transcriptKey(transcript.ingestId))
   const inputHash = sha256(inputKeys.join("\n"))
   const key = journalKey(day, inputHash)
-  if (yield* artifacts.exists(key)) return
+  if (yield* artifacts.exists(key)) return "current" as const
 
   yield* Effect.log(`journaling ${day} (${transcripts.length} transcripts)`)
   const notes: Array<string> = []
@@ -179,25 +181,98 @@ const journalDay = Effect.fn("journalDay")(function*(day: string, transcripts: R
       report
     })
   )
+  return "journaled" as const
 })
+
+/** What one pipeline pass did, written to `runs/latest.json` after every pass. */
+export class RunReport extends Schema.Class<RunReport>("RunReport")({
+  startedAt: Schema.String,
+  finishedAt: Schema.String,
+  discovered: Schema.Number,
+  transcribed: Schema.Number,
+  cached: Schema.Number,
+  skipped: Schema.Number,
+  journaled: Schema.Array(Schema.String),
+  failures: Schema.Array(Schema.Struct({ stage: Schema.String, item: Schema.String, error: Schema.String }))
+}) {}
+
+export const RUN_REPORT_KEY = "runs/latest.json"
 
 /** One full pass: ingest + transcribe the latest N files, then journal each day. */
 export const runPipeline = (folderId: string, latest: number) =>
   Effect.gen(function*() {
+    const startedAt = new Date().toISOString()
+    const failures: Array<{ stage: string; item: string; error: string }> = []
+    const fail = (stage: string, item: string) => (cause: unknown) => {
+      failures.push({ stage, item, error: String(cause).slice(0, 500) })
+      return Effect.logError(`${stage} failed for ${item}`, cause)
+    }
+
     const drive = yield* Drive
     const files = yield* drive.list(folderId, latest)
     yield* Effect.log(`discovered ${files.length} files`)
-    // Transcribe sequentially with bounded concurrency; one failure doesn't stop the rest.
-    yield* Effect.forEach(files, (file) =>
+    // Transcribe with bounded concurrency; one failure doesn't stop the rest.
+    const outcomes = yield* Effect.forEach(files, (file) =>
       transcribeFile(file).pipe(
-        Effect.catchCause((cause) => Effect.logError(`transcription failed for ${file.name}`, cause))
+        Effect.catchCause((cause) => fail("transcribe", file.name)(cause).pipe(Effect.as("failed" as const)))
       ), { concurrency: 2 })
     const days = yield* transcriptsByDay
+    const journaled: Array<string> = []
     yield* Effect.forEach(days, ([day, transcripts]) =>
       journalDay(day, transcripts).pipe(
-        Effect.catchCause((cause) => Effect.logError(`journal failed for ${day}`, cause))
+        Effect.tap((outcome) => outcome === "journaled" ? Effect.sync(() => journaled.push(day)) : Effect.void),
+        Effect.catchCause(fail("journal", day))
       ))
+
+    const artifacts = yield* Artifacts
+    const count = (outcome: string) => outcomes.filter((entry) => entry === outcome).length
+    yield* artifacts.writeJson(
+      RUN_REPORT_KEY,
+      new RunReport({
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        discovered: files.length,
+        transcribed: count("transcribed"),
+        cached: count("cached"),
+        skipped: count("skipped"),
+        journaled,
+        failures
+      })
+    )
   })
+
+/**
+ * A pipeline status summary, derived entirely from the artifact store: the
+ * last run's report plus per-day input/journal freshness. Days whose journal
+ * hash doesn't match the current input set are `stale` (a journal run is due).
+ */
+export const pipelineStatus = Effect.gen(function*() {
+  const artifacts = yield* Artifacts
+  const lastRun = yield* artifacts.readJson(RunReport, RUN_REPORT_KEY)
+  const journalKeys = yield* artifacts.list(`journal/${JOURNAL_VERSION}`)
+  const days = yield* transcriptsByDay
+  const byDay = [...days]
+    .sort(([a], [b]) => b.localeCompare(a))
+    .map(([day, transcripts]) => {
+      const inputHash = sha256(transcripts.map((transcript) => transcriptKey(transcript.ingestId)).join("\n"))
+      const journal = journalKeys.includes(journalKey(day, inputHash))
+        ? "current"
+        : journalKeys.some((key) => key.includes(`/${day}/`))
+          ? "stale"
+          : "missing"
+      return { day, transcripts: transcripts.length, journal }
+    })
+  return {
+    lastRun: Option.getOrNull(lastRun),
+    days: byDay,
+    totals: {
+      days: byDay.length,
+      transcripts: byDay.reduce((sum, entry) => sum + entry.transcripts, 0),
+      current: byDay.filter((entry) => entry.journal === "current").length,
+      stale: byDay.filter((entry) => entry.journal !== "current").length
+    }
+  }
+})
 
 /** The most recent journal per day, for rendering. */
 export const currentJournals = Effect.gen(function*() {

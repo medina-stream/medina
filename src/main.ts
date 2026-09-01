@@ -18,7 +18,7 @@ import * as Artifacts from "./Artifacts.ts"
 import * as AssemblyAI from "./AssemblyAI.ts"
 import type { Journal } from "./Domain.ts"
 import * as Drive from "./Drive.ts"
-import { currentJournals, runPipeline } from "./Pipeline.ts"
+import { currentJournals, pipelineStatus, runPipeline } from "./Pipeline.ts"
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
@@ -47,14 +47,24 @@ const page = (journals: ReadonlyArray<Journal>) => {
 }
 
 const Routes = HttpRouter.use((router) =>
-  router.add(
-    "GET",
-    "/",
-    currentJournals.pipe(
-      Effect.map((journals) => HttpServerResponse.html(page(journals))),
-      Effect.orDie
+  Effect.gen(function*() {
+    yield* router.add(
+      "GET",
+      "/",
+      currentJournals.pipe(
+        Effect.map((journals) => HttpServerResponse.html(page(journals))),
+        Effect.orDie
+      )
     )
-  )
+    yield* router.add(
+      "GET",
+      "/status",
+      pipelineStatus.pipe(
+        Effect.map((status) => HttpServerResponse.jsonUnsafe(status)),
+        Effect.orDie
+      )
+    )
+  })
 )
 
 /** Runs the pipeline immediately, then hourly. */
