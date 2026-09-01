@@ -20,7 +20,7 @@ import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
 import type { Journal } from "./Resources.ts"
-import { audioSource, currentJournals, journalForDay, journalResource, notesSource, pipelineStatus } from "./Lifelog.ts"
+import { audioSource, currentJournals, journalForDay, journalResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
@@ -69,7 +69,7 @@ const Routes = HttpRouter.use((router) =>
         const journal = yield* journalForDay(day).pipe(Effect.orDie)
         // Past days are settled (new audio for them is rare); the current and
         // future days want re-checking as inputs land.
-        const today = new Date().toISOString().slice(0, 10)
+        const today = yield* todayDay
         const cacheControl = journal.day < today
           ? "private, max-age=86400"
           : "private, max-age=60"

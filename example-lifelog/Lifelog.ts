@@ -9,6 +9,7 @@
  */
 import { createHash } from "node:crypto"
 import * as Config from "effect/Config"
+import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import * as LanguageModel from "effect/unstable/ai/LanguageModel"
@@ -312,10 +313,35 @@ export const journalResource: Resource<JournalEnv> = {
       : Effect.fail(new Error(`not a day: ${day}`))
 }
 
+/** No captures can exist before this day (nothing to lifelog pre-birth) or
+ * after today; those journals get a hard-coded empty response and are never
+ * persisted, so lazy derefs can't fill the bucket with noise. */
+const EPOCH_DAY = "1979-01-01"
+
+/** Today as a capture day, from the ambient Clock (not the wall). */
+export const todayDay = Effect.map(DateTime.now, DateTime.formatIsoDate)
+
+const emptyJournal = (day: string, generatedAt: string) =>
+  new Journal({
+    version: JOURNAL_VERSION,
+    day,
+    inputHash: sha256(""),
+    transcriptKeys: [],
+    model: null,
+    generatedAt,
+    status: "completed",
+    report: ""
+  })
+
 /** Dereference the journal for a day: read it if current, materialize it if
- * stale or never asked for. */
+ * stale or never asked for. Days outside [EPOCH_DAY, today] are answered
+ * without touching the bucket. */
 export const journalForDay = (day: string) =>
   Effect.gen(function*() {
+    const now = yield* DateTime.now
+    if (day < EPOCH_DAY || day > DateTime.formatIsoDate(now)) {
+      return emptyJournal(day, DateTime.formatIso(now))
+    }
     const instance = yield* journalResource.instance!(day)
     const bucket = yield* Bucket
     const existing = yield* bucket.readJson(Journal, instance.key)
