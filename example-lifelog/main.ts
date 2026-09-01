@@ -20,7 +20,7 @@ import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
 import type * as FileSystem from "effect/FileSystem"
 import { dataPath, type Journal } from "./Resources.ts"
-import { audioSource, currentJournals, journalForDay, journalResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { audioSource, attributionResource, currentJournals, dayIndexResource, journalForDay, journalResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
@@ -96,7 +96,8 @@ const Ingest = Layer.effectDiscard(
     const notesRepo = yield* Config.string("NOTES_REPO_DIR")
     yield* runPipeline<LifelogEnv>(
       [audioSource(folderId, latest), notesSource(notesRepo)],
-      [journalResource],
+      // Order matters: attributions before the index, the index before journals.
+      [attributionResource, dayIndexResource, journalResource],
       dataPath
     ).pipe(
       Effect.catchCause((cause) => Effect.logError("pipeline run failed", cause)),

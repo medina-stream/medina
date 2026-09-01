@@ -18,6 +18,12 @@ export const dataPath = (key: string) => join(DATA_DIR, key)
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
 export const JOURNAL_VERSION = "journal-v4"
 export const NOTE_VERSION = "notes-git-v1"
+export const ATTRIBUTION_VERSION = "attribution-v1"
+export const DAY_INDEX_VERSION = "days-v1"
+
+/** The main body-recorder channel. Channels separate simultaneous audio
+ * perspectives within the stream (e.g. a future headphone-audio channel). */
+export const CHANNEL_MAIN = "lifelog-audio-1"
 
 export const noteKey = (ingestId: string) => `note/${NOTE_VERSION}/${ingestId}.json`
 
@@ -91,8 +97,121 @@ export const captureTime = (filename: string, modifiedTime: string): string => {
   return modifiedTime.replace(/(\.\d+)?Z$/, "")
 }
 
-/** The calendar day a capture belongs to, in the capture's own local time. */
-export const captureDay = (capturedAt: string) => capturedAt.slice(0, 10)
-
 export const ingestId = (sourceName: string, fileId: string, checksum: string) =>
   `${sourceName}-${fileId}-${checksum}`.replace(/[^a-zA-Z0-9_-]/g, "")
+
+// --- captures: contenthash identity + provenance ----------------------------
+
+/**
+ * A capture's id is the sha256 of its bytes. Everything the source knew about
+ * the file (filename, Drive id, times — often the only clue to when it was
+ * recorded) is preserved as provenance beside the blob; ingest never discards
+ * source metadata, and never interprets it — that is attribution's job.
+ *
+ * Legacy captures (pre-contenthash, audio not retained) use their old
+ * `ingestId` as capture id; their evidence lives in the transcript's
+ * `capturedAt` and `triage/` records instead of provenance.
+ */
+export const captureDir = (captureId: string) => `capture/${captureId}`
+export const provenanceKey = (captureId: string) => `${captureDir(captureId)}/provenance.json`
+
+/** The blob keeps its original filename (sanitized), so provenance survives
+ * even if every JSON record were lost. */
+export const captureBlobName = (filename: string) => {
+  const name = filename.replace(/[/\\]/g, "_")
+  return name === "provenance.json" || name.startsWith(".tmp-") ? `_${name}` : name
+}
+
+export class ProvenanceRecord extends Schema.Class<ProvenanceRecord>("ProvenanceRecord")({
+  source: Schema.String,
+  filename: Schema.String,
+  fileId: Schema.String,
+  mimeType: Schema.String,
+  modifiedTime: Schema.String,
+  md5Checksum: Schema.NullOr(Schema.String),
+  fetchedAt: Schema.String
+}) {}
+
+export class Provenance extends Schema.Class<Provenance>("Provenance")({
+  captureId: Schema.String,
+  records: Schema.Array(ProvenanceRecord)
+}) {}
+
+/** Source-side receipt that a source file has been ingested, so a pass can
+ * skip it with one existence check (the capture id is not derivable from
+ * source metadata alone — hashing requires the bytes). */
+export const ingestReceiptKey = (sourceName: string, fileId: string, checksum: string) =>
+  `ingest/${sourceName}/${`${fileId}-${checksum}`.replace(/[^a-zA-Z0-9_-]/g, "")}.json`
+
+export class IngestReceipt extends Schema.Class<IngestReceipt>("IngestReceipt")({
+  captureId: Schema.String,
+  ingestedAt: Schema.String
+}) {}
+
+// --- attribution: believed time/zone/channel, correctable -------------------
+
+/**
+ * Attribution is the interpretation layer: for each capture, the believed
+ * UTC start instant, IANA zone, and channel, derived from evidence (never
+ * mutated at ingest). A correction file, when present, overrides the guess.
+ *
+ * Freshness follows the key-bakes-basis-hash scheme: the file lives at
+ * `attribution/<version>/<captureId>/<basisHash>.json`, where the basis
+ * covers the attribution version and the correction text. Evidence files
+ * (transcripts, triage, provenance) are immutable, so they participate in
+ * materialization but not the basis.
+ */
+export const attributionDir = (captureId: string) => `attribution/${ATTRIBUTION_VERSION}/${captureId}`
+export const attributionKey = (captureId: string, basisHash: string) =>
+  `${attributionDir(captureId)}/${basisHash}.json`
+
+export class Attribution extends Schema.Class<Attribution>("Attribution")({
+  version: Schema.String,
+  captureId: Schema.String,
+  channel: Schema.String,
+  /** UTC instant, full ISO; null when no evidence yields a guess. */
+  estimatedStartTime: Schema.NullOr(Schema.String),
+  /** IANA zone the capture is believed recorded in (never a bare offset). */
+  timeZone: Schema.NullOr(Schema.String),
+  /** Local civil date at estimatedStartTime in timeZone: the journal day. */
+  day: Schema.NullOr(Schema.String),
+  method: Schema.String,
+  confidence: Schema.Literals(["high", "medium", "low", "corrected", "none"]),
+  attributedAt: Schema.String
+}) {}
+
+/** Hand-written (or API-written) override for one capture. Partial: set only
+ * the fields being corrected. `estimatedStartTime` is a UTC instant. */
+export const correctionKey = (captureId: string) => `correction/${captureId}.json`
+
+export class Correction extends Schema.Class<Correction>("Correction")({
+  estimatedStartTime: Schema.optional(Schema.String),
+  timeZone: Schema.optional(Schema.String),
+  channel: Schema.optional(Schema.String),
+  note: Schema.optional(Schema.String)
+}) {}
+
+// --- day index: the one derived view over all attributions ------------------
+
+/** One file answering “which captures (with usable transcripts) belong to
+ * which day”, so serving never scans the corpus. Keyed by a hash of the
+ * current attribution + transcript sets; any change stales it. */
+export const dayIndexKey = (inputHash: string) => `index/${DAY_INDEX_VERSION}/${inputHash}.json`
+
+export class DayEntry extends Schema.Class<DayEntry>("DayEntry")({
+  captureId: Schema.String,
+  transcriptKey: Schema.String,
+  startTime: Schema.String,
+  timeZone: Schema.String,
+  channel: Schema.String,
+  /** sha256 of the correction file applied to this capture, if any — flows
+   * into the journal's input hash so corrections re-journal the day. */
+  correctionHash: Schema.NullOr(Schema.String)
+}) {}
+
+export class DayIndex extends Schema.Class<DayIndex>("DayIndex")({
+  version: Schema.String,
+  inputHash: Schema.String,
+  builtAt: Schema.String,
+  days: Schema.Record(Schema.String, Schema.Array(DayEntry))
+}) {}

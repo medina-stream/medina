@@ -28,7 +28,18 @@ shapes and JSON field names are frozen (see README “Compatibility freeze”).
 
 ## Vocabulary
 
-Use the project's terms: source, capture, ingest, resource,
-materialize, stale/freshness (see `lib/Resource.ts`). Don't introduce
+Use the project's terms: stream, source, capture, channel, ingest,
+provenance, attribution, correction, resource, materialize, stale/freshness
+(see `lib/Resource.ts` and `example-lifelog/Resources.ts`). Don't introduce
 synonyms (artifact, asset, bucket, domain, job).
+
+## Time
+
+Internally everything is UTC; each capture carries a believed IANA zone
+(never a bare offset), and its journal day is the local civil date where it
+was recorded. `HOME_TZ` interprets zone-less evidence and zone-less request
+labels only — it must never override a capture's own zone belief. Ingest
+never discards or interprets source metadata (filenames are often the only
+record of when something was recorded); interpretation lives in the
+attribution layer, which is correctable via `correction/<captureId>.json`.
 
