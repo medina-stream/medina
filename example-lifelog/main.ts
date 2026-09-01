@@ -12,12 +12,15 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
+import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as Redacted from "effect/Redacted"
 import * as Bucket from "../lib/Bucket.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
-import type { Journal } from "./Resources.ts"
 import * as Drive from "../lib/Drive.ts"
-import { currentJournals, pipelineStatus, runPipeline } from "./Pipeline.ts"
+import * as Git from "../lib/Git.ts"
+import { runPipeline } from "../lib/Pipeline.ts"
+import type { Journal } from "./Resources.ts"
+import { audioSource, currentJournals, journalResource, notesSource, pipelineStatus } from "./Lifelog.ts"
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
@@ -66,11 +69,17 @@ const Routes = HttpRouter.use((router) =>
   })
 )
 
+type LifelogEnv = Drive.Drive | AssemblyAI.AssemblyAI | Git.Git | Bucket.Bucket | LanguageModel.LanguageModel
+
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const folderId = yield* Config.string("GDRIVE_FOLDER_ID")
     const latest = yield* Config.int("SOURCE_LATEST").pipe(Config.withDefault(25))
-    yield* runPipeline(folderId, latest).pipe(
+    const notesRepo = yield* Config.string("NOTES_REPO_DIR")
+    yield* runPipeline<LifelogEnv>(
+      [audioSource(folderId, latest), notesSource(notesRepo)],
+      [journalResource]
+    ).pipe(
       Effect.catchCause((cause) => Effect.logError("pipeline run failed", cause)),
       Effect.repeat(Schedule.spaced("1 hour")),
       Effect.forkScoped
@@ -93,6 +102,7 @@ const LlmLive = Layer.unwrap(
 const Services = Layer.mergeAll(
   Drive.layer,
   AssemblyAI.layer,
+  Git.layer,
   LlmLive
 ).pipe(
   Layer.provideMerge(Bucket.layer(process.env.BUCKET_DIR ?? "data/artifacts")),

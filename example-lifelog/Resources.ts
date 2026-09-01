@@ -10,6 +10,21 @@ import * as Schema from "effect/Schema"
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
 export const JOURNAL_VERSION = "journal-v4"
+export const NOTE_VERSION = "notes-git-v1"
+
+export const noteKey = (ingestId: string) => `note/${NOTE_VERSION}/${ingestId}.json`
+
+/** One note file as of a git commit, captured from the notes checkout. */
+export class Note extends Schema.Class<Note>("Note")({
+  provider: Schema.Literal("git"),
+  version: Schema.String,
+  ingestId: Schema.String,
+  path: Schema.String,
+  blobSha: Schema.String,
+  capturedAt: Schema.NullOr(Schema.String),
+  importedAt: Schema.String,
+  text: Schema.String
+}) {}
 
 export const transcriptKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.json`
 export const vendorKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.assemblyai.json`
