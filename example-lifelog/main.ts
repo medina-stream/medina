@@ -15,6 +15,8 @@ import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as Redacted from "effect/Redacted"
+import * as Option from "effect/Option"
+import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
 import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
@@ -85,24 +87,25 @@ const Routes = HttpRouter.use((router) =>
         Effect.orDie
       )
     )
-    // Push ingest: apps (e.g. a GPS logger) POST batches here. The proxy
-    // can't authenticate an app, so the request must carry INGEST_TOKEN —
-    // `Authorization: Bearer <token>` when the app supports headers, or
-    // `?token=` when it only lets you configure a URL. `?source=` labels the
-    // provenance (defaults to "http"). The body is stored as an
-    // uninterpreted capture; deriving anything from it is a future
-    // resource's job.
+    // Push ingest: apps (e.g. a GPS logger) POST batches here from the
+    // tailnet. Identity comes from Tailscale: the WireGuard peer behind the
+    // source address must map to the owner's login. No tokens — the tailnet
+    // is the credential. `?source=` labels the provenance (default "http").
+    // The body is stored as an uninterpreted capture; deriving anything
+    // from it is a future resource's job.
     yield* router.add(
       "POST",
       "/in",
       Effect.gen(function*() {
         const request = yield* HttpServerRequest.HttpServerRequest
         const params = yield* HttpServerRequest.ParsedSearchParams
-        const expected = yield* Config.string("INGEST_TOKEN").pipe(Config.withDefault(""))
-        const bearer = request.headers["authorization"]?.replace(/^Bearer\s+/i, "")
-        const token = bearer ?? (typeof params.token === "string" ? params.token : undefined)
-        if (!expected || token !== expected) {
-          return HttpServerResponse.text("forbidden", { status: 403 })
+        const owner = yield* Config.string("INGEST_OWNER")
+        const address = Option.getOrNull(request.remoteAddress)
+        const tailscale = yield* Tailscale
+        const login = address ? yield* tailscale.whois(address) : null
+        if (!login || login !== owner) {
+          yield* Effect.log(`ingest rejected: ${address ?? "unknown"} -> ${login ?? "not on tailnet"}`)
+          return HttpServerResponse.text("forbidden: not you", { status: 403 })
         }
         const source = typeof params.source === "string" && params.source ? params.source : "http"
         if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(source)) {
@@ -113,7 +116,7 @@ const Routes = HttpRouter.use((router) =>
         const contentType = request.headers["content-type"] ?? "application/octet-stream"
         const result = yield* Effect.orDie(httpIngest(source, body, contentType))
         yield* Effect.log(
-          `http ingest ${source}: ${result.bytes} bytes -> ${result.captureId.slice(0, 12)}${
+          `http ingest ${source} (${login}): ${result.bytes} bytes -> ${result.captureId.slice(0, 12)}${
             result.duplicate ? " (duplicate)" : ""
           }`
         )
@@ -159,6 +162,7 @@ const Services = Layer.mergeAll(
   Drive.layer,
   AssemblyAI.layer,
   Git.layer,
+  tailscaleLayer,
   LlmLive
 ).pipe(
   Layer.provideMerge(BunServices.layer),
