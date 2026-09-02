@@ -143,11 +143,12 @@ const Routes = HttpRouter.use((router) =>
         const body = new Uint8Array(yield* Effect.orDie(request.arrayBuffer))
         if (body.length === 0) return HttpServerResponse.text("empty body", { status: 400 })
         const contentType = request.headers["content-type"] ?? "application/octet-stream"
-        // GPS posts are parsed at the door: the points are the signal, the
-        // envelope is scaffolding. Unparseable bodies still land as blob
-        // captures so nothing is silently dropped.
-        if (source.startsWith("gps-")) {
-          const points = parseGpsBody(source, new TextDecoder().decode(body))
+        // GPS is recognized by content, not by source label — the phone just
+        // posts to /in, like Drive files are recognized as audio by mimeType.
+        // The points are the signal, the envelope is scaffolding; unparseable
+        // bodies still land as blob captures so nothing is silently dropped.
+        {
+          const points = parseGpsBody(source === "http" ? "gps-gpslogger" : source, new TextDecoder().decode(body))
           if (points) {
             const count = yield* Effect.orDie(gpsInboxWrite(points))
             yield* Effect.log(`gps ingest ${source} (${login}): ${count} points`)
