@@ -17,6 +17,7 @@ import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as Redacted from "effect/Redacted"
 import * as Option from "effect/Option"
 import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
+import { gpsCompactSource, gpsDay, gpsInboxWrite, parseGpsBody } from "./Gps.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
 import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
@@ -87,6 +88,22 @@ const Routes = HttpRouter.use((router) =>
         Effect.orDie
       )
     )
+    yield* router.add(
+      "GET",
+      "/gps/:day",
+      Effect.gen(function*() {
+        const { day } = yield* HttpRouter.params
+        if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
+        }
+        const points = yield* Effect.orDie(gpsDay(day))
+        const today = yield* todayDay
+        const cacheControl = day < today ? "private, max-age=3600" : "private, max-age=60"
+        return HttpServerResponse.jsonUnsafe({ day, count: points.length, points }, {
+          headers: { "cache-control": cacheControl }
+        })
+      })
+    )
     // Push ingest: apps (e.g. a GPS logger) POST batches here from the
     // tailnet. Identity comes from Tailscale: the WireGuard peer behind the
     // source address must map to the owner's login. No tokens — the tailnet
@@ -114,6 +131,17 @@ const Routes = HttpRouter.use((router) =>
         const body = new Uint8Array(yield* Effect.orDie(request.arrayBuffer))
         if (body.length === 0) return HttpServerResponse.text("empty body", { status: 400 })
         const contentType = request.headers["content-type"] ?? "application/octet-stream"
+        // GPS posts are parsed at the door: the points are the signal, the
+        // envelope is scaffolding. Unparseable bodies still land as blob
+        // captures so nothing is silently dropped.
+        if (source.startsWith("gps-")) {
+          const points = parseGpsBody(source, new TextDecoder().decode(body))
+          if (points) {
+            const count = yield* Effect.orDie(gpsInboxWrite(points))
+            yield* Effect.log(`gps ingest ${source} (${login}): ${count} points`)
+            return HttpServerResponse.jsonUnsafe({ ok: true, points: count })
+          }
+        }
         const result = yield* Effect.orDie(httpIngest(source, body, contentType))
         yield* Effect.log(
           `http ingest ${source} (${login}): ${result.bytes} bytes -> ${result.captureId.slice(0, 12)}${
@@ -134,7 +162,7 @@ const Ingest = Layer.effectDiscard(
     const latest = yield* Config.int("SOURCE_LATEST").pipe(Config.withDefault(25))
     const notesRepo = yield* Config.string("NOTES_REPO_DIR")
     yield* runPipeline<LifelogEnv>(
-      [audioSource(folderId, latest), notesSource(notesRepo)],
+      [audioSource(folderId, latest), notesSource(notesRepo), gpsCompactSource],
       // Order matters: attributions before the index, the index before journals.
       [attributionResource, dayIndexResource, journalResource],
       dataPath
