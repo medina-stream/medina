@@ -86,23 +86,28 @@ const Routes = HttpRouter.use((router) =>
       )
     )
     // Push ingest: apps (e.g. a GPS logger) POST batches here. The proxy
-    // can't authenticate an app, so the route requires the INGEST_TOKEN as a
-    // path segment (many apps only let you configure a URL). The body is
-    // stored as an uninterpreted capture; deriving anything from it is a
-    // future resource's job.
+    // can't authenticate an app, so the request must carry INGEST_TOKEN —
+    // `Authorization: Bearer <token>` when the app supports headers, or
+    // `?token=` when it only lets you configure a URL. `?source=` labels the
+    // provenance (defaults to "http"). The body is stored as an
+    // uninterpreted capture; deriving anything from it is a future
+    // resource's job.
     yield* router.add(
       "POST",
-      "/ingest/:token/:source",
+      "/in",
       Effect.gen(function*() {
-        const { token, source } = yield* HttpRouter.params
+        const request = yield* HttpServerRequest.HttpServerRequest
+        const params = yield* HttpServerRequest.ParsedSearchParams
         const expected = yield* Config.string("INGEST_TOKEN").pipe(Config.withDefault(""))
+        const bearer = request.headers["authorization"]?.replace(/^Bearer\s+/i, "")
+        const token = bearer ?? (typeof params.token === "string" ? params.token : undefined)
         if (!expected || token !== expected) {
           return HttpServerResponse.text("forbidden", { status: 403 })
         }
-        if (!source || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(source)) {
-          return HttpServerResponse.text("source must be [a-z0-9-], e.g. gps-overland", { status: 400 })
+        const source = typeof params.source === "string" && params.source ? params.source : "http"
+        if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(source)) {
+          return HttpServerResponse.text("source must be [a-z0-9-], e.g. gps-gpslogger", { status: 400 })
         }
-        const request = yield* HttpServerRequest.HttpServerRequest
         const body = new Uint8Array(yield* Effect.orDie(request.arrayBuffer))
         if (body.length === 0) return HttpServerResponse.text("empty body", { status: 400 })
         const contentType = request.headers["content-type"] ?? "application/octet-stream"
