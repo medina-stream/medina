@@ -102,9 +102,9 @@ const Routes = HttpRouter.use((router) =>
         const owner = yield* Config.string("INGEST_OWNER")
         const address = Option.getOrNull(request.remoteAddress)
         const tailscale = yield* Tailscale
-        const login = address ? yield* tailscale.whois(address) : null
+        const login = yield* tailscale.identify(address, request.headers)
         if (!login || login !== owner) {
-          yield* Effect.log(`ingest rejected: ${address ?? "unknown"} -> ${login ?? "not on tailnet"}`)
+          yield* Effect.log(`ingest rejected: ${address ?? "unknown"} -> ${login ?? "unidentified"}`)
           return HttpServerResponse.text("forbidden: not you", { status: 403 })
         }
         const source = typeof params.source === "string" && params.source ? params.source : "http"
