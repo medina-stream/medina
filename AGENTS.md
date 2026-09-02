@@ -33,6 +33,14 @@ provenance, attribution, correction, resource, materialize, stale/freshness
 (see `lib/Resource.ts` and `example-lifelog/Resources.ts`). Don't introduce
 synonyms (artifact, asset, bucket, domain, job).
 
+## Dependencies
+
+The filesystem (`DATA_DIR`) is the only core dependency: the record lives
+there, and losing any peripheral service must never lose data. Peripherals
+(AssemblyAI, the LLM, DuckDB, buckets, celld) produce or serve the record
+but never hold it — speed-layer state (e.g. last known location) is a
+cache, rebuildable from the record, outside the freshness machinery.
+
 ## Time
 
 Internally everything is UTC; each capture carries a believed IANA zone

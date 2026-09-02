@@ -24,11 +24,18 @@ resources defined for this data — lives in `example-lifelog/`.
 
 All pipeline state lives in one directory of JSON files (`DATA_DIR`, default
 `data/artifacts/`), accessed with ordinary filesystem
-calls — no store abstraction, no object-store dependency. Self-hosted Medina
+calls — no store abstraction. Self-hosted Medina
 points `DATA_DIR` at a local directory; a hosted deployment points it at a
 mounted filesystem such as an Archil disk (this VM: `/mnt/archil/medina`,
 mounted by `archil-mount.service`). Writes are atomic and reads avoid
 per-file stats, so network-backed mounts behave.
+
+The filesystem is Medina's only *core* dependency — the record lives there,
+and losing any other service must never lose data. Everything else is a
+peripheral capability, used where apt and replaceable without migration:
+AssemblyAI produces transcripts, an LLM writes journals, DuckDB queries
+parquet, and an object-store bucket may back speed-layer state (e.g. celld
+cells) — caches and coordination, never the record.
 
 ## Compatibility freeze
 
