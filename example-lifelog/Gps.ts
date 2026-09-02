@@ -17,9 +17,7 @@ import { createHash } from "node:crypto"
 import { execFile } from "node:child_process"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
-import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
-import * as Files from "../lib/Files.ts"
 import { dataPath } from "./Resources.ts"
 import type { Source, SourceReport } from "../lib/Resource.ts"
 
@@ -261,36 +259,69 @@ export const gpsDay = (day: string) =>
       batt: number | null
     }>
   })
-// --- speed layer: last known location ------------------------------------------
+// --- "my location": the end-user view ------------------------------------------
 
 /**
- * The "now" view, parallel to the batch pipeline: updated on every ingest,
- * never load-bearing — it is a cache of the latest point, rebuildable from
- * the partitions, outside the freshness/correction machinery. Kept in
- * process memory with write-through to `gps/latest.json` so restarts don't
- * forget where you are.
+ * A simple summary of recent GPS evidence: the last known fix plus what the
+ * trailing points say about movement. Computed on demand from the point
+ * store (partitions + inbox) — a view, not a materialized resource, since
+ * "where am I" changes with every ping. Deliberately unfancy; forecasting
+ * and place-naming come later, carefully.
  */
-const LATEST_KEY = "gps/latest.json"
 
-export class LatestLocation extends Schema.Class<LatestLocation>("LatestLocation")({
-  point: GpsPoint,
-  /** When the server learned of it (vs. point.ts, when the fix happened). */
-  receivedAt: Schema.String
-}) {}
+const EARTH_RADIUS_M = 6_371_000
 
-let latestMemo: LatestLocation | null = null
+const haversineMeters = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
+  const rad = (deg: number) => (deg * Math.PI) / 180
+  const dLat = rad(b.lat - a.lat)
+  const dLon = rad(b.lon - a.lon)
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(h))
+}
 
-export const updateLatest = Effect.fn("updateLatest")(function*(points: ReadonlyArray<GpsPoint>) {
-  const newest = [...points].sort((a, b) => a.ts.localeCompare(b.ts)).at(-1)
-  if (!newest) return
-  if (latestMemo && latestMemo.point.ts >= newest.ts) return
-  latestMemo = new LatestLocation({ point: newest, receivedAt: new Date().toISOString() })
-  yield* Files.writeJson(dataPath(LATEST_KEY), latestMemo)
-})
+const utcDay = (date: Date) => date.toISOString().slice(0, 10)
 
-export const latestLocation = Effect.gen(function*() {
-  if (latestMemo) return latestMemo
-  const persisted = yield* Files.readJson(LatestLocation, dataPath(LATEST_KEY))
-  latestMemo = Option.getOrNull(persisted)
-  return latestMemo
+export const locationSummary = Effect.gen(function*() {
+  const now = new Date()
+  const today = utcDay(now)
+  const yesterday = utcDay(new Date(now.getTime() - 86_400_000))
+  // Trailing window across the UTC-midnight seam.
+  const points = [...(yield* gpsDay(yesterday)), ...(yield* gpsDay(today))]
+  if (points.length === 0) return null
+
+  const last = points.at(-1)!
+  const lastMs = Date.parse(last.ts)
+  const ageSeconds = Math.max(0, Math.round((now.getTime() - lastMs) / 1000))
+
+  // Movement, judged from the last 15 minutes of fixes before the last one.
+  const windowStart = lastMs - 15 * 60 * 1000
+  const recent = points.filter((point) => Date.parse(point.ts) >= windowStart)
+  const first = recent[0]!
+  const displacementM = Math.round(haversineMeters(first, last))
+  const spanSeconds = Math.max(1, (lastMs - Date.parse(first.ts)) / 1000)
+  // Path distance catches pacing-in-circles that displacement misses.
+  let pathM = 0
+  for (let i = 1; i < recent.length; i++) pathM += haversineMeters(recent[i - 1]!, recent[i]!)
+
+  const state = ageSeconds > 3600
+    ? ("stale" as const)
+    : displacementM > 100 || pathM > 250
+      ? ("moving" as const)
+      : ("stationary" as const)
+
+  return {
+    lat: last.lat,
+    lon: last.lon,
+    ts: last.ts,
+    ageSeconds,
+    state,
+    recent: {
+      windowMinutes: 15,
+      fixes: recent.length,
+      displacementMeters: displacementM,
+      pathMeters: Math.round(pathM),
+      averageSpeedMps: Number((pathM / spanSeconds).toFixed(2))
+    },
+    source: last.source
+  }
 })

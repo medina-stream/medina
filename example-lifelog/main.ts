@@ -17,7 +17,7 @@ import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as Redacted from "effect/Redacted"
 import * as Option from "effect/Option"
 import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
-import { gpsCompactSource, gpsDay, gpsInboxWrite, latestLocation, parseGpsBody, updateLatest } from "./Gps.ts"
+import { gpsCompactSource, gpsDay, gpsInboxWrite, locationSummary, parseGpsBody } from "./Gps.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
 import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
@@ -88,25 +88,13 @@ const Routes = HttpRouter.use((router) =>
         Effect.orDie
       )
     )
-    // The "now" view for assistants: last known location plus staleness.
+    // "My location" for assistants and UIs: last fix plus a movement summary.
     yield* router.add(
       "GET",
-      "/now",
+      "/location",
       Effect.gen(function*() {
-        const latest = yield* Effect.orDie(latestLocation)
-        if (!latest) return HttpServerResponse.jsonUnsafe({ location: null })
-        const ageMs = Date.now() - Date.parse(latest.point.ts)
-        return HttpServerResponse.jsonUnsafe({
-          location: {
-            lat: latest.point.lat,
-            lon: latest.point.lon,
-            ts: latest.point.ts,
-            ageSeconds: Math.round(ageMs / 1000),
-            speed: latest.point.speed,
-            source: latest.point.source,
-            receivedAt: latest.receivedAt
-          }
-        }, { headers: { "cache-control": "no-store" } })
+        const location = yield* Effect.orDie(locationSummary)
+        return HttpServerResponse.jsonUnsafe({ location }, { headers: { "cache-control": "no-store" } })
       })
     )
     yield* router.add(
@@ -159,7 +147,6 @@ const Routes = HttpRouter.use((router) =>
           const points = parseGpsBody(source, new TextDecoder().decode(body))
           if (points) {
             const count = yield* Effect.orDie(gpsInboxWrite(points))
-            yield* Effect.orDie(updateLatest(points))
             yield* Effect.log(`gps ingest ${source} (${login}): ${count} points`)
             return HttpServerResponse.jsonUnsafe({ ok: true, points: count })
           }
