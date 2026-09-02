@@ -400,11 +400,14 @@ const readCorrection = (captureId: string) =>
     return { correction, hash: sha256(text) }
   })
 
-/** What attribution for one capture must be derived from: version + any
- * correction. Evidence (transcript/triage/provenance) is immutable per
- * capture id, so it does not participate in the basis. */
-const attributionBasisHash = (correctionHash: string | null) =>
-  sha256(`${ATTRIBUTION_VERSION}\n${correctionHash ?? ""}`)
+/** What attribution for one capture must be derived from: version, any
+ * correction, and the home zone (zone-less evidence is interpreted in it, so
+ * changing HOME_TZ after a move re-attributes -- and thus re-journals --
+ * every capture whose zone belief came from the default). Evidence
+ * (transcript/triage/provenance) is immutable per capture id, so it does
+ * not participate. */
+const attributionBasisHash = (correctionHash: string | null, homeZone: string) =>
+  sha256(`${ATTRIBUTION_VERSION}\n${homeZone}\n${correctionHash ?? ""}`)
 
 /** Best-evidence guess (or correction) for one capture. */
 const attributeCapture = Effect.fn("attributeCapture")(function*(captureId: string, basisHash: string) {
@@ -491,9 +494,10 @@ export const attributionResource: Resource<AttributionEnv> = {
   name: "attribution",
   instances: Effect.gen(function*() {
     const captureIds = yield* transcribedCaptures
+    const zone = yield* homeTimeZone
     return yield* Effect.forEach(captureIds, (captureId) =>
       Effect.map(readCorrection(captureId), ({ hash }) => {
-        const basisHash = attributionBasisHash(hash)
+        const basisHash = attributionBasisHash(hash, zone)
         return {
           key: attributionKey(captureId, basisHash),
           label: captureId,
@@ -507,7 +511,7 @@ export const attributionResource: Resource<AttributionEnv> = {
 /** Read a capture's current attribution, materializing if stale/missing. */
 const currentAttribution = Effect.fn("currentAttribution")(function*(captureId: string) {
   const { hash } = yield* readCorrection(captureId)
-  const basisHash = attributionBasisHash(hash)
+  const basisHash = attributionBasisHash(hash, yield* homeTimeZone)
   const key = attributionKey(captureId, basisHash)
   const existing = yield* Files.readJson(Attribution, dataPath(key))
   if (Option.isSome(existing)) return { attribution: existing.value, correctionHash: hash }
@@ -532,10 +536,13 @@ const currentAttribution = Effect.fn("currentAttribution")(function*(captureId: 
  */
 const dayIndexBasis = Effect.gen(function*() {
   const captureIds = yield* transcribedCaptures
+  const zone = yield* homeTimeZone
   const pairs = yield* Effect.forEach(captureIds, (captureId) =>
     Effect.map(readCorrection(captureId), ({ hash }) => ({ captureId, correctionHash: hash })))
+  // The home zone participates: changing it re-attributes zone-less captures,
+  // so the index (and downstream journals) must re-derive.
   const inputHash = sha256(
-    [DAY_INDEX_VERSION, ...pairs.map((pair) => `${pair.captureId}:${pair.correctionHash ?? ""}`)].join("\n")
+    [DAY_INDEX_VERSION, zone, ...pairs.map((pair) => `${pair.captureId}:${pair.correctionHash ?? ""}`)].join("\n")
   )
   return { pairs, inputHash }
 })
