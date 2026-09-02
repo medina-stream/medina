@@ -17,7 +17,9 @@ import { createHash } from "node:crypto"
 import { execFile } from "node:child_process"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
+import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
+import * as Files from "../lib/Files.ts"
 import { dataPath } from "./Resources.ts"
 import type { Source, SourceReport } from "../lib/Resource.ts"
 
@@ -259,3 +261,36 @@ export const gpsDay = (day: string) =>
       batt: number | null
     }>
   })
+// --- speed layer: last known location ------------------------------------------
+
+/**
+ * The "now" view, parallel to the batch pipeline: updated on every ingest,
+ * never load-bearing — it is a cache of the latest point, rebuildable from
+ * the partitions, outside the freshness/correction machinery. Kept in
+ * process memory with write-through to `gps/latest.json` so restarts don't
+ * forget where you are.
+ */
+const LATEST_KEY = "gps/latest.json"
+
+export class LatestLocation extends Schema.Class<LatestLocation>("LatestLocation")({
+  point: GpsPoint,
+  /** When the server learned of it (vs. point.ts, when the fix happened). */
+  receivedAt: Schema.String
+}) {}
+
+let latestMemo: LatestLocation | null = null
+
+export const updateLatest = Effect.fn("updateLatest")(function*(points: ReadonlyArray<GpsPoint>) {
+  const newest = [...points].sort((a, b) => a.ts.localeCompare(b.ts)).at(-1)
+  if (!newest) return
+  if (latestMemo && latestMemo.point.ts >= newest.ts) return
+  latestMemo = new LatestLocation({ point: newest, receivedAt: new Date().toISOString() })
+  yield* Files.writeJson(dataPath(LATEST_KEY), latestMemo)
+})
+
+export const latestLocation = Effect.gen(function*() {
+  if (latestMemo) return latestMemo
+  const persisted = yield* Files.readJson(LatestLocation, dataPath(LATEST_KEY))
+  latestMemo = Option.getOrNull(persisted)
+  return latestMemo
+})
