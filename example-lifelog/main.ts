@@ -14,6 +14,9 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
+import type { WorkflowEngine } from "effect/unstable/workflow/WorkflowEngine"
+import { ClusterLive, WorkflowEngineLive } from "./Cluster.ts"
+import { JournalWorkflowLayer } from "./Lifelog.ts"
 import * as Redacted from "effect/Redacted"
 import * as Option from "effect/Option"
 import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
@@ -163,7 +166,7 @@ const Routes = HttpRouter.use((router) =>
   })
 )
 
-type LifelogEnv = Drive.Drive | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel
+type LifelogEnv = Drive.Drive | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine
 
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
@@ -195,13 +198,23 @@ const LlmLive = Layer.unwrap(
   })
 )
 
+// The journal workflow's LLM activities need the language model at
+// registration time. Layer memoization means LlmLive builds once even
+// though it also appears in Services.
+const WorkflowsLive = JournalWorkflowLayer.pipe(Layer.provide(LlmLive))
+
 const Services = Layer.mergeAll(
   Drive.layer,
   AssemblyAI.layer,
   Git.layer,
   tailscaleLayer,
-  LlmLive
+  LlmLive,
+  WorkflowsLive
 ).pipe(
+  // Engine on top of the single-process cluster; everything above can
+  // execute workflows, the pipeline and routes included.
+  Layer.provideMerge(WorkflowEngineLive),
+  Layer.provideMerge(ClusterLive),
   Layer.provideMerge(BunServices.layer),
   Layer.provideMerge(BunHttpClient.layer)
 )
