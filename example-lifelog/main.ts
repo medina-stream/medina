@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schedule from "effect/Schedule"
 import * as HttpRouter from "effect/unstable/http/HttpRouter"
+import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
@@ -20,7 +21,7 @@ import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
 import type * as FileSystem from "effect/FileSystem"
 import { dataPath, type Journal } from "./Resources.ts"
-import { audioSource, attributionResource, currentJournals, dayIndexResource, journalForDay, journalResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { audioSource, attributionResource, currentJournals, dayIndexResource, httpIngest, journalForDay, journalResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
@@ -83,6 +84,36 @@ const Routes = HttpRouter.use((router) =>
         Effect.map((status) => HttpServerResponse.jsonUnsafe(status)),
         Effect.orDie
       )
+    )
+    // Push ingest: apps (e.g. a GPS logger) POST batches here. The proxy
+    // can't authenticate an app, so the route requires the INGEST_TOKEN as a
+    // path segment (many apps only let you configure a URL). The body is
+    // stored as an uninterpreted capture; deriving anything from it is a
+    // future resource's job.
+    yield* router.add(
+      "POST",
+      "/ingest/:token/:source",
+      Effect.gen(function*() {
+        const { token, source } = yield* HttpRouter.params
+        const expected = yield* Config.string("INGEST_TOKEN").pipe(Config.withDefault(""))
+        if (!expected || token !== expected) {
+          return HttpServerResponse.text("forbidden", { status: 403 })
+        }
+        if (!source || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(source)) {
+          return HttpServerResponse.text("source must be [a-z0-9-], e.g. gps-overland", { status: 400 })
+        }
+        const request = yield* HttpServerRequest.HttpServerRequest
+        const body = new Uint8Array(yield* Effect.orDie(request.arrayBuffer))
+        if (body.length === 0) return HttpServerResponse.text("empty body", { status: 400 })
+        const contentType = request.headers["content-type"] ?? "application/octet-stream"
+        const result = yield* Effect.orDie(httpIngest(source, body, contentType))
+        yield* Effect.log(
+          `http ingest ${source}: ${result.bytes} bytes -> ${result.captureId.slice(0, 12)}${
+            result.duplicate ? " (duplicate)" : ""
+          }`
+        )
+        return HttpServerResponse.jsonUnsafe({ ok: true, captureId: result.captureId, duplicate: result.duplicate })
+      })
     )
   })
 )
