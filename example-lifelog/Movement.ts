@@ -456,3 +456,12 @@ export const movementForDay = (day: string) => Effect.gen(function*() {
   yield* instance.materialize
   return Option.getOrThrow(yield* Files.readJson(Movement, dataPath(instance.key)))
 })
+
+/** Read-only dereference for the request path: return the current movement
+ * when it is already on disk, `None` when it is stale or missing. Never
+ * materializes — the hourly pipeline pass is the sole materializer, so
+ * serving a stale day costs no LLM narrative or geocoding calls. */
+export const movementCachedForDay = (day: string) => Effect.gen(function*() {
+  const instance = yield* movementResource.instance!(day)
+  return yield* Files.readJson(Movement, dataPath(instance.key))
+})

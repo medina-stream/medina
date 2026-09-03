@@ -83,3 +83,18 @@ export const dayPage = (journal: Journal) =>
       </main>
     </Layout>
   )
+
+/** Placeholder for a day whose journal is not on disk yet. The hourly
+ * pipeline pass materializes it; the request path never does. */
+export const pendingPage = (day: string) =>
+  "<!doctype html>" + render(
+    <Layout title={`Medina — ${day}`}>
+      <header>
+        <h1>{day}</h1>
+        <p><a href="/">All days</a></p>
+      </header>
+      <main>
+        <p class="empty">writing…</p>
+      </main>
+    </Layout>
+  )

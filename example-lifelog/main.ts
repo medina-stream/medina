@@ -27,9 +27,9 @@ import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
 import type * as FileSystem from "effect/FileSystem"
 import { dataPath } from "./Resources.ts"
-import { dayPage, journalPage } from "./Pages.tsx"
-import { audioSource, attributionResource, currentJournals, dayIndexResource, httpIngest, journalForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
-import { movementForDay, movementResource } from "./Movement.ts"
+import { dayPage, journalPage, pendingPage } from "./Pages.tsx"
+import { audioSource, attributionResource, currentJournals, dayIndexResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { movementCachedForDay, movementResource } from "./Movement.ts"
 import { staysDay, staysSource } from "./Stays.ts"
 
 const Routes = HttpRouter.use((router) =>
@@ -50,17 +50,32 @@ const Routes = HttpRouter.use((router) =>
         if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
           return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
         }
-        const journal = yield* journalForDay(day).pipe(Effect.orDie)
+        // Same resource, two representations: browsers get the page, tools
+        // get the record.
+        const request = yield* HttpServerRequest.HttpServerRequest
+        const wantsHtml = (request.headers["accept"] ?? "").includes("text/html")
+        // Read-only: never materialize here. A stale or missing journal is a
+        // 202 placeholder; the hourly pipeline pass converges it.
+        const cached = yield* journalCachedForDay(day).pipe(Effect.orDie)
+        if (Option.isNone(cached)) {
+          return wantsHtml
+            ? HttpServerResponse.text(pendingPage(day), {
+              status: 202,
+              contentType: "text/html",
+              headers: { "cache-control": "private, max-age=60" }
+            })
+            : HttpServerResponse.jsonUnsafe({ status: "pending", day }, {
+              status: 202,
+              headers: { "cache-control": "private, max-age=60" }
+            })
+        }
+        const journal = cached.value
         // Past days are settled (new audio for them is rare); the current and
         // future days want re-checking as inputs land.
         const today = yield* todayDay
         const cacheControl = journal.day < today
           ? "private, max-age=86400"
           : "private, max-age=60"
-        // Same resource, two representations: browsers get the page, tools
-        // get the record.
-        const request = yield* HttpServerRequest.HttpServerRequest
-        const wantsHtml = (request.headers["accept"] ?? "").includes("text/html")
         return wantsHtml
           ? HttpServerResponse.text(dayPage(journal), {
             contentType: "text/html",
@@ -77,7 +92,16 @@ const Routes = HttpRouter.use((router) =>
         if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
           return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
         }
-        const movement = yield* movementForDay(day).pipe(Effect.orDie)
+        // Read-only: never materialize here. A stale or missing movement is
+        // a 202 placeholder; the hourly pipeline pass converges it.
+        const cached = yield* movementCachedForDay(day).pipe(Effect.orDie)
+        if (Option.isNone(cached)) {
+          return HttpServerResponse.jsonUnsafe({ status: "pending", day }, {
+            status: 202,
+            headers: { "cache-control": "private, max-age=60" }
+          })
+        }
+        const movement = cached.value
         const today = yield* todayDay
         const cacheControl = day < today
           ? "private, max-age=86400"

@@ -10,11 +10,11 @@ Baseline: `bun test` 22 pass, `bun run typecheck` clean.
 
 ## Next
 
-- [ ] **Request-path LLM spend** (`Journal.ts`, `Movement.ts`, `main.ts`)
-  First `GET /journal/:day` on a stale day materializes synchronously (report
-  call; notes are cached now) and `GET /movement/:day` runs `narrative()` plus
-  Nominatim geocoding in-process. Consider deferring LLM work to the hourly
-  pass and serving a "writing…" placeholder for stale days.
+- [x] **Request-path LLM spend** (`Journal.ts`, `Movement.ts`, `main.ts`)
+  Done: `GET /journal/:day` and `GET /movement/:day` serve via read-only
+  `journalCachedForDay` / `movementCachedForDay` and return a 202
+  "writing…" placeholder on a stale/missing day; the hourly pass remains the
+  sole materializer.
 - [ ] **Clock, not wall time** (25 sites: `Pipeline.ts`, `Attribution.ts`,
   `Audio.ts`, `DayIndex.ts`, `Gps.ts`, `HttpIngest.ts`, `Journal.ts`,
   `Movement.ts`, `Notes.ts`, `Stays.ts`, `lib/Files.ts`)

@@ -357,6 +357,20 @@ export const journalForDay = (day: string) =>
     yield* instance.materialize
     return Option.getOrThrow(yield* Files.readJson(Journal, dataPath(instance.key)))
   })
+
+/** Read-only dereference for the request path: return the current journal
+ * when it is already on disk, `None` when it is stale or missing. Never
+ * materializes — the hourly pipeline pass is the sole materializer, so
+ * serving a stale day costs no LLM calls. */
+export const journalCachedForDay = (day: string) =>
+  Effect.gen(function*() {
+    const now = yield* DateTime.now
+    if (day < EPOCH_DAY || day > DateTime.formatIsoDate(now)) {
+      return Option.some(emptyJournal(day, DateTime.formatIso(now)))
+    }
+    const instance = yield* journalResource.instance!(day)
+    return yield* Files.readJson(Journal, dataPath(instance.key))
+  })
 /**
  * Journal materialization as a durable workflow. The LLM calls are the
  * expensive, flaky steps: each notes batch and the final report are
