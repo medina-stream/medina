@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { composeMovement, type MovementFix } from "./Movement.ts"
+import { composeMovement, Movement, renderMovementTimeline, type MovementFix } from "./Movement.ts"
 import type { StayRow } from "./Stays.ts"
 
 const fix = (minutes: number, lat: number, lon: number): MovementFix => ({
@@ -31,5 +31,38 @@ describe("composeMovement", () => {
     const segments = composeMovement(stays, points)
     expect(segments.map((segment) => segment.kind)).toEqual(["stay", "travel", "stay"])
     expect(segments[1]?.kind === "travel" && segments[1].fixes).toBe(3)
+  })
+})
+
+describe("renderMovementTimeline", () => {
+  test("renders compact named stays, travel distances, and gaps without coordinates", () => {
+    const movement = new Movement({
+      version: "movement-v1", day: "2026-08-29", basisHash: "basis", timeZone: "America/Chicago",
+      generatedAt: "2026-08-30T00:00:00Z", narrative: "must not appear", suggestions: [],
+      segments: [
+        { kind: "stay", startTime: "a", endTime: "b", startLocal: "00:00", endLocal: "08:47",
+          lat: 37.1, lon: -122.1, placeId: "home", placeName: "Steiner Street, Cow Hollow",
+          geocodedName: "fallback", dwellMinutes: 527, fixes: 20 },
+        { kind: "travel", startTime: "b", endTime: "c", startLocal: "08:47", endLocal: "08:53",
+          distanceMeters: 1049, mode: "bike", fixes: 4 },
+        { kind: "gap", startTime: "c", endTime: "d", startLocal: "08:53", endLocal: "10:00", fixes: 2 }
+      ]
+    })
+    expect(renderMovementTimeline(movement)).toBe([
+      "00:00-08:47 stay at Steiner Street, Cow Hollow (527 min)",
+      "08:47-08:53 bike 1.0 km",
+      "08:53-10:00 gap in GPS evidence"
+    ].join("\n"))
+  })
+
+  test("falls back to a geocoded stay name", () => {
+    const movement = new Movement({
+      version: "movement-v1", day: "2026-08-29", basisHash: "basis", timeZone: "UTC",
+      generatedAt: "2026-08-30T00:00:00Z", narrative: null, suggestions: [],
+      segments: [{ kind: "stay", startTime: "a", endTime: "b", startLocal: "12:00", endLocal: "12:15",
+        lat: 1, lon: 2, placeId: null, placeName: null, geocodedName: "Market Street",
+        dwellMinutes: 15, fixes: 2 }]
+    })
+    expect(renderMovementTimeline(movement)).toBe("12:00-12:15 stay at Market Street (15 min)")
   })
 })
