@@ -1,5 +1,18 @@
 # Effect v4 Review — Medina
 
+## Status
+
+This review confirms that Medina's overall architecture is sound and does not
+need a redesign. It is a well-designed Effect application with a pragmatic Bun
+core: layers/services, schemas, durable workflows, and content-addressed
+resources are all used in the right places.
+
+The findings below describe the remaining gap between that architecture and a
+fully Effect-native implementation. They are incremental improvements for
+consistency, testability, resource safety, and typed failure handling—not a
+judgment that the application is fundamentally unidiomatic. The companion
+`todo.md` records the same conclusion and prioritizes the work.
+
 Reviewed against `../effect` (v4.0.0-rc.112 source). The codebase already
 uses Effect well in the big picture: `Context.Service` tags, layered
 construction, `Workflow`/`Activity` for durable LLM work, `Schema.Class` for

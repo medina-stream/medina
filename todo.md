@@ -1,5 +1,29 @@
 # Medina — review findings & remaining work
 
+## Current Effect assessment
+
+Medina is a **well-designed Effect application with a pragmatic Bun core**.
+The architecture is sound and does not need a redesign: services and layers
+provide dependency injection, `Schema` provides durable data shapes, and
+`Workflow`/`Activity` handles expensive LLM work durably. The content-addressed
+resource model also makes freshness deterministic and pipeline passes
+idempotent.
+
+The application is not yet fully Effect-native. A small number of imperative
+or Node.js escape hatches remain—direct wall-clock and environment reads, raw
+child processes and crypto, mutable memoization/accumulation, manual temporary
+directory cleanup, and `Effect.orDie` in HTTP handlers. These are primarily
+consistency, testability, and failure-handling improvements, not architectural
+problems.
+
+`bun run typecheck` currently passes. Prioritize the Effect cleanup below in
+this order:
+
+1. Use `Clock`/`DateTime` and `Config` consistently.
+2. Make temporary directories scoped and replace raw child-process wrappers.
+3. Let HTTP errors remain typed instead of converting them to defects.
+4. Replace mutable caches and duplicated crypto with Effect services.
+
 From the code review of `lib/` and `example-lifelog/`. Several correctness fixes already
 landed (`7ea6ab0` stripPort, `d95c004` GPS hardening); everything below is outstanding.
 
@@ -52,6 +76,14 @@ landed (`7ea6ab0` stripPort, `d95c004` GPS hardening); everything below is outst
 - [ ] **Audio ingest buffers whole files in memory** (`Audio.ts`)
   Chunks are concatenated to compute the sha256 before writing; hours-long recordings
   can be hundreds of MB. Stream the hash + stream the write to disk instead.
+
+- [ ] **Effect cleanup** (see `example-lifelog/EFFECT-REVIEW.md`)
+  The architecture is sound, but the remaining implementation is hybrid rather than
+  fully Effect-native. Prioritize the review's service-boundary cleanup: use
+  `Clock`/`DateTime` and `Config`, scope temporary directories, use structured
+  `ChildProcess` services, preserve typed HTTP errors, and replace mutable caches and
+  duplicated crypto with Effect equivalents. These are consistency and testability
+  improvements, not a redesign.
 
 ## Scale horizons (fine for now)
 
