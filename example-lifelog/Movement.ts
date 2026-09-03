@@ -65,11 +65,17 @@ const transitSegments = (points: ReadonlyArray<MovementFix>): ReadonlyArray<RawM
 export const composeMovement = (stays: ReadonlyArray<StayRow>, input: ReadonlyArray<MovementFix>): ReadonlyArray<RawMovementSegment> => {
   const points = [...input].sort((a, b) => a.ts.localeCompare(b.ts))
   const ordered = [...stays].sort((a, b) => a.first_point_ts.localeCompare(b.first_point_ts))
+  // stays-v1 faithfully retains every observation. For narrative presentation,
+  // only fold a zero-duration singleton when it is bracketed by other stays;
+  // its point remains in the raw evidence used for the connecting travel.
+  const presented = ordered.filter((stay, index) =>
+    stay.point_count !== 1 || stay.observed_duration_s !== 0 || index === 0 || index === ordered.length - 1
+  )
   const result: Array<RawMovementSegment> = []
-  ordered.forEach((stay, index) => {
+  presented.forEach((stay, index) => {
     result.push({ kind: "stay", start: stay.first_point_ts, end: stay.last_point_ts,
       lat: stay.lat, lon: stay.lon, fixes: stay.point_count })
-    const next = ordered[index + 1]
+    const next = presented[index + 1]
     if (!next) return
     const between = points.filter((point) => point.ts >= stay.last_point_ts && point.ts <= next.first_point_ts)
     result.push(...transitSegments(between))
@@ -259,8 +265,8 @@ const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(fu
         const existing = suggestionCandidates.find((candidate) => haversineMeters(candidate, segment) <= STAY_RADIUS_M)
         if (existing) {
           const total = existing.dwellMinutes + dwellMinutes
-          existing.lat = (existing.lat * existing.dwellMinutes + segment.lat * dwellMinutes) / Math.max(1, total)
-          existing.lon = (existing.lon * existing.dwellMinutes + segment.lon * dwellMinutes) / Math.max(1, total)
+          existing.lat = total === 0 ? (existing.lat + segment.lat) / 2 : (existing.lat * existing.dwellMinutes + segment.lat * dwellMinutes) / total
+          existing.lon = total === 0 ? (existing.lon + segment.lon) / 2 : (existing.lon * existing.dwellMinutes + segment.lon * dwellMinutes) / total
           existing.dwellMinutes = total
           existing.geocodedName ??= geocodedName
         } else suggestionCandidates.push({ lat: segment.lat, lon: segment.lon, geocodedName, dwellMinutes })

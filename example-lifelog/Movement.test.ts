@@ -24,4 +24,12 @@ describe("composeMovement", () => {
     const segments = composeMovement(stays, [fix(0, 41.88, -87.63), fix(390, 41.90, -87.63)])
     expect(segments.map((segment) => segment.kind)).toEqual(["stay", "gap", "stay"])
   })
+
+  test("folds only bracketed zero-duration singleton stays into travel", () => {
+    const stays = [stay(0, 20, 41.88, -87.63), stay(30, 30, 41.895, -87.63, 1), stay(40, 60, 41.91, -87.63)]
+    const points = [fix(20, 41.88, -87.63), fix(30, 41.895, -87.63), fix(40, 41.91, -87.63)]
+    const segments = composeMovement(stays, points)
+    expect(segments.map((segment) => segment.kind)).toEqual(["stay", "travel", "stay"])
+    expect(segments[1]?.kind === "travel" && segments[1].fixes).toBe(3)
+  })
 })
