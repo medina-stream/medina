@@ -10,7 +10,7 @@ import type { Resource } from "../lib/Resource.ts"
 import { duckdb, gpsDay, haversineMeters, quote } from "./Gps.ts"
 import { readStaysBasis, staysOverlapping, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
-import { homeTimeZone } from "./Time.ts"
+import { eagerSinceDay, homeTimeZone, withinEagerWindow } from "./Time.ts"
 
 export const MOVEMENT_VERSION = "movement-v1"
 const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2"
@@ -324,7 +324,8 @@ export const movementResource: Resource<FileSystem.FileSystem | LanguageModel.La
   instances: Effect.gen(function*() {
     const zone = yield* homeTimeZone
     const days = new Set<string>([localDay(new Date(), zone), ...yield* movementDays])
-    const recent = [...days].sort().slice(-14)
+    const since = yield* eagerSinceDay
+    const recent = withinEagerWindow(days, since, (day) => day).sort().slice(-14)
     return yield* Effect.forEach(recent, movementInstance)
   }),
   instance: (day) => /^\d{4}-\d{2}-\d{2}$/.test(day) ? movementInstance(day) : Effect.fail(new Error(`not a day: ${day}`))

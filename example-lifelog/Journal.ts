@@ -22,23 +22,40 @@ import type { Resource } from "../lib/Resource.ts"
 import { sha256 } from "./Hash.ts"
 import { currentDayIndex, dayTranscripts } from "./DayIndex.ts"
 import { noteForDay } from "./Notes.ts"
+import { eagerSinceDay, withinEagerWindow } from "./Time.ts"
 import { movementBasis, movementDays, movementForDay, movementKey, movementSharedBasisHash, renderMovementTimeline } from "./Movement.ts"
 import { dataPath, DayEntry, DayIndex, Journal, JOURNAL_VERSION, journalKey, NOTE_VERSION, noteKey, Transcript } from "./Resources.ts"
 
 const MAX_BATCH_CHARS = 90_000
 
 /**
+ * The model used for the per-batch notes pass. Note-taking is extraction --
+ * summarizing transcript text that is already in front of it -- so it runs on
+ * a cheaper model than the final write, and it is the bulk of the token spend
+ * (one call per 90k characters, versus one call per day for the report).
+ *
+ * Unset means "same as the journal model".
+ */
+const notesModel = Config.string("JOURNAL_LLM_NOTES_MODEL").pipe(Config.option)
+
+/**
  * One final answer from the language model. A reasoning-only response with no
  * final text fails the run, so working notes never reach the page.
+ *
+ * `model` overrides the layer's model for this request only; config from
+ * withConfigOverride is merged when the request is built.
  */
-const complete = (system: string, user: string, maxTokens: number) =>
+const complete = (system: string, user: string, maxTokens: number, model?: Option.Option<string>) =>
   LanguageModel.generateText({
     prompt: [
       { role: "system", content: system },
       { role: "user", content: user }
     ]
   }).pipe(
-    OpenAiLanguageModel.withConfigOverride({ max_output_tokens: maxTokens }),
+    OpenAiLanguageModel.withConfigOverride({
+      max_output_tokens: maxTokens,
+      ...(model && Option.isSome(model) ? { model: model.value } : {})
+    }),
     Effect.flatMap((response) => {
       const content = response.text.trim()
       return content
@@ -158,9 +175,13 @@ export const journalResource: Resource<JournalEnv> = {
     const gpsDays = new Set(yield* movementDays)
     const movementHash = yield* movementSharedBasisHash
     const notes = yield* noteHashes
-    const days = new Set([...Object.keys(index.days), ...gpsDays, ...notes.keys()])
+    const all = new Set([...Object.keys(index.days), ...gpsDays, ...notes.keys()])
+    // A development window bounds only what is pre-generated; `instance`
+    // below still dereferences any day on demand.
+    const since = yield* eagerSinceDay
+    const days = withinEagerWindow(all, since, (day) => day).sort()
     return yield* Effect.forEach(
-      [...days].sort(),
+      days,
       (day) => journalInstance(day, index, gpsDays.has(day), movementHash, notes.get(day) ?? null)
     )
   }).pipe(Effect.mapError((error) => new Error(String(error)))),
@@ -257,7 +278,10 @@ export const JournalWorkflowLayer = JournalWorkflow.toLayer(Effect.fn(function*(
       yield* Activity.make({
         name: `notes-${batchIndex}`,
         success: Schema.String,
-        execute: Effect.orDie(complete(NOTES_PROMPT, `Day: ${day}\nBatch ${batchIndex + 1}\n${batch}`, 6000))
+        execute: Effect.orDie(
+          Effect.flatMap(notesModel, (model) =>
+            complete(NOTES_PROMPT, `Day: ${day}\nBatch ${batchIndex + 1}\n${batch}`, 6000, model))
+        )
       })
     )
   }

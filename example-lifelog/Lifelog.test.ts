@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { journalInputHash } from "./Lifelog.ts"
 import { dayPage, journalPage } from "./Pages.tsx"
 import { DayEntry, Journal } from "./Resources.ts"
+import { withinEagerWindow } from "./Time.ts"
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex")
 const entry = (correctionHash: string | null) => new DayEntry({
@@ -63,5 +64,18 @@ describe("journal pages", () => {
     })
     expect(journalPage([{ journal, stale: true }])).toContain("rewriting")
     expect(journalPage([{ journal, stale: false }])).not.toContain("rewriting")
+  })
+})
+
+describe("eager window", () => {
+  const days = ["2026-08-01", "2026-08-28", "2026-09-01", "2026-09-03"]
+
+  test("unset means every day is enumerated eagerly", () => {
+    expect(withinEagerWindow(days, null, (day) => day)).toEqual(days)
+  })
+
+  test("a window narrows what is pre-generated, keeping day order", () => {
+    expect(withinEagerWindow(days, "2026-08-28", (day) => day))
+      .toEqual(["2026-08-28", "2026-09-01", "2026-09-03"])
   })
 })

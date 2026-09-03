@@ -69,6 +69,10 @@ export interface JournalView {
 /**
  * The journals to render, newest day first.
  *
+ * Enumeration starts from what is on disk, not from the eager instance list:
+ * a development window narrows what gets *pre-generated*, and the pages
+ * should still show every journal the record holds.
+ *
  * When the current input set has no journal yet (a correction landed, or
  * today gained a recording), the most recently *generated* journal for that
  * day is shown and marked stale. Picking by `generatedAt` matters: the
@@ -79,12 +83,13 @@ export interface JournalView {
 export const currentJournals = Effect.gen(function*() {
   const byDay = yield* journalKeysByDay
   const instances = yield* journalResource.instances
+  const currentKey = new Map(instances.map((instance) => [instance.label, instance.key]))
   const views: Array<JournalView> = []
-  for (const instance of instances) {
-    const keys = byDay.get(instance.label) ?? []
+  for (const [day, keys] of byDay) {
     if (keys.length === 0) continue
-    if (keys.includes(instance.key)) {
-      const journal = yield* Files.readJson(Journal, dataPath(instance.key))
+    const wanted = currentKey.get(day)
+    if (wanted && keys.includes(wanted)) {
+      const journal = yield* Files.readJson(Journal, dataPath(wanted))
       if (Option.isSome(journal)) views.push({ journal: journal.value, stale: false })
       continue
     }
@@ -93,7 +98,9 @@ export const currentJournals = Effect.gen(function*() {
       .flatMap((candidate) => Option.isSome(candidate) ? [candidate.value] : [])
       .sort((a, b) => a.generatedAt.localeCompare(b.generatedAt))
       .at(-1)
-    if (newest) views.push({ journal: newest, stale: true })
+    // Outside the eager window there is no current key to compare against,
+    // so what is on disk is simply what the record has.
+    if (newest) views.push({ journal: newest, stale: wanted !== undefined })
   }
   return views.sort((a, b) => b.journal.day.localeCompare(a.journal.day))
 })
