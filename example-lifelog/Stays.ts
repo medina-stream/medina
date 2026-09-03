@@ -134,7 +134,7 @@ const materializeStays = (basisHash: string) => Effect.gen(function*() {
     if (!stagedFile) return yield* Effect.fail(new Error(`no staged stays partition produced for ${day}`))
     const destination = dataPath(`${STAYS_ROOT}/day=${day}/stays.parquet`)
     yield* fs.makeDirectory(destination.slice(0, destination.lastIndexOf("/")), { recursive: true })
-    const temporary = `${destination}.tmp-${Date.now()}`
+    const temporary = `${destination}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`
     yield* fs.copyFile(`${staging}/day=${day}/${stagedFile}`, temporary)
     yield* fs.rename(temporary, destination)
   }

@@ -248,7 +248,7 @@ export const gpsCompactSource: Source<FileSystem.FileSystem> = {
         yield* fs.makeDirectory(partition.slice(0, partition.lastIndexOf("/")), { recursive: true })
         // copy + rename: staging is on a different filesystem, and the
         // rename keeps partition replacement atomic for concurrent readers.
-        const tmp = `${partition}.tmp-${Date.now()}`
+        const tmp = `${partition}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`
         yield* fs.copyFile(`${staging}/day=${day}/${stagedFile}`, tmp)
         yield* fs.rename(tmp, partition)
         staged += 1
@@ -258,7 +258,8 @@ export const gpsCompactSource: Source<FileSystem.FileSystem> = {
 
     // Only consume the inbox when every touched day merged cleanly.
     if (failures.length === 0) {
-      for (const path of paths) yield* fs.remove(path)
+      // Another process may have compacted the same idempotent batch first.
+      for (const path of paths) if (yield* fs.exists(path)) yield* fs.remove(path)
       yield* Effect.log(`gps-compact: ${batch.length} inbox files -> ${days.length} day partitions`)
     }
     return {
