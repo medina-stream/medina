@@ -25,7 +25,7 @@ import type { Source, SourceReport } from "../lib/Resource.ts"
 export const GPS_VERSION = "points-v1"
 
 const INBOX_PREFIX = "gps/inbox"
-const partitionKey = (day: string) => `gps/${GPS_VERSION}/day=${day}/points.parquet`
+export const gpsPartitionKey = (day: string) => `gps/${GPS_VERSION}/day=${day}/points.parquet`
 
 /** The canonical column list, used explicitly in every SQL statement so
  * input schema drift (or hive-path inference) can never leak extra columns
@@ -145,7 +145,7 @@ export const gpsInboxWrite = Effect.fn("gpsInboxWrite")(function*(points: Readon
 
 // --- compaction --------------------------------------------------------------
 
-const duckdb = (sql: string) =>
+export const duckdb = (sql: string) =>
   Effect.callback<string, Error>((resume) => {
     execFile("duckdb", ["-json", "-c", sql], { timeout: 120_000, maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) return resume(Effect.fail(new Error(`duckdb failed: ${stderr || error.message}`)))
@@ -153,7 +153,7 @@ const duckdb = (sql: string) =>
     })
   })
 
-const quote = (value: string) => `'${value.replace(/'/g, "''")}'`
+export const quote = (value: string) => `'${value.replace(/'/g, "''")}'`
 
 /**
  * Merge inbox rows into their days' parquet partitions, then delete the
@@ -195,7 +195,7 @@ export const gpsCompactSource: Source<FileSystem.FileSystem> = {
     }
     const existing: Array<string> = []
     for (const day of days) {
-      const partition = dataPath(partitionKey(day))
+      const partition = dataPath(gpsPartitionKey(day))
       if (yield* fs.exists(partition)) existing.push(partition)
     }
 
@@ -244,7 +244,7 @@ export const gpsCompactSource: Source<FileSystem.FileSystem> = {
           failures.push({ item: day, error: "no staged partition produced" })
           continue
         }
-        const partition = dataPath(partitionKey(day))
+        const partition = dataPath(gpsPartitionKey(day))
         yield* fs.makeDirectory(partition.slice(0, partition.lastIndexOf("/")), { recursive: true })
         // copy + rename: staging is on a different filesystem, and the
         // rename keeps partition replacement atomic for concurrent readers.
@@ -277,7 +277,7 @@ export const gpsCompactSource: Source<FileSystem.FileSystem> = {
 export const gpsDay = (day: string) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
-    const partition = dataPath(partitionKey(day))
+    const partition = dataPath(gpsPartitionKey(day))
     const inboxDir = dataPath(INBOX_PREFIX)
     const inbox = (yield* fs.exists(inboxDir))
       ? (yield* fs.readDirectory(inboxDir)).filter((file) => file.endsWith(".ndjson"))
