@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Ref from "effect/Ref"
@@ -37,9 +38,12 @@ const stubClient = (mintHits: Ref.Ref<number>) =>
 
 describe("Drive token caching", () => {
   test("mints once across repeated list/download calls", async () => {
-    process.env.GOOGLE_TOKEN_URL = TOKEN_URL
     const mintHits = await Effect.runPromise(Ref.make(0))
     const TestLive = Layer.provide(layer, Layer.succeed(HttpClient.HttpClient, stubClient(mintHits)))
+    // Explicit config record: process.env mutation leaks across test files
+    // sharing one process (the default provider snapshots the env), so each
+    // test pins its own values here.
+    const TestConfig = ConfigProvider.fromEnv({ env: { GOOGLE_TOKEN_URL: TOKEN_URL } })
     const { first, second } = await Effect.runPromise(
       Effect.gen(function*() {
         const drive = yield* Drive
@@ -47,7 +51,10 @@ describe("Drive token caching", () => {
         const second = yield* drive.list("folder-1", 10)
         yield* drive.download("file-1")
         return { first, second }
-      }).pipe(Effect.provide(TestLive))
+      }).pipe(
+        Effect.provide(TestLive),
+        Effect.provideService(ConfigProvider.ConfigProvider, TestConfig)
+      )
     )
     expect(first.map((file) => file.id)).toEqual(["file-1"])
     expect(second.map((file) => file.id)).toEqual(["file-1"])

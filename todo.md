@@ -133,9 +133,13 @@ landed (`7ea6ab0` stripPort, `d95c004` GPS hardening); everything below is outst
 - [ ] **`PORT` env read** (`main.ts`) — uses `process.env.PORT` directly instead of
   `Config`, the only env read outside `Cluster.ts`'s `CLUSTER_DB`.
 
-- [ ] **AssemblyAI retries** (`lib/AssemblyAI.ts`) — only `Pending` is retried; a
-  transient 5xx on upload/submit fails the whole file until the next hourly pass
-  re-uploads it. A cheap retry around upload/submit would help.
+- [x] **AssemblyAI retries** (`lib/AssemblyAI.ts`) — only `Pending` was retried; a
+  transient 5xx on upload/submit failed the whole file until the next hourly pass
+  re-uploaded it. Upload and submit now retry transport/5xx failures (1s spacing,
+  3 retries); 4xx and bad bodies still fail fast. Covered by
+  `lib/AssemblyAI.test.ts`. Side fix: `Drive`/`AssemblyAI` tests now pin config
+  via `ConfigProvider.fromEnv({ env })` instead of mutating `process.env`, which
+  leaked across test files sharing one process (Drive passed solo, failed in-suite).
 
 ## Fixed in this round (for reference)
 

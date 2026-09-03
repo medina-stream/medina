@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema"
 import type * as Stream from "effect/Stream"
 import * as HttpBody from "effect/unstable/http/HttpBody"
 import * as HttpClient from "effect/unstable/http/HttpClient"
+import * as HttpClientError from "effect/unstable/http/HttpClientError"
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest"
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse"
 
@@ -39,6 +40,19 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
     )
     const asError = (cause: unknown) => new Error("AssemblyAI request failed", { cause })
 
+    // Only transport-level and 5xx failures are worth retrying: a 4xx or a
+    // bad body will fail the same way next second. Previously any of these
+    // on upload/submit failed the whole file until the next hourly pass
+    // re-uploaded it.
+    const isTransient = (error: unknown) =>
+      error instanceof HttpClientError.HttpClientError &&
+      (error.reason._tag === "TransportError" ||
+        (error.reason._tag === "StatusCodeError" && error.reason.response.status >= 500))
+    const retryTransient = {
+      while: isTransient,
+      schedule: Schedule.max([Schedule.spaced("1 second"), Schedule.recurs(3)])
+    } as const
+
     const getTranscript = (id: string) =>
       client.get(`${baseUrl}/v2/transcript/${encodeURIComponent(id)}`).pipe(
         Effect.flatMap(HttpClientResponse.schemaBodyJson(VendorTranscript)),
@@ -52,6 +66,7 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
             body: HttpBody.stream(audio, "application/octet-stream")
           }).pipe(
             Effect.flatMap(HttpClientResponse.schemaBodyJson(Upload)),
+            Effect.retry(retryTransient),
             Effect.mapError(asError)
           )
 
@@ -64,6 +79,7 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
             })
           }).pipe(
             Effect.flatMap(HttpClientResponse.schemaBodyJson(VendorTranscript)),
+            Effect.retry(retryTransient),
             Effect.mapError(asError)
           )
 
