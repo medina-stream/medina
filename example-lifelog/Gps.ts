@@ -325,7 +325,7 @@ export const gpsDay = (day: string) =>
 
 const EARTH_RADIUS_M = 6_371_000
 
-const haversineMeters = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
+export const haversineMeters = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
   const rad = (deg: number) => (deg * Math.PI) / 180
   const dLat = rad(b.lat - a.lat)
   const dLon = rad(b.lon - a.lon)
