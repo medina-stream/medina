@@ -50,11 +50,12 @@ Baseline: `bun test` 22 pass, `bun run typecheck` clean.
   `CLUSTER_DB`, `PORT`, and `STAY_RADIUS_M` — currently read in *two*
   places, `Stays.ts` and `Movement.ts`); `DATA_DIR` wants a small
   `Context.Service` since `dataPath()` is called from pure functions.
-- [ ] **Empty journals from lazy derefs** (`Journal.ts`)
-  In-range but input-less days fetched via `/journal/<day>` persist an empty
-  journal file; only pre-epoch/future days are guarded. Bots probing dates
-  write files (seen live, cleaned by hand). Return the empty journal without
-  persisting it when a day has no inputs.
+- [x] **Empty journals from lazy derefs** (`Journal.ts`)
+  Done: `journalResource.instance` fails with `no inputs for <day>` when a
+  day has no transcripts, movement, or note; `journalForDay` /
+  `journalCachedForDay` answer those days with a transient empty journal and
+  never touch the filesystem. Pinned by `hasJournalInputs` truth-table tests
+  in `Lifelog.test.ts`.
 - [ ] **Small readability pass**
   Declarative `HttpRouter.addAll` + `route` instead of imperative
   `router.add` (×8 in `main.ts`); functional accumulation in `Pipeline.ts`

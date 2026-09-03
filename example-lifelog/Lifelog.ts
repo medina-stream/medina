@@ -19,6 +19,7 @@ export { httpIngest } from "./HttpIngest.ts"
 export { attributionResource, currentAttribution, readCorrections, transcribedCaptures } from "./Attribution.ts"
 export { currentDayIndex, dayIndexResource, dayTranscripts } from "./DayIndex.ts"
 export {
+  hasJournalInputs,
   journalCachedForDay,
   journalForDay,
   journalInputHash,

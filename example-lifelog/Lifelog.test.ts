@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
-import { journalInputHash } from "./Lifelog.ts"
+import { hasJournalInputs, journalInputHash } from "./Lifelog.ts"
 import { dayPage, journalPage } from "./Pages.tsx"
 import { DayEntry, Journal } from "./Resources.ts"
 import { withinEagerWindow } from "./Time.ts"
@@ -41,6 +41,18 @@ describe("journalInputHash", () => {
     expect(journalInputHash([entry(null)], null, "blob-a")).toBe(
       sha256("transcript/key.json\nnote:blob-a")
     )
+  })
+})
+
+describe("hasJournalInputs", () => {
+  test("an input-less day has nothing to journal", () => {
+    expect(hasJournalInputs(0, false, false)).toBe(false)
+  })
+
+  test("any single input type suffices", () => {
+    expect(hasJournalInputs(1, false, false)).toBe(true)
+    expect(hasJournalInputs(0, true, false)).toBe(true)
+    expect(hasJournalInputs(0, false, true)).toBe(true)
   })
 })
 

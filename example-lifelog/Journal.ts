@@ -301,8 +301,9 @@ export const journalResource: Resource<JournalEnv> = {
       (day) => journalInstance(day, index, gpsDays.has(day), movementHashes.get(day) ?? null, notes.get(day) ?? null)
     )
   }).pipe(Effect.mapError((error) => new Error(String(error)))),
-  // Lazy: any well-formed day dereferences, past or future; a truly input-less
-  // day materializes instantly as an empty journal.
+  // Lazy: any well-formed day with inputs dereferences; a truly input-less
+  // day fails, and the derefs below answer it transiently without persisting
+  // anything (probes must not fill the data dir with empty journals).
   instance: (day) =>
     /^\d{4}-\d{2}-\d{2}$/.test(day)
       ? Effect.gen(function*() {
@@ -311,6 +312,9 @@ export const journalResource: Resource<JournalEnv> = {
         const hasMovement = (yield* movementBasis(day)).points.length > 0
         const movementHash = hasMovement ? yield* movementDayBasisHash(day) : null
         const note = yield* noteForDay(day)
+        if (!hasJournalInputs(index.days[day]?.length ?? 0, hasMovement, Option.isSome(note))) {
+          return yield* Effect.fail(new Error(`no inputs for ${day}`))
+        }
         return yield* journalInstance(
           day,
           index,
@@ -342,16 +346,27 @@ const emptyJournal = (day: string, generatedAt: string) =>
     report: ""
   })
 
+/** Whether a day has anything a journal could be written from: transcripts,
+ * GPS movement, or the day's own written note. */
+export const hasJournalInputs = (entryCount: number, hasMovement: boolean, hasNote: boolean) =>
+  entryCount > 0 || hasMovement || hasNote
+
+const isNoInputsError = (error: unknown) => String(error).includes("no inputs for")
+
 /** Dereference the journal for a day: read it if current, materialize it if
- * stale or never asked for. Days outside [EPOCH_DAY, today] are answered
- * without touching the filesystem. */
+ * stale or never asked for. Days outside [EPOCH_DAY, today] and in-range
+ * days with no inputs are answered transiently without touching the
+ * filesystem. */
 export const journalForDay = (day: string) =>
   Effect.gen(function*() {
     const now = yield* DateTime.now
     if (day < EPOCH_DAY || day > DateTime.formatIsoDate(now)) {
       return emptyJournal(day, DateTime.formatIso(now))
     }
-    const instance = yield* journalResource.instance!(day)
+    const instance = yield* journalResource.instance!(day).pipe(
+      Effect.catchIf(isNoInputsError, () => Effect.succeed(null))
+    )
+    if (instance === null) return emptyJournal(day, DateTime.formatIso(now))
     const existing = yield* Files.readJson(Journal, dataPath(instance.key))
     if (Option.isSome(existing)) return existing.value
     yield* instance.materialize
@@ -361,14 +376,18 @@ export const journalForDay = (day: string) =>
 /** Read-only dereference for the request path: return the current journal
  * when it is already on disk, `None` when it is stale or missing. Never
  * materializes — the hourly pipeline pass is the sole materializer, so
- * serving a stale day costs no LLM calls. */
+ * serving a stale day costs no LLM calls. Input-less days answer with a
+ * transient empty journal instead of a perpetual placeholder. */
 export const journalCachedForDay = (day: string) =>
   Effect.gen(function*() {
     const now = yield* DateTime.now
     if (day < EPOCH_DAY || day > DateTime.formatIsoDate(now)) {
       return Option.some(emptyJournal(day, DateTime.formatIso(now)))
     }
-    const instance = yield* journalResource.instance!(day)
+    const instance = yield* journalResource.instance!(day).pipe(
+      Effect.catchIf(isNoInputsError, () => Effect.succeed(null))
+    )
+    if (instance === null) return Option.some(emptyJournal(day, DateTime.formatIso(now)))
     return yield* Files.readJson(Journal, dataPath(instance.key))
   })
 /**
