@@ -1,9 +1,40 @@
 # Medina — review findings & remaining work
 
-From the code review of `lib/` and `example-lifelog/`. Four correctness fixes already
-landed (`42cca11` stripPort, `ed17b06` GPS hardening); everything below is outstanding.
+From the code review of `lib/` and `example-lifelog/`. Several correctness fixes already
+landed (`7ea6ab0` stripPort, `d95c004` GPS hardening); everything below is outstanding.
 
 ## Likely worth doing next
+
+- [ ] **Journal re-derivation cascade** (`Movement.ts`, `Journal.ts`)
+  `movementSharedBasisHash` is deliberately day-independent: it covers the *global*
+  stays basis, which covers every points partition. So one new GPS point restates the
+  basis for all 49 partitions → every day's movement stales → every day with audio
+  re-journals, re-running the notes pass over transcripts that never changed. Measured
+  on the current corpus: 31 notes calls + 23 report calls to reproduce identical notes.
+  `EAGER_WINDOW_DAYS` caps the blast radius during development but doesn't address it.
+
+  Cheapest question first: does the movement basis need to be global? A point on 09-03
+  has no bearing on 07-14's movement. A per-day basis would stale only the days whose
+  points actually changed, and might dissolve most of this without new machinery.
+
+  Beyond that, the idea is to keep the last generation and pay only for a small summary
+  of what's new. Two things to think through first —
+  * **What the key means.** A journal key is currently a hash of everything it was
+    derived from, which is what makes "file exists ⇒ current" true with no invalidation
+    logic. "Derived from a previous journal plus a delta" is a different claim, and a
+    key can't express it honestly. Likely wants notes to become their own resource
+    (see below) so the journal still composes fresh inputs, and it's the *notes* that
+    stop re-deriving.
+  * **Drift.** Rewriting from a previous entry makes each generation a lossy copy of
+    the last. Tolerable for a few hops, worrying over months on a cheap model, and
+    there's no signal when it has gone wrong — the output always looks like a journal.
+
+- [ ] **Notes are derived data that gets thrown away** (`Journal.ts`)
+  The per-batch notes pass condenses transcripts into notes held only in workflow
+  Activity state. Transcripts are immutable once written, so those notes are stable and
+  re-derivable — a natural resource with its own key. Making them one means a day whose
+  transcripts didn't change never re-runs the notes pass, whatever else moved. This is
+  the prerequisite for the item above, and worth doing on its own.
 
 - [ ] **Drive tokens minted per request** (`lib/Drive.ts`)
   `authorized()` re-runs the token POST on every call, so each `list`/`download` pays a
@@ -36,9 +67,20 @@ landed (`42cca11` stripPort, `ed17b06` GPS hardening); everything below is outst
 - [ ] **Query results held in memory per request** (`Gps.ts`)
   `gpsDay`/`staysDay`/`staysOverlapping` round-trip results through a JSON string →
   parse, whole result per request. The temp-file plumbing added to the `duckdb` helper
-  in `ed17b06` makes a parquet-result path easy if days get big.
+  in `d95c004` makes a parquet-result path easy if days get big.
 
 ## Small stuff
+
+- [ ] **`EAGER_WINDOW_DAYS` is set in dev** (`.env`, `Time.ts`)
+  Currently `7`, so the pipeline pre-generates only the last week. Lazy dereference is
+  unaffected (any day still materializes on request), but it must be unset before this
+  is treated as production, or older days never refresh on their own. Same for the
+  cheap dev models: `JOURNAL_LLM_MODEL=gpt-5.4-mini`, `JOURNAL_LLM_NOTES_MODEL=nano`.
+
+- [ ] **`note/notes-day-v1` has no eviction** (`Notes.ts`)
+  Notes ingest is windowed to `NOTE_WINDOW_DAYS` (90), but notes already written stay
+  forever. Harmless (they're small, and a day's note is a journal input for as long as
+  the day exists) — noting it so the window isn't mistaken for a bound on the data.
 
 - [ ] **`batches()` chunking** (`Journal.ts`) — can split a UTF-16 surrogate pair at a
   chunk boundary, and repeats the `--- recording … ---` label for each part of a
@@ -54,7 +96,9 @@ landed (`42cca11` stripPort, `ed17b06` GPS hardening); everything below is outst
 - [ ] **Empty journals from lazy derefs** (`Journal.ts`) — in-range but input-less days
   fetched via `/journal/<day>` persist an empty journal file (sha256("") key); the
   "no noise" guard only covers pre-epoch/future days. Bots probing dates will write
-  files.
+  files. Confirmed live: one `GET /journal/2011-03-05` created
+  `journal/journal-v5/2011-03-05/e3b0c442…json` (removed again by hand). Cheap fix is
+  to return the empty journal without persisting it when a day has no inputs.
 
 - [ ] **`PORT` env read** (`main.ts`) — uses `process.env.PORT` directly instead of
   `Config`, the only env read outside `Cluster.ts`'s `CLUSTER_DB`.
@@ -65,12 +109,26 @@ landed (`42cca11` stripPort, `ed17b06` GPS hardening); everything below is outst
 
 ## Fixed in this round (for reference)
 
+- `currentJournals` picked a day's journal by sorting keys, which sorts by input hash
+  — arbitrary. Three days on disk have several journals, so the homepage could show an
+  older one with no way to tell. Now found by splitting the key path, newest chosen by
+  `generatedAt`, and a lagging journal is marked in the page — `385cec4`.
+- `readCorrection` did one `exists()` per capture, twice per pass, against the network
+  mount: 51 round trips (3.3s) to learn that `correction/` is empty. One listing
+  answers for the whole corpus (222ms) — `385cec4`.
+- `dayIndexMemo` cached a value, so two concurrent misses both materialized. It now
+  caches the in-flight Effect — `385cec4`.
+- The notes source ingested every markdown file in the checkout (4534, a `git log`
+  subprocess each) and nothing read the result. Now scoped to `Journal/<day>.md` in a
+  90-day window, keyed by day, and actually feeding the journal — `385cec4`. The inert
+  `note/notes-git-v1` files (4521) have been deleted from the data dir.
+
 - `stripPort` mangled bare IPv6 (`::1` → `":"`), rejecting tailscale-serve requests
-  arriving over IPv6 loopback — `42cca11`.
+  arriving over IPv6 loopback — `7ea6ab0`.
 - `isoOrNull` read fractional epoch seconds as millis (string-length heuristic) —
-  `ed17b06`.
+  `d95c004`.
 - `gpsInboxWrite` wasn't atomic; a reader could catch a half-written NDJSON file and
-  fail the whole DuckDB scan — `ed17b06`.
+  fail the whole DuckDB scan — `d95c004`.
 - `duckdb` results crossed exec stdout under a 256 MB MAXBUFFER cap, which killed the
   subprocess (and the query) on big results; now temp-file based with stderr
-  preserved — `ed17b06`.
+  preserved — `d95c004`.
