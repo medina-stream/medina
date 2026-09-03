@@ -17,7 +17,11 @@ export const dataPath = (key: string) => join(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
 export const JOURNAL_VERSION = "journal-v5"
-export const NOTE_VERSION = "notes-git-v1"
+/** Notes are keyed by the day they are about, not by ingest id: exactly one
+ * journal note per day is what the journal reads. The previous
+ * `notes-git-v1` (every markdown file in the checkout, keyed by ingest id)
+ * is superseded -- its files are inert and can be deleted. */
+export const NOTE_VERSION = "notes-day-v1"
 export const ATTRIBUTION_VERSION = "attribution-v1"
 export const DAY_INDEX_VERSION = "days-v1"
 
@@ -25,13 +29,15 @@ export const DAY_INDEX_VERSION = "days-v1"
  * perspectives within the stream (e.g. a future headphone-audio channel). */
 export const CHANNEL_MAIN = "lifelog-audio-1"
 
-export const noteKey = (ingestId: string) => `note/${NOTE_VERSION}/${ingestId}.json`
+export const noteKey = (day: string) => `note/${NOTE_VERSION}/${day}.json`
 
 /** One note file as of a git commit, captured from the notes checkout. */
 export class Note extends Schema.Class<Note>("Note")({
   provider: Schema.Literal("git"),
   version: Schema.String,
   ingestId: Schema.String,
+  /** The civil day this note is about (from its `Journal/<day>.md` name). */
+  day: Schema.String,
   path: Schema.String,
   blobSha: Schema.String,
   capturedAt: Schema.NullOr(Schema.String),

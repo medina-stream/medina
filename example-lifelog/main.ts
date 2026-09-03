@@ -26,36 +26,11 @@ import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
 import type * as FileSystem from "effect/FileSystem"
-import { dataPath, type Journal } from "./Resources.ts"
+import { dataPath } from "./Resources.ts"
+import { dayPage, journalPage } from "./Pages.tsx"
 import { audioSource, attributionResource, currentJournals, dayIndexResource, httpIngest, journalForDay, journalResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementForDay, movementResource } from "./Movement.ts"
 import { staysDay, staysSource } from "./Stays.ts"
-
-const escapeHtml = (value: string) =>
-  value.replace(/[&<>"']/g, (character) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character] ?? character)
-
-const reportHtml = (report: string) =>
-  report
-    .split(/\n\s*\n/)
-    .filter(Boolean)
-    .map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, "<br>")}</p>`)
-    .join("")
-
-const page = (journals: ReadonlyArray<Journal>) => {
-  const sections = journals.length
-    ? journals.map((journal) => `<section><h2>${escapeHtml(journal.day)}</h2>${reportHtml(journal.report)}</section>`)
-      .join("\n")
-    : "<p class=empty>No journal days yet.</p>"
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Medina</title><style>
-  :root { color-scheme: light dark; font-family: ui-serif, Georgia, serif; }
-  body { max-width: 46rem; margin: 0 auto; padding: 3rem 1.25rem 6rem; line-height: 1.6; }
-  h1 { font-size: 2.25rem; margin: 0; } header p, .empty { color: #777; } section { border-top: 1px solid #bbb; margin-top: 2.5rem; padding-top: 1.5rem; }
-  h2 { font-size: 1.25rem; margin: 0 0 1rem; } p { margin: .75rem 0; }
-</style></head><body><header><h1>Journal</h1><p>Daily reports from the Medina data dir.</p></header><main>${sections}</main></body></html>`
-}
 
 const Routes = HttpRouter.use((router) =>
   Effect.gen(function*() {
@@ -63,7 +38,7 @@ const Routes = HttpRouter.use((router) =>
       "GET",
       "/",
       currentJournals.pipe(
-        Effect.map((journals) => HttpServerResponse.html(page(journals))),
+        Effect.map((views) => HttpServerResponse.html(journalPage(views))),
         Effect.orDie
       )
     )
@@ -82,7 +57,16 @@ const Routes = HttpRouter.use((router) =>
         const cacheControl = journal.day < today
           ? "private, max-age=86400"
           : "private, max-age=60"
-        return HttpServerResponse.jsonUnsafe(journal, { headers: { "cache-control": cacheControl } })
+        // Same resource, two representations: browsers get the page, tools
+        // get the record.
+        const request = yield* HttpServerRequest.HttpServerRequest
+        const wantsHtml = (request.headers["accept"] ?? "").includes("text/html")
+        return wantsHtml
+          ? HttpServerResponse.text(dayPage(journal), {
+            contentType: "text/html",
+            headers: { "cache-control": cacheControl }
+          })
+          : HttpServerResponse.jsonUnsafe(journal, { headers: { "cache-control": cacheControl } })
       })
     )
     yield* router.add(

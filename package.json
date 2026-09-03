@@ -2,6 +2,10 @@
   "name": "medina",
   "private": true,
   "type": "module",
+  "imports": {
+    "#jsx/jsx-runtime": "./lib/jsx/jsx-runtime.ts",
+    "#jsx/jsx-dev-runtime": "./lib/jsx/jsx-runtime.ts"
+  },
   "scripts": {
     "dev": "bun --watch example-lifelog/main.ts",
     "start": "bun example-lifelog/main.ts",
