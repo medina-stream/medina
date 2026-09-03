@@ -210,8 +210,8 @@ const Ingest = Layer.effectDiscard(
     const notesRepo = yield* Config.string("NOTES_REPO_DIR")
     yield* runPipeline<LifelogEnv>(
       [audioSource(folderId, latest), notesSource(notesRepo), gpsCompactSource, staysSource],
-      // Order matters: attributions before the index, the index before journals.
-      [attributionResource, dayIndexResource, journalResource, movementResource],
+      // Order matters: movement enriches journals, after attribution/index.
+      [attributionResource, dayIndexResource, movementResource, journalResource],
       dataPath
     ).pipe(
       Effect.catchCause((cause) => Effect.logError("pipeline run failed", cause)),

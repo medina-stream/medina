@@ -16,7 +16,7 @@ export const DATA_DIR = process.env.DATA_DIR ?? "data/artifacts"
 export const dataPath = (key: string) => join(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
-export const JOURNAL_VERSION = "journal-v4"
+export const JOURNAL_VERSION = "journal-v5"
 export const NOTE_VERSION = "notes-git-v1"
 export const ATTRIBUTION_VERSION = "attribution-v1"
 export const DAY_INDEX_VERSION = "days-v1"

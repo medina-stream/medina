@@ -10,7 +10,7 @@ import type { Resource } from "../lib/Resource.ts"
 import { gpsDay, haversineMeters } from "./Gps.ts"
 import { readStaysBasis, staysOverlapping, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
-import { homeTimeZone } from "./Lifelog.ts"
+import { homeTimeZone } from "./Time.ts"
 
 export const MOVEMENT_VERSION = "movement-v1"
 const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2"
@@ -20,7 +20,7 @@ const STAY_RADIUS_M = 200
 const GAP_MS = 3 * 60 * 60_000
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex")
-const movementKey = (day: string, basisHash: string) => `gps/${MOVEMENT_VERSION}/${day}/${basisHash}.json`
+export const movementKey = (day: string, basisHash: string) => `gps/${MOVEMENT_VERSION}/${day}/${basisHash}.json`
 
 export interface MovementFix {
   readonly ts: string
@@ -109,6 +109,20 @@ class GapSegment extends Schema.Class<GapSegment>("MovementGap")({
   startLocal: Schema.String, endLocal: Schema.String, fixes: Schema.Number
 }) {}
 export const MovementSegment = Schema.Union([StaySegment, TravelSegment, GapSegment])
+
+/** Compact GPS evidence for the journal prompt. Coordinates and movement's
+ * own narrative intentionally never cross this boundary. */
+export const renderMovementTimeline = (movement: Movement) => movement.segments.map((segment) => {
+  const times = `${segment.startLocal}-${segment.endLocal}`
+  if (segment.kind === "stay") {
+    const place = segment.placeName ?? segment.geocodedName
+    return `${times} stay${place ? ` at ${place}` : ""} (${segment.dwellMinutes} min)`
+  }
+  if (segment.kind === "travel") {
+    return `${times} ${segment.mode} ${(segment.distanceMeters / 1000).toFixed(1)} km`
+  }
+  return `${times} gap in GPS evidence`
+}).join("\n")
 
 class PlaceSuggestion extends Schema.Class<PlaceSuggestion>("PlaceSuggestion")({
   lat: Schema.Number, lon: Schema.Number, geocodedName: Schema.NullOr(Schema.String), dwellMinutes: Schema.Number
@@ -220,7 +234,7 @@ const readPlaces = Effect.gen(function*() {
   return { places, hash: sha256(text) }
 })
 
-const movementBasis = (day: string) => Effect.gen(function*() {
+export const movementBasis = (day: string) => Effect.gen(function*() {
   const zone = yield* homeTimeZone
   const start = localMidnightUtc(day, zone)
   const [year, month, date] = day.split("-").map(Number) as [number, number, number]
@@ -307,6 +321,25 @@ export const movementResource: Resource<FileSystem.FileSystem | LanguageModel.La
   }),
   instance: (day) => /^\d{4}-\d{2}-\d{2}$/.test(day) ? movementInstance(day) : Effect.fail(new Error(`not a day: ${day}`))
 }
+
+/** Every local civil day represented by a GPS point. This is intentionally
+ * broader than movementResource's recent eager window: movement-only days
+ * are journal inputs too. */
+export const movementDays = Effect.gen(function*() {
+  const fs = yield* FileSystem.FileSystem
+  const zone = yield* homeTimeZone
+  const root = dataPath("gps/points-v1")
+  const entries = (yield* fs.exists(root)) ? yield* fs.readDirectory(root) : []
+  const utcDays = entries
+    .map((entry) => entry.match(/^day=(\d{4}-\d{2}-\d{2})$/)?.[1])
+    .filter((day): day is string => !!day)
+    .sort()
+  const days = new Set<string>()
+  for (const utcDay of utcDays) {
+    for (const point of yield* gpsDay(utcDay)) days.add(localDay(new Date(point.ts), zone))
+  }
+  return [...days].sort()
+})
 
 export const movementForDay = (day: string) => Effect.gen(function*() {
   const instance = yield* movementResource.instance!(day)
