@@ -29,6 +29,7 @@ import type * as FileSystem from "effect/FileSystem"
 import { dataPath, type Journal } from "./Resources.ts"
 import { audioSource, attributionResource, currentJournals, dayIndexResource, httpIngest, journalForDay, journalResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementForDay, movementResource } from "./Movement.ts"
+import { staysDay, staysSource } from "./Stays.ts"
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
@@ -133,6 +134,22 @@ const Routes = HttpRouter.use((router) =>
         })
       })
     )
+    yield* router.add(
+      "GET",
+      "/stays/:day",
+      Effect.gen(function*() {
+        const { day } = yield* HttpRouter.params
+        if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
+        }
+        const stays = yield* Effect.orDie(staysDay(day))
+        const today = yield* todayDay
+        const cacheControl = day < today ? "private, max-age=3600" : "private, max-age=60"
+        return HttpServerResponse.jsonUnsafe({ day, count: stays.length, stays }, {
+          headers: { "cache-control": cacheControl }
+        })
+      })
+    )
     // Push ingest: apps (e.g. a GPS logger) POST batches here from the
     // tailnet. Identity comes from Tailscale: the WireGuard peer behind the
     // source address must map to the owner's login. No tokens — the tailnet
@@ -192,7 +209,7 @@ const Ingest = Layer.effectDiscard(
     const latest = yield* Config.int("SOURCE_LATEST").pipe(Config.withDefault(25))
     const notesRepo = yield* Config.string("NOTES_REPO_DIR")
     yield* runPipeline<LifelogEnv>(
-      [audioSource(folderId, latest), notesSource(notesRepo), gpsCompactSource],
+      [audioSource(folderId, latest), notesSource(notesRepo), gpsCompactSource, staysSource],
       // Order matters: attributions before the index, the index before journals.
       [attributionResource, dayIndexResource, journalResource, movementResource],
       dataPath

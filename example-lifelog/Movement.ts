@@ -8,6 +8,7 @@ import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import * as Files from "../lib/Files.ts"
 import type { Resource } from "../lib/Resource.ts"
 import { gpsDay, haversineMeters } from "./Gps.ts"
+import { readStaysBasis, staysOverlapping, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
 import { homeTimeZone } from "./Lifelog.ts"
 
@@ -15,7 +16,6 @@ export const MOVEMENT_VERSION = "movement-v1"
 const PLACES_KEY = "gps/places.json"
 const DAY_MS = 86_400_000
 const STAY_RADIUS_M = 200
-const STAY_MIN_MS = 15 * 60_000
 const GAP_MS = 3 * 60 * 60_000
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex")
@@ -31,11 +31,6 @@ export type RawMovementSegment =
   | { readonly kind: "stay"; readonly start: string; readonly end: string; readonly lat: number; readonly lon: number; readonly fixes: number }
   | { readonly kind: "travel"; readonly start: string; readonly end: string; readonly distanceMeters: number; readonly mode: "walk" | "bike" | "drive"; readonly fixes: number }
   | { readonly kind: "gap"; readonly start: string; readonly end: string; readonly fixes: number }
-
-const centroid = (points: ReadonlyArray<MovementFix>) => ({
-  lat: points.reduce((sum, point) => sum + point.lat, 0) / points.length,
-  lon: points.reduce((sum, point) => sum + point.lon, 0) / points.length
-})
 
 const pathDistance = (points: ReadonlyArray<MovementFix>) => {
   let meters = 0
@@ -66,50 +61,19 @@ const transitSegments = (points: ReadonlyArray<MovementFix>): ReadonlyArray<RawM
   return result
 }
 
-/** Pure stay/travel segmentation. Fixes are sorted defensively. */
-export const segmentMovement = (input: ReadonlyArray<MovementFix>): ReadonlyArray<RawMovementSegment> => {
+/** Compose materialized stays with travel/gap evidence from raw points. */
+export const composeMovement = (stays: ReadonlyArray<StayRow>, input: ReadonlyArray<MovementFix>): ReadonlyArray<RawMovementSegment> => {
   const points = [...input].sort((a, b) => a.ts.localeCompare(b.ts))
-  if (points.length === 0) return []
-  if (points.length === 1) {
-    const point = points[0]!
-    return [{ kind: "stay", start: point.ts, end: point.ts, lat: point.lat, lon: point.lon, fixes: 1 }]
-  }
-
-  const stays: Array<{ start: number; end: number; lat: number; lon: number }> = []
-  for (let start = 0; start < points.length;) {
-    let end = start
-    let center = centroid(points.slice(start, end + 1))
-    while (end + 1 < points.length && haversineMeters(center, points[end + 1]!) <= STAY_RADIUS_M) {
-      end += 1
-      center = centroid(points.slice(start, end + 1))
-    }
-    if (end > start && Date.parse(points[end]!.ts) - Date.parse(points[start]!.ts) >= STAY_MIN_MS) {
-      stays.push({ start, end, ...center })
-      start = end + 1
-    } else {
-      start += 1
-    }
-  }
-
-  if (stays.length === 0) {
-    return transitSegments(points)
-  }
-
+  const ordered = [...stays].sort((a, b) => a.first_point_ts.localeCompare(b.first_point_ts))
   const result: Array<RawMovementSegment> = []
-  const emitBetween = (from: number, to: number) => {
-    if (to <= from) return
-    result.push(...transitSegments(points.slice(from, to + 1)))
-  }
-  if (stays[0]!.start > 0) emitBetween(0, stays[0]!.start)
-  stays.forEach((stay, index) => {
-    const first = points[stay.start]!
-    const last = points[stay.end]!
-    result.push({ kind: "stay", start: first.ts, end: last.ts, lat: stay.lat, lon: stay.lon, fixes: stay.end - stay.start + 1 })
-    const next = stays[index + 1]
-    if (next) emitBetween(stay.end, next.start)
+  ordered.forEach((stay, index) => {
+    result.push({ kind: "stay", start: stay.first_point_ts, end: stay.last_point_ts,
+      lat: stay.lat, lon: stay.lon, fixes: stay.point_count })
+    const next = ordered[index + 1]
+    if (!next) return
+    const between = points.filter((point) => point.ts >= stay.last_point_ts && point.ts <= next.first_point_ts)
+    result.push(...transitSegments(between))
   })
-  const lastStay = stays.at(-1)!
-  if (lastStay.end < points.length - 1) emitBetween(lastStay.end, points.length - 1)
   return result
 }
 
@@ -251,22 +215,30 @@ const readPlaces = Effect.gen(function*() {
 
 const movementBasis = (day: string) => Effect.gen(function*() {
   const zone = yield* homeTimeZone
+  const start = localMidnightUtc(day, zone)
+  const [year, month, date] = day.split("-").map(Number) as [number, number, number]
+  const next = new Date(Date.UTC(year, month - 1, date) + DAY_MS).toISOString().slice(0, 10)
+  const end = localMidnightUtc(next, zone)
   const points = yield* pointsForLocalDay(day, zone)
+  const stays = yield* staysOverlapping(start, end)
+  const staysBasis = yield* readStaysBasis
   const places = yield* readPlaces
-  const pointsHash = sha256(points.map((p) => `${p.source}\t${p.ts}\t${p.lat}\t${p.lon}\t${p.speed ?? ""}\t${p.alt ?? ""}\t${p.acc ?? ""}\t${p.batt ?? ""}`).join("\n"))
-  const basisHash = sha256(`${MOVEMENT_VERSION}\n${zone}\n${pointsHash}\n${places.hash}`)
-  return { zone, points, places: places.places, basisHash }
+  const basisHash = sha256(`${MOVEMENT_VERSION}\n${zone}\n${staysBasis.basisHash}\n${places.hash}`)
+  return { zone, start, end, points, stays, places: places.places, basisHash }
 })
 
 interface MovementBasis {
   readonly zone: string
+  readonly start: number
+  readonly end: number
   readonly points: ReadonlyArray<MovementFix & { readonly source: string; readonly speed: number | null; readonly alt: number | null; readonly acc: number | null; readonly batt: number | null }>
+  readonly stays: ReadonlyArray<StayRow>
   readonly places: ReadonlyArray<Place>
   readonly basisHash: string
 }
 
 const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(function*() {
-  const raw = segmentMovement(basis.points)
+  const raw = composeMovement(basis.stays, basis.points)
   const segments: Array<StaySegment | TravelSegment | GapSegment> = []
   const suggestionCandidates: Array<{ lat: number; lon: number; geocodedName: string | null; dwellMinutes: number }> = []
   for (const segment of raw) {
@@ -277,8 +249,10 @@ const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(fu
         .sort((a, b) => a.meters - b.meters)[0]?.place ?? null
       const geocodedName = yield* reverseGeocode(segment.lat, segment.lon)
       const dwellMinutes = Math.round((Date.parse(segment.end) - Date.parse(segment.start)) / 60_000)
+      const visibleStart = new Date(Math.max(Date.parse(segment.start), basis.start)).toISOString()
+      const visibleEnd = new Date(Math.min(Date.parse(segment.end), basis.end)).toISOString()
       segments.push(new StaySegment({ kind: "stay", startTime: segment.start, endTime: segment.end,
-        startLocal: localTime(segment.start, basis.zone), endLocal: localTime(segment.end, basis.zone),
+        startLocal: localTime(visibleStart, basis.zone), endLocal: localTime(visibleEnd, basis.zone),
         lat: segment.lat, lon: segment.lon, placeId: nearest?.id ?? null,
         placeName: nearest?.name ?? geocodedName, geocodedName, dwellMinutes, fixes: segment.fixes }))
       if (!nearest) {
@@ -307,7 +281,7 @@ const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(fu
 })
 
 const movementInstance = (day: string) => Effect.map(movementBasis(day), (basis) => ({
-  key: movementKey(day, basis.basisHash), label: day, dependencies: [PLACES_KEY],
+  key: movementKey(day, basis.basisHash), label: day, dependencies: [PLACES_KEY, "gps/stays-v1/basis.json"],
   materialize: materializeMovement(day, basis)
 }))
 
