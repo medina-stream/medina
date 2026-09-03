@@ -13,6 +13,7 @@ import { dataPath } from "./Resources.ts"
 import { homeTimeZone } from "./Lifelog.ts"
 
 export const MOVEMENT_VERSION = "movement-v1"
+const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2"
 const PLACES_KEY = "gps/places.json"
 const DAY_MS = 86_400_000
 const STAY_RADIUS_M = 200
@@ -229,7 +230,7 @@ const movementBasis = (day: string) => Effect.gen(function*() {
   const stays = yield* staysOverlapping(start, end)
   const staysBasis = yield* readStaysBasis
   const places = yield* readPlaces
-  const basisHash = sha256(`${MOVEMENT_VERSION}\n${zone}\n${staysBasis.basisHash}\n${places.hash}`)
+  const basisHash = sha256(`${MOVEMENT_VERSION}\n${MOVEMENT_BASIS_VERSION}\n${zone}\n${staysBasis.basisHash}\n${places.hash}`)
   return { zone, start, end, points, stays, places: places.places, basisHash }
 })
 
