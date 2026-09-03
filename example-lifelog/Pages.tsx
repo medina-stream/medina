@@ -20,7 +20,7 @@ const STYLE = `
   .stale { font-size: .75rem; font-weight: normal; color: #999; margin-left: .5rem; }
 `
 
-const Layout = ({ title, children }: { title: string; children?: Child }) => (
+const Layout = ({ title, children, scriptSrc }: { title: string; children?: Child; scriptSrc?: string }) => (
   <html lang="en">
     <head>
       <meta charset="utf-8" />
@@ -28,7 +28,10 @@ const Layout = ({ title, children }: { title: string; children?: Child }) => (
       <title>{title}</title>
       <style>{raw(STYLE)}</style>
     </head>
-    <body>{children}</body>
+    <body>
+      {children}
+      {scriptSrc ? <script src={scriptSrc} defer></script> : ""}
+    </body>
   </html>
 )
 
@@ -68,6 +71,22 @@ export const journalPage = (views: ReadonlyArray<JournalView>) =>
           ? <p class="empty">No journal days yet.</p>
           : views.map((view) => <DayEntry view={view} />)}
       </main>
+    </Layout>
+  )
+
+/** The SPA shell: static markup plus the client bundle. Journal content
+ * loads over the typed RPC, so this page needs no data at serve time. */
+export const spaHome = () =>
+  "<!doctype html>" + render(
+    <Layout title="Medina" scriptSrc="/app.js">
+      <header>
+        <h1>Journal</h1>
+        <p>Daily reports from the Medina data dir.</p>
+      </header>
+      <main id="app">
+        <p class="empty">Loading…</p>
+      </main>
+      <noscript><p class="empty">The journal loads over a typed RPC and needs JavaScript.</p></noscript>
     </Layout>
   )
 

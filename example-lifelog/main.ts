@@ -19,28 +19,46 @@ import { ClusterLive, WorkflowEngineLive } from "./Cluster.ts"
 import { JournalWorkflowLayer, NotesWorkflowLayer } from "./Lifelog.ts"
 import * as Redacted from "effect/Redacted"
 import * as Option from "effect/Option"
+import * as FileSystem from "effect/FileSystem"
+import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
+import * as RpcServer from "effect/unstable/rpc/RpcServer"
+import { JournalsGroup } from "./JournalApi.ts"
+import { JournalsHandlersLive } from "./JournalRpc.ts"
 import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
 import { gpsCompactSource, gpsDay, gpsInboxWrite, locationSummary, parseGpsBody } from "./Gps.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
 import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
-import type * as FileSystem from "effect/FileSystem"
 import { dataPath } from "./Resources.ts"
-import { dayPage, journalPage, pendingPage } from "./Pages.tsx"
-import { audioSource, attributionResource, currentJournals, dayIndexResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { dayPage, pendingPage, spaHome } from "./Pages.tsx"
+import { audioSource, attributionResource, dayIndexResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "./Movement.ts"
 import { staysDay, staysSource } from "./Stays.ts"
 
 const Routes = HttpRouter.use((router) =>
   Effect.gen(function*() {
+    // The home page is an SPA: a static shell plus the client bundle. All
+    // journal data arrives over the typed RPC at POST /rpc.
     yield* router.add(
       "GET",
       "/",
-      currentJournals.pipe(
-        Effect.map((views) => HttpServerResponse.html(journalPage(views))),
-        Effect.orDie
-      )
+      Effect.succeed(HttpServerResponse.html(spaHome()))
+    )
+    yield* router.add(
+      "GET",
+      "/app.js",
+      Effect.gen(function*() {
+        const fs = yield* FileSystem.FileSystem
+        const path = process.env.CLIENT_BUNDLE ?? "example-lifelog/public/app.js"
+        if (!(yield* fs.exists(path))) {
+          return HttpServerResponse.text("client bundle missing: run bun run build:client", { status: 503 })
+        }
+        return HttpServerResponse.text(yield* fs.readFileString(path), {
+          contentType: "text/javascript",
+          headers: { "cache-control": "private, max-age=60" }
+        })
+      }).pipe(Effect.orDie)
     )
     yield* router.add(
       "GET",
@@ -267,8 +285,14 @@ const Services = Layer.mergeAll(
   Layer.provideMerge(BunHttpClient.layer)
 )
 
+/** Typed journals RPC at POST /rpc, over plain HTTP on the same router. */
+const RpcLive = RpcServer.layerHttp({ group: JournalsGroup, path: "/rpc", protocol: "http" }).pipe(
+  Layer.provide(RpcSerialization.layerJson),
+  Layer.provide(JournalsHandlersLive)
+)
+
 const Main = Layer.mergeAll(
-  HttpRouter.serve(Routes),
+  HttpRouter.serve(Layer.mergeAll(Routes, RpcLive)),
   Ingest
 ).pipe(
   Layer.provide(Services),

@@ -7,13 +7,15 @@
     "#jsx/jsx-dev-runtime": "./lib/jsx/jsx-runtime.ts"
   },
   "scripts": {
-    "dev": "bun --watch example-lifelog/main.ts",
-    "start": "bun example-lifelog/main.ts",
+    "build:client": "bun build ./example-lifelog/client.ts --outfile ./example-lifelog/public/app.js --target browser --minify",
+    "dev": "bun run build:client && bun --watch example-lifelog/main.ts",
+    "start": "bun run build:client && bun example-lifelog/main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@effect/ai-openai": "^4.0.0-rc.112",
     "@effect/platform-bun": "4.0.0-rc.112",
+    "@effect/sql-pg": "4.0.0-rc.112",
     "@effect/sql-sqlite-bun": "4.0.0-rc.112",
     "effect": "4.0.0-rc.112"
   },
