@@ -24,7 +24,17 @@ export class Tailscale extends Context.Service<Tailscale, {
   ) => Effect.Effect<string | null>
 }>()("medina/Tailscale") {}
 
-const stripPort = (address: string) => address.replace(/^\[?([^\]]+?)\]?(:\d+)?$/, "$1")
+/** Strip the port from a socket address without mangling bare IPv6:
+ * only a bracketed host or a single-colon `ipv4:port` loses its port —
+ * `::1` and `::ffff:127.0.0.1` pass through untouched (a bare IPv6 always
+ * has at least two colons; a port suffix only follows a dotted quad). */
+const stripPort = (address: string) => {
+  if (address.startsWith("[")) {
+    const end = address.indexOf("]")
+    return end === -1 ? address : address.slice(1, end)
+  }
+  return (address.match(/:/g) ?? []).length === 1 ? address.slice(0, address.lastIndexOf(":")) : address
+}
 
 const isLoopback = (ip: string) => ip === "::1" || ip.startsWith("127.") || ip === "::ffff:127.0.0.1"
 
