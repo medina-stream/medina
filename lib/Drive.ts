@@ -36,9 +36,16 @@ export const layer: Layer.Layer<Drive, Config.ConfigError, HttpClient.HttpClient
     const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient)
     const asError = (cause: unknown) => new Error("Google Drive request failed", { cause })
 
-    const token = client.post(tokenUrl).pipe(
+    // The mint yields a short-lived (~1h) token, and `token` below would
+    // otherwise re-run the mint POST on every list/download. Cache it with
+    // a TTL that refreshes ahead of expiry: the hourly pass pays ~one mint
+    // per 50 minutes instead of one per file. Plain `Effect.cached` would
+    // pin the first token for the process lifetime and eventually serve a
+    // dead one.
+    const token = yield* client.post(tokenUrl).pipe(
       Effect.flatMap(HttpClientResponse.schemaBodyJson(Token)),
-      Effect.map((body) => body.access_token)
+      Effect.map((body) => body.access_token),
+      Effect.cachedWithTTL("50 minutes")
     )
 
     const authorized = (url: string) =>

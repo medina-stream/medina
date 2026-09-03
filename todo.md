@@ -60,10 +60,11 @@ landed (`7ea6ab0` stripPort, `d95c004` GPS hardening); everything below is outst
   transcripts didn't change never re-runs the notes pass, whatever else moved. This is
   the prerequisite for the item above, and worth doing on its own.
 
-- [ ] **Drive tokens minted per request** (`lib/Drive.ts`)
-  `authorized()` re-runs the token POST on every call, so each `list`/`download` pays a
-  token round trip. Cache the token (`Effect.cached`, or cache with expiry off the
-  response).
+- [x] **Drive tokens minted per request** (`lib/Drive.ts`)
+  `authorized()` re-ran the token POST on every call, so each `list`/`download` paid a
+  token round trip. Now cached with `Effect.cachedWithTTL("50 minutes")` — a plain
+  `Effect.cached` would pin the first token for the process lifetime. Covered by
+  `lib/Drive.test.ts` (3 calls → 1 mint).
 
 - [ ] **Request-path LLM spend** (`Journal.ts`, `Movement.ts`, `main.ts`)
   First `GET /journal/:day` on a stale day materializes synchronously — notes batches +
