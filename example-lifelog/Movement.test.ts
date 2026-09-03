@@ -24,6 +24,15 @@ describe("segmentMovement", () => {
     expect(segments[0]?.kind).toBe("gap")
   })
 
+  test("isolates a sparse hole without hiding observed travel around it", () => {
+    const segments = segmentMovement([
+      fix(0, 41.88, -87.63), fix(5, 41.885, -87.63),
+      { ts: "2026-08-29T18:30:00.000Z", lat: 41.90, lon: -87.63 },
+      { ts: "2026-08-29T18:35:00.000Z", lat: 41.905, lon: -87.63 }
+    ])
+    expect(segments.map((segment) => segment.kind)).toEqual(["travel", "gap", "travel"])
+  })
+
   test("represents a single-fix day", () => {
     expect(segmentMovement([fix(0, 41.88, -87.63)])).toEqual([
       { kind: "stay", start: fix(0, 0, 0).ts, end: fix(0, 0, 0).ts, lat: 41.88, lon: -87.63, fixes: 1 }

@@ -43,6 +43,29 @@ const pathDistance = (points: ReadonlyArray<MovementFix>) => {
   return meters
 }
 
+const transitSegments = (points: ReadonlyArray<MovementFix>): ReadonlyArray<RawMovementSegment> => {
+  const result: Array<RawMovementSegment> = []
+  const emitTravel = (slice: ReadonlyArray<MovementFix>) => {
+    if (slice.length < 2) return
+    const elapsed = Date.parse(slice.at(-1)!.ts) - Date.parse(slice[0]!.ts)
+    const distanceMeters = pathDistance(slice)
+    const speed = distanceMeters / Math.max(1, elapsed / 1000)
+    result.push({ kind: "travel", start: slice[0]!.ts, end: slice.at(-1)!.ts, distanceMeters,
+      mode: speed < 2.5 ? "walk" : speed < 7 ? "bike" : "drive", fixes: slice.length })
+  }
+  let chunkStart = 0
+  for (let index = 0; index + 1 < points.length; index++) {
+    const left = points[index]!
+    const right = points[index + 1]!
+    if (Date.parse(right.ts) - Date.parse(left.ts) <= GAP_MS || haversineMeters(left, right) <= STAY_RADIUS_M) continue
+    emitTravel(points.slice(chunkStart, index + 1))
+    result.push({ kind: "gap", start: left.ts, end: right.ts, fixes: 2 })
+    chunkStart = index + 1
+  }
+  emitTravel(points.slice(chunkStart))
+  return result
+}
+
 /** Pure stay/travel segmentation. Fixes are sorted defensively. */
 export const segmentMovement = (input: ReadonlyArray<MovementFix>): ReadonlyArray<RawMovementSegment> => {
   const points = [...input].sort((a, b) => a.ts.localeCompare(b.ts))
@@ -69,29 +92,13 @@ export const segmentMovement = (input: ReadonlyArray<MovementFix>): ReadonlyArra
   }
 
   if (stays.length === 0) {
-    const elapsed = Date.parse(points.at(-1)!.ts) - Date.parse(points[0]!.ts)
-    if (elapsed > GAP_MS && haversineMeters(points[0]!, points.at(-1)!) > STAY_RADIUS_M) {
-      return [{ kind: "gap", start: points[0]!.ts, end: points.at(-1)!.ts, fixes: points.length }]
-    }
-    const distanceMeters = pathDistance(points)
-    const seconds = Math.max(1, elapsed / 1000)
-    const speed = distanceMeters / seconds
-    return [{ kind: "travel", start: points[0]!.ts, end: points.at(-1)!.ts, distanceMeters, mode: speed < 2.5 ? "walk" : speed < 7 ? "bike" : "drive", fixes: points.length }]
+    return transitSegments(points)
   }
 
   const result: Array<RawMovementSegment> = []
   const emitBetween = (from: number, to: number) => {
     if (to <= from) return
-    const slice = points.slice(from, to + 1)
-    const elapsed = Date.parse(slice.at(-1)!.ts) - Date.parse(slice[0]!.ts)
-    const direct = haversineMeters(slice[0]!, slice.at(-1)!)
-    if (elapsed > GAP_MS && direct > STAY_RADIUS_M) {
-      result.push({ kind: "gap", start: slice[0]!.ts, end: slice.at(-1)!.ts, fixes: slice.length })
-    } else {
-      const distanceMeters = pathDistance(slice)
-      const speed = distanceMeters / Math.max(1, elapsed / 1000)
-      result.push({ kind: "travel", start: slice[0]!.ts, end: slice.at(-1)!.ts, distanceMeters, mode: speed < 2.5 ? "walk" : speed < 7 ? "bike" : "drive", fixes: slice.length })
-    }
+    result.push(...transitSegments(points.slice(from, to + 1)))
   }
   if (stays[0]!.start > 0) emitBetween(0, stays[0]!.start)
   stays.forEach((stay, index) => {
@@ -261,7 +268,7 @@ interface MovementBasis {
 const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(function*() {
   const raw = segmentMovement(basis.points)
   const segments: Array<StaySegment | TravelSegment | GapSegment> = []
-  const suggestions: Array<PlaceSuggestion> = []
+  const suggestionCandidates: Array<{ lat: number; lon: number; geocodedName: string | null; dwellMinutes: number }> = []
   for (const segment of raw) {
     if (segment.kind === "stay") {
       const nearest = [...basis.places]
@@ -274,7 +281,16 @@ const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(fu
         startLocal: localTime(segment.start, basis.zone), endLocal: localTime(segment.end, basis.zone),
         lat: segment.lat, lon: segment.lon, placeId: nearest?.id ?? null,
         placeName: nearest?.name ?? geocodedName, geocodedName, dwellMinutes, fixes: segment.fixes }))
-      if (!nearest) suggestions.push(new PlaceSuggestion({ lat: segment.lat, lon: segment.lon, geocodedName, dwellMinutes }))
+      if (!nearest) {
+        const existing = suggestionCandidates.find((candidate) => haversineMeters(candidate, segment) <= STAY_RADIUS_M)
+        if (existing) {
+          const total = existing.dwellMinutes + dwellMinutes
+          existing.lat = (existing.lat * existing.dwellMinutes + segment.lat * dwellMinutes) / Math.max(1, total)
+          existing.lon = (existing.lon * existing.dwellMinutes + segment.lon * dwellMinutes) / Math.max(1, total)
+          existing.dwellMinutes = total
+          existing.geocodedName ??= geocodedName
+        } else suggestionCandidates.push({ lat: segment.lat, lon: segment.lon, geocodedName, dwellMinutes })
+      }
     } else if (segment.kind === "travel") {
       segments.push(new TravelSegment({ kind: "travel", startTime: segment.start, endTime: segment.end,
         startLocal: localTime(segment.start, basis.zone), endLocal: localTime(segment.end, basis.zone),
@@ -284,6 +300,7 @@ const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(fu
         startLocal: localTime(segment.start, basis.zone), endLocal: localTime(segment.end, basis.zone), fixes: segment.fixes }))
     }
   }
+  const suggestions = suggestionCandidates.map((suggestion) => new PlaceSuggestion(suggestion))
   const output = new Movement({ version: MOVEMENT_VERSION, day, basisHash: basis.basisHash, timeZone: basis.zone,
     generatedAt: new Date().toISOString(), segments, narrative: yield* narrative(segments), suggestions })
   yield* Files.writeJson(dataPath(movementKey(day, basis.basisHash)), output)
