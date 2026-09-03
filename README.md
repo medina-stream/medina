@@ -15,28 +15,6 @@ freshness) comes from the notes repo — see `Medina Themes.md` and
 The Effect v4 sources should be cloned alongside this repo at `../effect` for
 API reference (the RC differs from both v3 and the published docs in places).
 
-## Layout
-
-Generic library code lives in `lib/`; the lifelog application — sources and
-resources defined for this data — lives in `example-lifelog/`.
-
-## The data is just files
-
-All pipeline state lives in one directory of JSON files (`DATA_DIR`, default
-`data/artifacts/`), accessed with ordinary filesystem
-calls — no store abstraction. Self-hosted Medina
-points `DATA_DIR` at a local directory; a hosted deployment points it at a
-mounted filesystem such as an Archil disk (this VM: `/mnt/archil/medina`,
-mounted by `archil-mount.service`). Writes are atomic and reads avoid
-per-file stats, so network-backed mounts behave.
-
-The filesystem is Medina's only *core* dependency — the record lives there,
-and losing any other service must never lose data. Everything else is a
-peripheral capability, used where apt and replaceable without migration:
-AssemblyAI produces transcripts, an LLM writes journals, DuckDB queries
-parquet, and an object-store bucket may back speed-layer state (e.g. celld
-cells) — caches and coordination, never the record.
-
 ## Compatibility freeze
 
 The data was exported from the previous Cloudflare
