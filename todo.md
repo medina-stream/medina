@@ -29,36 +29,27 @@ landed (`7ea6ab0` stripPort, `d95c004` GPS hardening); everything below is outst
 
 ## Likely worth doing next
 
-- [ ] **Journal re-derivation cascade** (`Movement.ts`, `Journal.ts`)
-  `movementSharedBasisHash` is deliberately day-independent: it covers the *global*
-  stays basis, which covers every points partition. So one new GPS point restates the
-  basis for all 49 partitions → every day's movement stales → every day with audio
-  re-journals, re-running the notes pass over transcripts that never changed. Measured
-  on the current corpus: 31 notes calls + 23 report calls to reproduce identical notes.
-  `EAGER_WINDOW_DAYS` caps the blast radius during development but doesn't address it.
+- [x] **Journal re-derivation cascade** (`Movement.ts`, `Journal.ts`)
+  **Fixed:** The movement basis is now per-day. `movementDayBasisHash(day)` covers
+  only the stay partitions that can overlap the local day (at most 3, since the longest
+  observed stay is < 24h) and the point partitions for that day's UTC days — not the
+  global stays basis. So one new GPS point on day D stales only D and its adjacent days
+  (D-1, D+1), not all 49. The batch `movementDayBasisHashes` reads all partitions once
+  and composes per-day hashes, so eager enumeration stays cheap.
 
-  Cheapest question first: does the movement basis need to be global? A point on 09-03
-  has no bearing on 07-14's movement. A per-day basis would stale only the days whose
-  points actually changed, and might dissolve most of this without new machinery.
+  **Also fixed:** Notes are now their own resource (`notes-llm-v1`), keyed by the
+  transcript set hash alone (no movement, no written note). The journal workflow reads
+  cached notes instead of re-running the notes LLM pass, so a movement change re-journals
+  paying only the report call. The incremental-generation approach (keeping the last
+  generation and paying for a delta) is no longer needed — the cascade is bounded and
+  the notes are cached, so the steady-state cost of a new GPS point is ~1-3 report calls
+  instead of 31 notes calls + 23 report calls.
 
-  Beyond that, the idea is to keep the last generation and pay only for a small summary
-  of what's new. Two things to think through first —
-  * **What the key means.** A journal key is currently a hash of everything it was
-    derived from, which is what makes "file exists ⇒ current" true with no invalidation
-    logic. "Derived from a previous journal plus a delta" is a different claim, and a
-    key can't express it honestly. Likely wants notes to become their own resource
-    (see below) so the journal still composes fresh inputs, and it's the *notes* that
-    stop re-deriving.
-  * **Drift.** Rewriting from a previous entry makes each generation a lossy copy of
-    the last. Tolerable for a few hops, worrying over months on a cheap model, and
-    there's no signal when it has gone wrong — the output always looks like a journal.
-
-- [ ] **Notes are derived data that gets thrown away** (`Journal.ts`)
-  The per-batch notes pass condenses transcripts into notes held only in workflow
-  Activity state. Transcripts are immutable once written, so those notes are stable and
-  re-derivable — a natural resource with its own key. Making them one means a day whose
-  transcripts didn't change never re-runs the notes pass, whatever else moved. This is
-  the prerequisite for the item above, and worth doing on its own.
+- [x] **Notes are derived data that gets thrown away** (`Journal.ts`)
+  **Fixed:** The notes pass is now a separate `NotesWorkflow` that writes
+  `notes/notes-llm-v1/<day>/<hash>.json`, keyed by the transcript set hash. The journal
+  workflow reads `notesForDay(day)` instead of re-running N notes LLM calls. A day whose
+  transcripts didn't change never re-runs the notes pass, whatever else moved.
 
 - [x] **Drive tokens minted per request** (`lib/Drive.ts`)
   `authorized()` re-ran the token POST on every call, so each `list`/`download` paid a
@@ -67,16 +58,22 @@ landed (`7ea6ab0` stripPort, `d95c004` GPS hardening); everything below is outst
   `lib/Drive.test.ts` (3 calls → 1 mint).
 
 - [ ] **Request-path LLM spend** (`Journal.ts`, `Movement.ts`, `main.ts`)
-  First `GET /journal/:day` on a stale day materializes synchronously — notes batches +
-  report LLM calls block the request. `GET /movement/:day` on a stale day runs the LLM
-  `narrative()` plus Nominatim geocoding in-process; editing `places.json` changes the
-  shared movement basis → 14 eager rematerializations → up to 14 LLM calls + geocode
-  burst + journal-restale cascade. Consider deferring LLM work to the hourly pass and
-  serving a "writing…" placeholder for stale days.
+  First `GET /journal/:day` on a stale day materializes synchronously — now just the
+  report LLM call (notes are cached), but still blocks the request. `GET /movement/:day`
+  on a stale day runs the LLM `narrative()` plus Nominatim geocoding in-process; editing
+  `places.json` now stales only days whose movement window includes the changed places
+  (via the per-day basis), but still triggers eager rematerialization for those days.
+  Consider deferring LLM work to the hourly pass and serving a "writing…" placeholder
+  for stale days.
 
-- [ ] **Audio ingest buffers whole files in memory** (`Audio.ts`)
-  Chunks are concatenated to compute the sha256 before writing; hours-long recordings
-  can be hundreds of MB. Stream the hash + stream the write to disk instead.
+- [x] **Audio ingest buffers whole files in memory** (`Audio.ts`)
+  Chunks were concatenated to compute the sha256 before writing. Now streamed:
+  `hashStreamToFile` taps the download stream into an incremental hash while
+  `fs.sink` writes a same-filesystem temp file, renamed into the contenthash
+  blob path afterwards (existing blob ⇒ temp dropped; stream failure ⇒ temp
+  removed). Covered by `example-lifelog/Audio.test.ts` plus a throwaway
+  end-to-end probe (fresh ingest byte-exact, receipt-cached rerun, receipt-loss
+  re-ingest, failing download → `failures`, empty `tmp/` throughout).
 
 - [ ] **Effect cleanup** (see `example-lifelog/EFFECT-REVIEW.md`)
   The architecture is sound, but the remaining implementation is hybrid rather than

@@ -5,6 +5,7 @@
  * everything Drive knew as provenance beside the blob. It never interprets
  * that metadata -- deciding when a capture happened is attribution's job.
  */
+import { createHash } from "node:crypto"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
@@ -13,7 +14,6 @@ import * as Files from "../lib/Files.ts"
 import { AssemblyAI, type VendorTranscript } from "../lib/AssemblyAI.ts"
 import { Drive, type DriveFile } from "../lib/Drive.ts"
 import type { Source, SourceReport } from "../lib/Resource.ts"
-import { sha256 } from "./Hash.ts"
 import {
   captureBlobName,
   captureDir,
@@ -31,6 +31,32 @@ import {
 } from "./Resources.ts"
 
 const AUDIO_SOURCE_NAME = "easy-voice"
+
+/**
+ * Stream chunks to `tmpPath` while hashing them; resolves to the hex sha256.
+ * The caller picks a temp path on the same filesystem as the final home so
+ * the later rename is atomic. A failed stream removes the partial file, so
+ * no caller ever observes one.
+ */
+export const hashStreamToFile = (
+  stream: Stream.Stream<Uint8Array, Error>,
+  tmpPath: string
+): Effect.Effect<string, Error, FileSystem.FileSystem> =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const hash = createHash("sha256")
+    yield* Stream.run(
+      Stream.tap(stream, (chunk) =>
+        Effect.sync(() => {
+          hash.update(chunk)
+        })),
+      fs.sink(tmpPath)
+    ).pipe(
+      Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
+      Effect.onError(() => fs.remove(tmpPath, { force: true }).pipe(Effect.ignore))
+    )
+    return hash.digest("hex")
+  })
 
 const normalize = (file: DriveFile, id: string, vendor: VendorTranscript): Transcript =>
   new Transcript({
@@ -85,23 +111,24 @@ const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(file: DriveFile) 
 
   yield* Effect.log(`capturing ${file.name}`)
   const drive = yield* Drive
-  const chunks: Array<Uint8Array> = []
-  yield* Stream.runForEach(yield* drive.download(file.id), (chunk) =>
-    Effect.sync(() => {
-      chunks.push(chunk)
-    }))
-  const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0))
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.length
-  }
-  const captureId = sha256(bytes)
+  // Stream straight to disk while hashing: hours-long recordings can be
+  // hundreds of MB, so the bytes must never sit in memory whole. The
+  // capture id (content hash) is known only once the stream ends, hence a
+  // temp file in the data dir (same filesystem, so the rename is atomic)
+  // renamed into place afterwards. Nothing lists the data dir root, so the
+  // temp file is invisible to enumeration while it exists.
+  const tmpPath = dataPath(`tmp/capture-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  yield* fs.makeDirectory(dataPath("tmp"), { recursive: true })
+  const captureId = yield* hashStreamToFile(yield* drive.download(file.id), tmpPath)
 
   const blobKey = `${captureDir(captureId)}/${captureBlobName(file.name)}`
-  if (!(yield* fs.exists(dataPath(blobKey)))) {
+  if (yield* fs.exists(dataPath(blobKey))) {
+    // Same bytes already captured (renamed re-upload, or a pass that died
+    // between blob write and receipt): drop the duplicate download.
+    yield* fs.remove(tmpPath)
+  } else {
     yield* fs.makeDirectory(dataPath(captureDir(captureId)), { recursive: true })
-    yield* fs.writeFile(dataPath(blobKey), bytes)
+    yield* fs.rename(tmpPath, dataPath(blobKey))
   }
 
   // Append this sighting to provenance unless already recorded: the same

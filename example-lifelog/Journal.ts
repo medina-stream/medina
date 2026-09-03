@@ -23,8 +23,8 @@ import { sha256 } from "./Hash.ts"
 import { currentDayIndex, dayTranscripts } from "./DayIndex.ts"
 import { noteForDay } from "./Notes.ts"
 import { eagerSinceDay, withinEagerWindow } from "./Time.ts"
-import { movementBasis, movementDays, movementForDay, movementKey, movementSharedBasisHash, renderMovementTimeline } from "./Movement.ts"
-import { dataPath, DayEntry, DayIndex, Journal, JOURNAL_VERSION, journalKey, NOTE_VERSION, noteKey, Transcript } from "./Resources.ts"
+import { movementBasis, movementDays, movementDayBasisHash, movementDayBasisHashes, movementForDay, movementKey, renderMovementTimeline } from "./Movement.ts"
+import { dataPath, DayEntry, DayIndex, Journal, JOURNAL_VERSION, journalKey, NotesLlm, NOTES_LLM_VERSION, notesLlmKey, NOTE_VERSION, noteKey, Transcript } from "./Resources.ts"
 
 const MAX_BATCH_CHARS = 90_000
 
@@ -123,18 +123,132 @@ export const journalInputHash = (
   return sha256(noteBasisHash ? `${withMovement}\nnote:${noteBasisHash}` : withMovement)
 }
 
+
+/** The hash of just the transcript set for a day — the notes basis. Notes
+ * are extraction from audio, so movement and the written note are not part
+ * of their key. This means a movement change restates the journal but not
+ * the notes: the journal re-derives using cached notes, paying only the
+ * report LLM call. */
+const notesInputHash = (entries: ReadonlyArray<DayEntry>) =>
+  entries
+    .map((entry) => entry.correctionHash ? `${entry.transcriptKey}:${entry.correctionHash}` : entry.transcriptKey)
+    .join("\n")
+
+type NotesEnv = FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine
+
+/** Materialize LLM-derived notes for a day: read transcripts, batch them, and
+ * run one notes LLM call per batch. The result persists as its own file, so
+ * a later journal re-derivation (e.g. movement changed) reads the cached
+ * notes instead of re-paying the notes LLM calls. */
+const NotesWorkflow = Workflow.make("NotesWorkflow", {
+  payload: {
+    day: Schema.String,
+    key: Schema.String,
+    inputKeys: Schema.Array(Schema.String)
+  },
+  idempotencyKey: ({ key }) => key
+})
+
+export const NotesWorkflowLayer = NotesWorkflow.toLayer(Effect.fn(function*({ day, key, inputKeys }) {
+  const index = yield* Effect.orDie(currentDayIndex)
+  const wanted = new Set(inputKeys)
+  const filtered = new DayIndex({
+    ...index,
+    days: { [day]: (index.days[day] ?? []).filter((entry) => wanted.has(entry.transcriptKey)) }
+  })
+  const inputs = yield* Effect.orDie(dayTranscripts(filtered, day))
+
+  yield* Effect.log(`notes for ${day} (${inputs.length} transcripts)`)
+  const notes: Array<string> = []
+  for (const [batchIndex, batch] of batches(inputs).entries()) {
+    notes.push(
+      yield* Activity.make({
+        name: `notes-${batchIndex}`,
+        success: Schema.String,
+        execute: Effect.orDie(
+          Effect.flatMap(notesModel, (model) =>
+            complete(NOTES_PROMPT, `Day: ${day}\nBatch ${batchIndex + 1}\n${batch}`, 6000, model))
+        )
+      })
+    )
+  }
+  yield* Effect.orDie(Files.writeJson(
+    dataPath(key),
+    new NotesLlm({
+      version: NOTES_LLM_VERSION,
+      day,
+      inputHash: key.split("/").at(-1)!.replace(/\.json$/, ""),
+      generatedAt: new Date().toISOString(),
+      notes
+    })
+  ))
+}))
+
+/** The notes resource: one per day with usable transcripts. Keyed by the
+ * transcript set hash, so only a new or corrected transcript stales the
+ * notes — movement changes never touch it. */
+const notesInstance = (day: string, index: DayIndex) =>
+  Effect.sync(() => {
+    const entries = index.days[day] ?? []
+    if (entries.length === 0) return null
+    const inputKeys = entries.map((entry) => entry.transcriptKey)
+    const inputHash = sha256(notesInputHash(entries))
+    const key = notesLlmKey(day, inputHash)
+    return {
+      key,
+      label: day,
+      dependencies: inputKeys,
+      materialize: NotesWorkflow.execute({ day, key, inputKeys }).pipe(Effect.asVoid)
+    }
+  })
+
+export const notesResource: Resource<NotesEnv> = {
+  name: "notes-llm",
+  instances: Effect.gen(function*() {
+    const index = yield* currentDayIndex
+    const since = yield* eagerSinceDay
+    const days = withinEagerWindow(Object.keys(index.days), since, (day) => day).sort()
+    const instances = yield* Effect.forEach(days, (day) => notesInstance(day, index))
+    return instances.filter((instance): instance is NonNullable<typeof instance> => instance !== null)
+  }).pipe(Effect.mapError((error) => new Error(String(error)))),
+  instance: (day) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(day)
+      ? Effect.gen(function*() {
+        const index = yield* currentDayIndex
+        const instance = yield* notesInstance(day, index)
+        if (!instance) return yield* Effect.fail(new Error(`no transcripts for ${day}`))
+        return instance
+      }).pipe(Effect.mapError((error) => new Error(String(error))))
+      : Effect.fail(new Error(`not a day: ${day}`))
+}
+
+/** The LLM-derived notes for a day, materializing if stale or missing.
+ * Returns null for a day with no transcripts. */
+export const notesForDay = (day: string) =>
+  Effect.gen(function*() {
+    const index = yield* currentDayIndex
+    const entries = index.days[day] ?? []
+    if (entries.length === 0) return null
+    const inputHash = sha256(notesInputHash(entries))
+    const key = notesLlmKey(day, inputHash)
+    const existing = yield* Files.readJson(NotesLlm, dataPath(key))
+    if (Option.isSome(existing)) return existing.value
+    yield* NotesWorkflow.execute({ day, key, inputKeys: entries.map((entry) => entry.transcriptKey) })
+    return Option.getOrThrow(yield* Files.readJson(NotesLlm, dataPath(key)))
+  })
+
 const journalInstance = (
   day: string,
   index: DayIndex,
   hasMovement: boolean,
-  movementHash: string,
+  movementHash: string | null,
   noteHash: string | null
 ) =>
   Effect.sync(() => {
     const entries = index.days[day] ?? []
     const inputKeys = entries.map((entry) => entry.transcriptKey)
     // Enumeration stays cheap: whether the day has GPS points (hasMovement)
-    // and the shared movement basis hash are computed once by the caller;
+    // and the day's movement basis hash are computed once by the caller;
     // the movement JSON itself is fetched (materialize-if-missing) inside a
     // workflow Activity, when the journal actually runs.
     const movementBasisHash = hasMovement ? movementHash : null
@@ -169,20 +283,22 @@ export const journalResource: Resource<JournalEnv> = {
   name: "journal",
   // Eager: days that have transcript or GPS inputs. The hourly pass keeps
   // these current, so the present day re-materializes as evidence lands.
-  // One movementDays scan + one shared hash for the whole enumeration.
+  // One movementDays scan + one batch per-day hash pass for the enumeration.
   instances: Effect.gen(function*() {
     const index = yield* currentDayIndex
     const gpsDays = new Set(yield* movementDays)
-    const movementHash = yield* movementSharedBasisHash
     const notes = yield* noteHashes
     const all = new Set([...Object.keys(index.days), ...gpsDays, ...notes.keys()])
     // A development window bounds only what is pre-generated; `instance`
     // below still dereferences any day on demand.
     const since = yield* eagerSinceDay
     const days = withinEagerWindow(all, since, (day) => day).sort()
+    // Per-day movement basis hashes: one pass reads all partitions, so each
+    // day's key depends only on the partitions that can affect it.
+    const movementHashes = yield* movementDayBasisHashes(days)
     return yield* Effect.forEach(
       days,
-      (day) => journalInstance(day, index, gpsDays.has(day), movementHash, notes.get(day) ?? null)
+      (day) => journalInstance(day, index, gpsDays.has(day), movementHashes.get(day) ?? null, notes.get(day) ?? null)
     )
   }).pipe(Effect.mapError((error) => new Error(String(error)))),
   // Lazy: any well-formed day dereferences, past or future; a truly input-less
@@ -193,7 +309,7 @@ export const journalResource: Resource<JournalEnv> = {
         const index = yield* currentDayIndex
         // One day's point check is a single cheap query.
         const hasMovement = (yield* movementBasis(day)).points.length > 0
-        const movementHash = yield* movementSharedBasisHash
+        const movementHash = hasMovement ? yield* movementDayBasisHash(day) : null
         const note = yield* noteForDay(day)
         return yield* journalInstance(
           day,
@@ -272,19 +388,18 @@ export const JournalWorkflowLayer = JournalWorkflow.toLayer(Effect.fn(function*(
   const inputs = yield* Effect.orDie(dayTranscripts(filtered, day))
 
   yield* Effect.log(`journaling ${day} (${inputs.length} transcripts)`)
-  const notes: Array<string> = []
-  for (const [batchIndex, batch] of batches(inputs).entries()) {
-    notes.push(
-      yield* Activity.make({
-        name: `notes-${batchIndex}`,
-        success: Schema.String,
-        execute: Effect.orDie(
-          Effect.flatMap(notesModel, (model) =>
-            complete(NOTES_PROMPT, `Day: ${day}\nBatch ${batchIndex + 1}\n${batch}`, 6000, model))
-        )
-      })
-    )
-  }
+  // Notes are now their own resource (see notesForDay / notesResource): the
+  // LLM notes pass runs once per transcript set and is cached on disk. Here
+  // we read the cached notes, so a movement change re-journals using the
+  // same notes — paying only the report call, not N notes calls.
+  const cachedNotes = inputs.length > 0
+    ? yield* Activity.make({
+      name: "notes",
+      success: Schema.NullOr(NotesLlm),
+      execute: notesForDay(day).pipe(Effect.catchCause(() => Effect.succeed(null)))
+    })
+    : null
+  const notes = cachedNotes?.notes ?? []
   // Movement is fetched inside an Activity because it influences the final
   // LLM input. The selected basis is part of the workflow key; an unavailable
   // or superseded selection contributes no timeline to this execution.

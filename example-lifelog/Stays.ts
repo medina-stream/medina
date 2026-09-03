@@ -14,6 +14,7 @@ export const DEFAULT_STAY_RADIUS_M = 150
 export const STAYS_BASIS_KEY = `gps/${STAYS_VERSION}/basis.json`
 const POINTS_ROOT = "gps/points-v1"
 const STAYS_ROOT = `gps/${STAYS_VERSION}`
+const DAY_MS = 86_400_000
 
 export interface StayPoint { readonly ts: string; readonly lat: number; readonly lon: number }
 export interface StayRow {
@@ -94,6 +95,72 @@ const pointPartitions = Effect.gen(function*() {
   for (const relative of files) hashes.push({ relative, hash: sha256(yield* fs.readFile(dataPath(`${POINTS_ROOT}/${relative}`))) })
   return hashes
 })
+
+/** The UTC-day partitions that can hold stays overlapping the local day
+ * [start, end). A stay is partitioned by the UTC day of its first point; since
+ * the longest observed stay is < 24h, a stay overlapping [start, end) must
+ * have started no earlier than start − 24h. So the candidate partitions span
+ * from the UTC day before `start` through the UTC day of `end − 1ms` — at
+ * most three partitions, usually two. */
+const stayCandidateDays = (start: number, end: number) => {
+  const first = new Date(start - DAY_MS).toISOString().slice(0, 10)
+  const last = new Date(end - 1).toISOString().slice(0, 10)
+  const days: Array<string> = []
+  for (let t = new Date(`${first}T00:00:00Z`); t.getTime() <= new Date(`${last}T00:00:00Z`).getTime(); t.setUTCDate(t.getUTCDate() + 1)) {
+    days.push(t.toISOString().slice(0, 10))
+  }
+  return days
+}
+
+/** Paths and content hashes for the stay partitions that can overlap a local
+ * day. Only the 2-3 relevant partitions are read, so a change to one
+ * partition stales only the days whose window it can reach. */
+const stayPartitionsFor = (start: number, end: number) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const hashes: Array<{ relative: string; hash: string }> = []
+    for (const day of stayCandidateDays(start, end)) {
+      const relative = `day=${day}/stays.parquet`
+      const path = dataPath(`${STAYS_ROOT}/${relative}`)
+      if (yield* fs.exists(path)) hashes.push({ relative, hash: sha256(yield* fs.readFile(path)) })
+    }
+    return hashes
+  })
+
+/** A per-day stays basis hash: covers only the stay partitions that can
+ * overlap the local day window, plus the stay version and radius. A new GPS
+ * point on day D re-materializes stays; only partitions near D change, so
+ * only days whose window includes D get a new basis — not all 49. */
+export const staysDayBasisHash = (start: number, end: number) =>
+  Effect.gen(function*() {
+    const partitions = yield* stayPartitionsFor(start, end)
+    return sha256([STAYS_VERSION, String(radius()), ...partitions.map(({ relative, hash }) => `${relative}\t${hash}`)].join("\n"))
+  })
+
+/** Stays whose observed interval overlaps [start, end), reading only the 2-3
+ * relevant partitions instead of the whole corpus. */
+export const staysOverlappingDay = (start: number, end: number) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const files: Array<string> = []
+    for (const day of stayCandidateDays(start, end)) {
+      const path = dataPath(`${STAYS_ROOT}/day=${day}/stays.parquet`)
+      if (yield* fs.exists(path)) files.push(path)
+    }
+    if (files.length === 0) return []
+    const startIso = new Date(start).toISOString()
+    const endIso = new Date(end).toISOString()
+    const json = yield* duckdb(
+      `SELECT strftime(first_point_ts, '%Y-%m-%dT%H:%M:%S.%g') || 'Z' AS first_point_ts,
+              strftime(last_point_ts, '%Y-%m-%dT%H:%M:%S.%g') || 'Z' AS last_point_ts,
+              lat, lon, radius_m, point_count, observed_duration_s
+       FROM read_parquet([${files.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)
+       WHERE last_point_ts >= CAST(${quote(startIso)} AS TIMESTAMP)
+         AND first_point_ts < CAST(${quote(endIso)} AS TIMESTAMP)
+       ORDER BY first_point_ts`
+    )
+    return JSON.parse(json || "[]") as Array<StayRow>
+  })
 
 export const staysBasisHash = Effect.gen(function*() {
   const files = yield* pointPartitions
@@ -183,25 +250,4 @@ export const readStaysBasis = Effect.gen(function*() {
   return Option.getOrElse(basis, () => new StaysBasis({
     version: STAYS_VERSION, basisHash: "missing", computedAt: "", days: 0, stays: 0
   }))
-})
-
-/** Stays whose observed interval overlaps [start, end), regardless of their partition day. */
-export const staysOverlapping = (start: number, end: number) => Effect.gen(function*() {
-  const fs = yield* FileSystem.FileSystem
-  const files = (yield* Files.listFiles(dataPath(STAYS_ROOT)))
-    .filter((path) => /^day=\d{4}-\d{2}-\d{2}\/stays\.parquet$/.test(path))
-    .map((path) => dataPath(`${STAYS_ROOT}/${path}`))
-  if (files.length === 0) return []
-  const startIso = new Date(start).toISOString()
-  const endIso = new Date(end).toISOString()
-  const json = yield* duckdb(
-    `SELECT strftime(first_point_ts, '%Y-%m-%dT%H:%M:%S.%g') || 'Z' AS first_point_ts,
-            strftime(last_point_ts, '%Y-%m-%dT%H:%M:%S.%g') || 'Z' AS last_point_ts,
-            lat, lon, radius_m, point_count, observed_duration_s
-     FROM read_parquet([${files.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)
-     WHERE last_point_ts >= CAST(${quote(startIso)} AS TIMESTAMP)
-       AND first_point_ts < CAST(${quote(endIso)} AS TIMESTAMP)
-     ORDER BY first_point_ts`
-  )
-  return JSON.parse(json || "[]") as Array<StayRow>
 })

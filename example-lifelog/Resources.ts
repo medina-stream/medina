@@ -49,6 +49,27 @@ export const transcriptKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERS
 export const vendorKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.assemblyai.json`
 export const journalKey = (day: string, inputHash: string) => `journal/${JOURNAL_VERSION}/${day}/${inputHash}.json`
 
+/** LLM-derived notes from a day's transcripts. Keyed by a hash of the
+ * transcript set (the notes version + each transcript key + correction
+ * hash), so a new or corrected transcript stales exactly that day's notes.
+ * Movement and the day's written note are NOT part of the key — notes are
+ * extraction from audio only, and re-running them when movement changes is
+ * the waste this resource eliminates. */
+export const NOTES_LLM_VERSION = "notes-llm-v1"
+export const notesLlmKey = (day: string, inputHash: string) => `notes/${NOTES_LLM_VERSION}/${day}/${inputHash}.json`
+
+/** LLM-derived notes from a day's audio transcripts. Stable across movement
+ * and note changes: transcripts are immutable, so the notes are re-derivable
+ * and cached on disk. The journal reads this instead of re-running the notes
+ * LLM pass every time its own basis changes. */
+export class NotesLlm extends Schema.Class<NotesLlm>("NotesLlm")({
+  version: Schema.String,
+  day: Schema.String,
+  inputHash: Schema.String,
+  generatedAt: Schema.String,
+  notes: Schema.Array(Schema.String)
+}) {}
+
 export class Utterance extends Schema.Class<Utterance>("Utterance")({
   speaker: Schema.NullOr(Schema.String),
   startMs: Schema.Number,

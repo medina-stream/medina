@@ -8,7 +8,7 @@ import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import * as Files from "../lib/Files.ts"
 import type { Resource } from "../lib/Resource.ts"
 import { duckdb, gpsDay, haversineMeters, quote } from "./Gps.ts"
-import { readStaysBasis, staysOverlapping, type StayRow } from "./Stays.ts"
+import { readStaysBasis, staysDayBasisHash, staysOverlappingDay, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
 import { eagerSinceDay, homeTimeZone, withinEagerWindow } from "./Time.ts"
 
@@ -234,15 +234,101 @@ const readPlaces = Effect.gen(function*() {
   return { places, hash: sha256(text) }
 })
 
-/** The movement basis hash is day-independent: it covers the global stays
- * basis (which already covers every point partition) and places.json. It is
- * deliberately cheap — instance enumeration must not touch duckdb. */
-export const movementSharedBasisHash = Effect.gen(function*() {
-  const zone = yield* homeTimeZone
-  const staysBasis = yield* readStaysBasis
-  const places = yield* readPlaces
-  return sha256(`${MOVEMENT_VERSION}\n${MOVEMENT_BASIS_VERSION}\n${zone}\n${staysBasis.basisHash}\n${places.hash}`)
-})
+/** Content hashes for the point partitions covering a set of UTC days. */
+const pointPartitionHashes = (utcDays: ReadonlyArray<string>) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const hashes: Array<string> = []
+    for (const day of utcDays) {
+      const path = dataPath(`gps/points-v1/day=${day}/points.parquet`)
+      if (yield* fs.exists(path)) hashes.push(`${day}:${sha256(yield* fs.readFile(path))}`)
+    }
+    return hashes
+  })
+
+/** The UTC day range a local day spans: [first, last] inclusive. */
+const localDayUtcRange = (day: string, zone: string) => {
+  const start = localMidnightUtc(day, zone)
+  const [year, month, date] = day.split("-").map(Number) as [number, number, number]
+  const next = new Date(Date.UTC(year, month - 1, date) + DAY_MS).toISOString().slice(0, 10)
+  const end = localMidnightUtc(next, zone)
+  return [new Date(start).toISOString().slice(0, 10), new Date(end - 1).toISOString().slice(0, 10)] as const
+}
+
+/** A per-day movement basis hash: covers only the stay partitions that can
+ * overlap this local day, the point partitions for the UTC days the local
+ * day spans, places, and the zone. One new GPS point on day D changes only
+ * D's point partition and the stay partitions near D — so only days whose
+ * window includes D get a new basis, not all 49. */
+export const movementDayBasisHash = (day: string) =>
+  Effect.gen(function*() {
+    const zone = yield* homeTimeZone
+    const [firstUtc, lastUtc] = localDayUtcRange(day, zone)
+    const start = localMidnightUtc(day, zone)
+    const [year, month, date] = day.split("-").map(Number) as [number, number, number]
+    const next = new Date(Date.UTC(year, month - 1, date) + DAY_MS).toISOString().slice(0, 10)
+    const end = localMidnightUtc(next, zone)
+    const utcDays = [...new Set([firstUtc, lastUtc])]
+    const pointHashes = yield* pointPartitionHashes(utcDays)
+    const stayHash = yield* staysDayBasisHash(start, end)
+    const places = yield* readPlaces
+    return sha256(`${MOVEMENT_VERSION}\n${MOVEMENT_BASIS_VERSION}\n${zone}\n${stayHash}\n${pointHashes.join("\n")}\n${places.hash}`)
+  })
+
+
+/** Batch per-day basis hashes for eager enumeration. One pass reads every
+ * stay and point partition on disk and indexes them by UTC day, so each
+ * day's hash is composed from the index without re-reading files. The
+ * result is a Map keyed by local day. */
+export const movementDayBasisHashes = (days: ReadonlyArray<string>) =>
+  Effect.gen(function*() {
+    const zone = yield* homeTimeZone
+    const places = yield* readPlaces
+    const fs = yield* FileSystem.FileSystem
+
+    // Index all stay partitions by UTC day.
+    const stayEntries = (yield* Files.listFiles(dataPath("gps/stays-v1")))
+      .filter((path) => /^day=\d{4}-\d{2}-\d{2}\/stays\.parquet$/.test(path))
+    const stayHashByDay = new Map<string, string>()
+    for (const relative of stayEntries) {
+      const day = relative.split("/")[0]!.replace("day=", "")
+      stayHashByDay.set(day, sha256(yield* fs.readFile(dataPath(`gps/stays-v1/${relative}`))))
+    }
+
+    // Index all point partitions by UTC day.
+    const pointEntries = (yield* Files.listFiles(dataPath("gps/points-v1")))
+      .filter((path) => /^day=\d{4}-\d{2}-\d{2}\/points\.parquet$/.test(path))
+    const pointHashByDay = new Map<string, string>()
+    for (const relative of pointEntries) {
+      const day = relative.split("/")[0]!.replace("day=", "")
+      pointHashByDay.set(day, sha256(yield* fs.readFile(dataPath(`gps/points-v1/${relative}`))))
+    }
+
+    const radiusStr = String(process.env.STAY_RADIUS_M ?? "150")
+    const result = new Map<string, string>()
+    for (const day of days) {
+      const [firstUtc, lastUtc] = localDayUtcRange(day, zone)
+      // Stay partitions that can overlap: firstUtc-1 through lastUtc.
+      const stayDays: Array<string> = []
+      const prev = new Date(`${firstUtc}T00:00:00Z`)
+      prev.setUTCDate(prev.getUTCDate() - 1)
+      stayDays.push(prev.toISOString().slice(0, 10))
+      for (let t = new Date(`${firstUtc}T00:00:00Z`); t.getTime() <= new Date(`${lastUtc}T00:00:00Z`).getTime(); t.setUTCDate(t.getUTCDate() + 1)) {
+        stayDays.push(t.toISOString().slice(0, 10))
+      }
+      const stayParts = stayDays
+        .filter((d) => stayHashByDay.has(d))
+        .map((d) => `day=${d}/stays.parquet\t${stayHashByDay.get(d)}`)
+      const stayHash = sha256(["stays-v1", radiusStr, ...stayParts].join("\n"))
+
+      // Point partitions for the local day's UTC days.
+      const utcDays = [...new Set([firstUtc, lastUtc])]
+      const pointParts = utcDays.filter((d) => pointHashByDay.has(d)).map((d) => `${d}:${pointHashByDay.get(d)}`)
+
+      result.set(day, sha256(`${MOVEMENT_VERSION}\n${MOVEMENT_BASIS_VERSION}\n${zone}\n${stayHash}\n${pointParts.join("\n")}\n${places.hash}`))
+    }
+    return result
+  })
 
 export const movementBasis = (day: string) => Effect.gen(function*() {
   const zone = yield* homeTimeZone
@@ -251,9 +337,9 @@ export const movementBasis = (day: string) => Effect.gen(function*() {
   const next = new Date(Date.UTC(year, month - 1, date) + DAY_MS).toISOString().slice(0, 10)
   const end = localMidnightUtc(next, zone)
   const points = yield* pointsForLocalDay(day, zone)
-  const stays = yield* staysOverlapping(start, end)
+  const stays = yield* staysOverlappingDay(start, end)
   const places = yield* readPlaces
-  const basisHash = yield* movementSharedBasisHash
+  const basisHash = yield* movementDayBasisHash(day)
   return { zone, start, end, points, stays, places: places.places, basisHash }
 })
 
@@ -310,9 +396,10 @@ const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(fu
   yield* Files.writeJson(dataPath(movementKey(day, basis.basisHash)), output)
 })
 
-/** Enumeration is cheap (the shared basis hash only); the heavy per-day
- * point/stay reads happen inside materialize, when it actually runs. */
-const movementInstance = (day: string) => Effect.map(movementSharedBasisHash, (basisHash) => ({
+/** Per-day: the instance key uses the day's own basis hash, so a change
+ * to one partition stales only nearby days — not the whole corpus. The
+ * heavy per-day point/stay reads happen inside materialize, when it runs. */
+const movementInstance = (day: string) => Effect.map(movementDayBasisHash(day), (basisHash) => ({
   key: movementKey(day, basisHash), label: day, dependencies: [PLACES_KEY, "gps/stays-v1/basis.json"],
   materialize: Effect.flatMap(movementBasis(day), (basis) => materializeMovement(day, basis)).pipe(
     Effect.mapError((error) => error instanceof Error ? error : new Error(String(error)))

@@ -24,6 +24,9 @@ export {
   journalResource,
   JournalWorkflow,
   JournalWorkflowLayer,
+  notesForDay,
+  notesResource,
+  NotesWorkflowLayer,
   todayDay
 } from "./Journal.ts"
 export { currentJournals, pipelineStatus, type JournalView } from "./Views.ts"

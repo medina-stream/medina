@@ -16,7 +16,7 @@ import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import type { WorkflowEngine } from "effect/unstable/workflow/WorkflowEngine"
 import { ClusterLive, WorkflowEngineLive } from "./Cluster.ts"
-import { JournalWorkflowLayer } from "./Lifelog.ts"
+import { JournalWorkflowLayer, NotesWorkflowLayer } from "./Lifelog.ts"
 import * as Redacted from "effect/Redacted"
 import * as Option from "effect/Option"
 import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
@@ -28,7 +28,7 @@ import { runPipeline } from "../lib/Pipeline.ts"
 import type * as FileSystem from "effect/FileSystem"
 import { dataPath } from "./Resources.ts"
 import { dayPage, journalPage } from "./Pages.tsx"
-import { audioSource, attributionResource, currentJournals, dayIndexResource, httpIngest, journalForDay, journalResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { audioSource, attributionResource, currentJournals, dayIndexResource, httpIngest, journalForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementForDay, movementResource } from "./Movement.ts"
 import { staysDay, staysSource } from "./Stays.ts"
 
@@ -195,7 +195,9 @@ const Ingest = Layer.effectDiscard(
     yield* runPipeline<LifelogEnv>(
       [audioSource(folderId, latest), notesSource(notesRepo), gpsCompactSource, staysSource],
       // Order matters: movement enriches journals, after attribution/index.
-      [attributionResource, dayIndexResource, movementResource, journalResource],
+      // Order matters: notes are extraction from audio (stable across movement
+      // changes), movement enriches journals, and the journal reads both.
+      [attributionResource, dayIndexResource, movementResource, notesResource, journalResource],
       dataPath
     ).pipe(
       Effect.catchCause((cause) => Effect.logError("pipeline run failed", cause)),
@@ -220,7 +222,10 @@ const LlmLive = Layer.unwrap(
 // The journal workflow's LLM activities need the language model at
 // registration time. Layer memoization means LlmLive builds once even
 // though it also appears in Services.
-const WorkflowsLive = JournalWorkflowLayer.pipe(Layer.provide(LlmLive))
+const WorkflowsLive = Layer.mergeAll(
+  JournalWorkflowLayer,
+  NotesWorkflowLayer
+).pipe(Layer.provide(LlmLive))
 
 const Services = Layer.mergeAll(
   Drive.layer,
