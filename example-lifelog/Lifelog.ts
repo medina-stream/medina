@@ -35,7 +35,7 @@ import { Drive, type DriveFile } from "../lib/Drive.ts"
 import { Git } from "../lib/Git.ts"
 import { RUN_REPORT_KEY, RunReport } from "../lib/Pipeline.ts"
 import type { Resource, Source, SourceReport } from "../lib/Resource.ts"
-import { movementBasis, movementDays, movementForDay, movementKey, renderMovementTimeline } from "./Movement.ts"
+import { movementBasis, movementDays, movementForDay, movementKey, movementSharedBasisHash, renderMovementTimeline } from "./Movement.ts"
 import { homeTimeZone } from "./Time.ts"
 export { homeTimeZone } from "./Time.ts"
 import {
@@ -673,46 +673,52 @@ export const journalInputHash = (
   return sha256(movementBasisHash ? `${transcripts}\nmovement:${movementBasisHash}` : transcripts)
 }
 
-const journalInstance = (day: string, index: DayIndex) => Effect.gen(function*() {
-  const entries = index.days[day] ?? []
-  const inputKeys = entries.map((entry) => entry.transcriptKey)
-  const movement = yield* Effect.gen(function*() {
-    // A carried cross-midnight stay is not enough by itself: only a day with
-    // an observed GPS point gets movement enrichment.
-    if ((yield* movementBasis(day)).points.length === 0) return null
-    const value = yield* movementForDay(day)
-    return value.segments.length > 0 ? value : null
-  }).pipe(
-    Effect.catchCause(() => Effect.succeed(null))
-  )
-  const movementBasisHash = movement?.basisHash ?? null
-  const key = journalKey(day, journalInputHash(entries, movementBasisHash))
-  return {
-    key,
-    label: day,
-    dependencies: movement ? [...inputKeys, movementKey(day, movement.basisHash)] : inputKeys,
-    // Durable: the workflow's idempotency key is the journal key, and each
-    // LLM call is an Activity, so retries resume rather than re-pay.
-    materialize: JournalWorkflow.execute({ day, key, inputKeys, movementBasisHash }).pipe(Effect.asVoid)
-  }
-})
+const journalInstance = (day: string, index: DayIndex, hasMovement: boolean, movementHash: string) =>
+  Effect.sync(() => {
+    const entries = index.days[day] ?? []
+    const inputKeys = entries.map((entry) => entry.transcriptKey)
+    // Enumeration stays cheap: whether the day has GPS points (hasMovement)
+    // and the shared movement basis hash are computed once by the caller;
+    // the movement JSON itself is fetched (materialize-if-missing) inside a
+    // workflow Activity, when the journal actually runs.
+    const movementBasisHash = hasMovement ? movementHash : null
+    const key = journalKey(day, journalInputHash(entries, movementBasisHash))
+    return {
+      key,
+      label: day,
+      dependencies: movementBasisHash ? [...inputKeys, movementKey(day, movementBasisHash)] : inputKeys,
+      // Durable: the workflow's idempotency key is the journal key, and each
+      // LLM call is an Activity, so retries resume rather than re-pay.
+      materialize: JournalWorkflow.execute({ day, key, inputKeys, movementBasisHash }).pipe(Effect.asVoid)
+    }
+  })
 
 export const journalResource: Resource<JournalEnv> = {
   name: "journal",
   // Eager: days that have transcript or GPS inputs. The hourly pass keeps
   // these current, so the present day re-materializes as evidence lands.
+  // One movementDays scan + one shared hash for the whole enumeration.
   instances: Effect.gen(function*() {
     const index = yield* currentDayIndex
-    const days = new Set([...Object.keys(index.days), ...yield* movementDays])
-    return yield* Effect.forEach([...days].sort(), (day) => journalInstance(day, index))
+    const gpsDays = new Set(yield* movementDays)
+    const movementHash = yield* movementSharedBasisHash
+    const days = new Set([...Object.keys(index.days), ...gpsDays])
+    return yield* Effect.forEach(
+      [...days].sort(),
+      (day) => journalInstance(day, index, gpsDays.has(day), movementHash)
+    )
   }).pipe(Effect.mapError((error) => new Error(String(error)))),
   // Lazy: any well-formed day dereferences, past or future; a truly input-less
   // day materializes instantly as an empty journal.
   instance: (day) =>
     /^\d{4}-\d{2}-\d{2}$/.test(day)
-      ? Effect.flatMap(currentDayIndex, (index) => journalInstance(day, index)).pipe(
-        Effect.mapError((error) => new Error(String(error)))
-      )
+      ? Effect.gen(function*() {
+        const index = yield* currentDayIndex
+        // One day's point check is a single cheap query.
+        const hasMovement = (yield* movementBasis(day)).points.length > 0
+        const movementHash = yield* movementSharedBasisHash
+        return yield* journalInstance(day, index, hasMovement, movementHash)
+      }).pipe(Effect.mapError((error) => new Error(String(error))))
       : Effect.fail(new Error(`not a day: ${day}`))
 }
 

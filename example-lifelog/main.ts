@@ -259,7 +259,9 @@ const Main = Layer.mergeAll(
   Ingest
 ).pipe(
   Layer.provide(Services),
-  Layer.provide(BunHttpServer.layer({ port: Number(process.env.PORT ?? 8000) }))
+  // Cold caches over the network mount can push the first / render past
+  // Bun's default 10s request timeout; give handlers more room.
+  Layer.provide(BunHttpServer.layer({ port: Number(process.env.PORT ?? 8000), idleTimeout: 120 }))
 )
 
 BunRuntime.runMain(Layer.launch(Main))

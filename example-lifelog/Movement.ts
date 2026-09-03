@@ -7,7 +7,7 @@ import * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import * as Files from "../lib/Files.ts"
 import type { Resource } from "../lib/Resource.ts"
-import { gpsDay, haversineMeters } from "./Gps.ts"
+import { duckdb, gpsDay, haversineMeters, quote } from "./Gps.ts"
 import { readStaysBasis, staysOverlapping, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
 import { homeTimeZone } from "./Time.ts"
@@ -234,6 +234,16 @@ const readPlaces = Effect.gen(function*() {
   return { places, hash: sha256(text) }
 })
 
+/** The movement basis hash is day-independent: it covers the global stays
+ * basis (which already covers every point partition) and places.json. It is
+ * deliberately cheap — instance enumeration must not touch duckdb. */
+export const movementSharedBasisHash = Effect.gen(function*() {
+  const zone = yield* homeTimeZone
+  const staysBasis = yield* readStaysBasis
+  const places = yield* readPlaces
+  return sha256(`${MOVEMENT_VERSION}\n${MOVEMENT_BASIS_VERSION}\n${zone}\n${staysBasis.basisHash}\n${places.hash}`)
+})
+
 export const movementBasis = (day: string) => Effect.gen(function*() {
   const zone = yield* homeTimeZone
   const start = localMidnightUtc(day, zone)
@@ -242,9 +252,8 @@ export const movementBasis = (day: string) => Effect.gen(function*() {
   const end = localMidnightUtc(next, zone)
   const points = yield* pointsForLocalDay(day, zone)
   const stays = yield* staysOverlapping(start, end)
-  const staysBasis = yield* readStaysBasis
   const places = yield* readPlaces
-  const basisHash = sha256(`${MOVEMENT_VERSION}\n${MOVEMENT_BASIS_VERSION}\n${zone}\n${staysBasis.basisHash}\n${places.hash}`)
+  const basisHash = yield* movementSharedBasisHash
   return { zone, start, end, points, stays, places: places.places, basisHash }
 })
 
@@ -301,44 +310,55 @@ const materializeMovement = (day: string, basis: MovementBasis) => Effect.gen(fu
   yield* Files.writeJson(dataPath(movementKey(day, basis.basisHash)), output)
 })
 
-const movementInstance = (day: string) => Effect.map(movementBasis(day), (basis) => ({
-  key: movementKey(day, basis.basisHash), label: day, dependencies: [PLACES_KEY, "gps/stays-v1/basis.json"],
-  materialize: materializeMovement(day, basis)
+/** Enumeration is cheap (the shared basis hash only); the heavy per-day
+ * point/stay reads happen inside materialize, when it actually runs. */
+const movementInstance = (day: string) => Effect.map(movementSharedBasisHash, (basisHash) => ({
+  key: movementKey(day, basisHash), label: day, dependencies: [PLACES_KEY, "gps/stays-v1/basis.json"],
+  materialize: Effect.flatMap(movementBasis(day), (basis) => materializeMovement(day, basis)).pipe(
+    Effect.mapError((error) => error instanceof Error ? error : new Error(String(error)))
+  )
 }))
 
 export const movementResource: Resource<FileSystem.FileSystem | LanguageModel.LanguageModel> = {
   name: "movement",
   instances: Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const zone = yield* homeTimeZone
-    const root = dataPath("gps/points-v1")
-    const entries = (yield* fs.exists(root)) ? yield* fs.readDirectory(root) : []
-    const utcDays = entries.map((entry) => entry.match(/^day=(\d{4}-\d{2}-\d{2})$/)?.[1]).filter((day): day is string => !!day).sort().slice(-16)
-    const days = new Set<string>([localDay(new Date(), zone)])
-    for (const utcDay of utcDays) for (const point of yield* gpsDay(utcDay)) days.add(localDay(new Date(point.ts), zone))
+    const days = new Set<string>([localDay(new Date(), zone), ...yield* movementDays])
     const recent = [...days].sort().slice(-14)
     return yield* Effect.forEach(recent, movementInstance)
   }),
   instance: (day) => /^\d{4}-\d{2}-\d{2}$/.test(day) ? movementInstance(day) : Effect.fail(new Error(`not a day: ${day}`))
 }
 
-/** Every local civil day represented by a GPS point. This is intentionally
- * broader than movementResource's recent eager window: movement-only days
- * are journal inputs too. */
+/** Memo for movementDays keyed on the stays basis hash, which covers the
+ * content of every points partition — serving must not re-scan parquet on
+ * each request. A new day appears once staysSource has seen the new points
+ * (each hourly pass, before movement/journal run). */
+let movementDaysMemo: { key: string; days: ReadonlyArray<string> } | null = null
+
+/** Every local civil day represented by a GPS point, via one duckdb scan of
+ * all partitions (never per-day subprocesses — this runs on every GET /).
+ * Intentionally broader than movementResource's recent eager window:
+ * movement-only days are journal inputs too. */
 export const movementDays = Effect.gen(function*() {
+  const memoKey = `${(yield* readStaysBasis).basisHash}\n${yield* homeTimeZone}`
+  if (movementDaysMemo?.key === memoKey) return movementDaysMemo.days
   const fs = yield* FileSystem.FileSystem
   const zone = yield* homeTimeZone
   const root = dataPath("gps/points-v1")
   const entries = (yield* fs.exists(root)) ? yield* fs.readDirectory(root) : []
-  const utcDays = entries
-    .map((entry) => entry.match(/^day=(\d{4}-\d{2}-\d{2})$/)?.[1])
-    .filter((day): day is string => !!day)
-    .sort()
-  const days = new Set<string>()
-  for (const utcDay of utcDays) {
-    for (const point of yield* gpsDay(utcDay)) days.add(localDay(new Date(point.ts), zone))
-  }
-  return [...days].sort()
+  const files = entries
+    .filter((entry) => /^day=\d{4}-\d{2}-\d{2}$/.test(entry))
+    .map((entry) => dataPath(`gps/points-v1/${entry}/points.parquet`))
+  if (files.length === 0) return []
+  const json = yield* duckdb(
+    `SELECT DISTINCT strftime((CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC') AT TIME ZONE ${quote(zone)}, '%Y-%m-%d') AS day
+     FROM read_parquet([${files.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)
+     ORDER BY day`
+  )
+  const days = (JSON.parse(json || "[]") as Array<{ day: string }>).map(({ day }) => day)
+  movementDaysMemo = { key: memoKey, days }
+  return days
 })
 
 export const movementForDay = (day: string) => Effect.gen(function*() {
