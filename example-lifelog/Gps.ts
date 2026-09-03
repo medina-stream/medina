@@ -15,7 +15,8 @@
  */
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
-import { execFile } from "node:child_process"
+import { spawn } from "node:child_process"
+import { promises as fsp } from "node:fs"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Schema from "effect/Schema"
@@ -56,9 +57,14 @@ const finite = (value: string | null | undefined): number | null => {
 
 const isoOrNull = (value: string | null | undefined): string | null => {
   if (!value) return null
-  const ms = /^\d{10,13}(\.\d+)?$/.test(value)
-    ? Number(value) * (value.length <= 11 ? 1000 : 1) // epoch seconds vs millis
-    : Date.parse(value)
+  // Epoch seconds (with optional fraction) vs epoch millis, decided by the
+  // shape of the digits -- not string length, which a fraction breaks.
+  const seconds = value.match(/^(\d{10})(\.\d+)?$/)
+  const ms = seconds
+    ? Number(seconds[1] + (seconds[2] ?? "")) * 1000
+    : /^\d{13}(\.\d+)?$/.test(value)
+      ? Number(value)
+      : Date.parse(value)
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null
 }
 
@@ -131,7 +137,10 @@ export const parseGpsBody = (source: string, body: string): Array<GpsPoint> | nu
 
 // --- inbox -------------------------------------------------------------------
 
-/** Append parsed points to the transient inbox (one NDJSON file per post). */
+/** Append parsed points to the transient inbox (one NDJSON file per post).
+ * Tmp + rename, like every other writer: queries scan this directory with
+ * `read_ndjson_auto`, and a reader catching a half-written file would fail
+ * the whole DuckDB scan. */
 export const gpsInboxWrite = Effect.fn("gpsInboxWrite")(function*(points: ReadonlyArray<GpsPoint>) {
   const fs = yield* FileSystem.FileSystem
   const lines = points.map((point) => JSON.stringify(point)).join("\n") + "\n"
@@ -139,18 +148,47 @@ export const gpsInboxWrite = Effect.fn("gpsInboxWrite")(function*(points: Readon
     createHash("sha256").update(lines).digest("hex").slice(0, 8)
   }.ndjson`
   yield* fs.makeDirectory(dataPath(INBOX_PREFIX), { recursive: true })
-  yield* fs.writeFileString(dataPath(`${INBOX_PREFIX}/${name}`), lines)
+  const path = dataPath(`${INBOX_PREFIX}/${name}`)
+  const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  yield* fs.writeFileString(tmp, lines)
+  yield* fs.rename(tmp, path)
   return points.length
 })
 
 // --- compaction --------------------------------------------------------------
 
+/** Run a DuckDB statement and return its `-json` output. The script goes in
+ * on stdin (`.output <file>` first, `.output none` after the SQL so nothing
+ * extra reaches stdout), and the result is read back from that local temp
+ * file instead of crossing exec stdout -- so a large result now fails at
+ * worst with ENOSPC, not execFile's MAXBUFFER, which kills the subprocess
+ * and the query with it. */
 export const duckdb = (sql: string) =>
   Effect.callback<string, Error>((resume) => {
-    execFile("duckdb", ["-json", "-c", sql], { timeout: 120_000, maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) return resume(Effect.fail(new Error(`duckdb failed: ${stderr || error.message}`)))
-      resume(Effect.succeed(stdout))
+    const out = `${tmpdir()}/medina-duckdb-out-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
+    const child = spawn("duckdb", ["-json"], { timeout: 120_000 })
+    let settled = false
+    const done = (result: Effect.Effect<string, Error>) => {
+      if (settled) return
+      settled = true
+      void fsp.rm(out, { force: true })
+      resume(result)
+    }
+    let stderr = ""
+    child.stderr.setEncoding("utf8")
+    child.stderr.on("data", (chunk: string) => {
+      stderr = (stderr + chunk).slice(-2000)
     })
+    child.on("error", (error) => done(Effect.fail(new Error(`duckdb failed: ${error.message}`))))
+    child.on("close", (code, signal) => {
+      if (code !== 0) return done(Effect.fail(new Error(`duckdb exited ${signal ?? code}: ${stderr}`)))
+      fsp.readFile(out, "utf8").then(
+        (text: string) => done(Effect.succeed(text)),
+        (readError: unknown) => done(Effect.fail(new Error(`duckdb output unreadable: ${String(readError)}`)))
+      )
+    })
+    child.stdin.on("error", () => {}) // dying before stdin closes is reported by "close"
+    child.stdin.end(`.output ${out}\n${sql};\n.output none\n`)
   })
 
 export const quote = (value: string) => `'${value.replace(/'/g, "''")}'`
