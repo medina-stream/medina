@@ -1,0 +1,18 @@
+[Unit]
+Description=Medina development server
+After=archil-mount.service
+Requires=archil-mount.service
+
+[Service]
+Type=simple
+User=exedev
+Group=exedev
+WorkingDirectory=/home/exedev/medina
+Environment=HOME=/home/exedev
+Environment=PATH=/home/exedev/.bun/bin:/home/exedev/.local/bin:/home/exedev/node/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/exedev/.bun/bin/bun run dev
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
