@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto"
+import * as Cache from "effect/Cache"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
@@ -7,14 +9,18 @@ import * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import * as Files from "../lib/Files.ts"
 import type { Resource } from "../lib/Resource.ts"
-import { duckdb, gpsDay, haversineMeters, quote } from "./Gps.ts"
+import { gpsDay, haversineMeters } from "./Gps.ts"
 import { readStaysBasis, staysDayBasisHash, staysOverlappingDay, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
 import { eagerSinceDay, homeTimeZone, withinEagerWindow } from "./Time.ts"
 
 export const MOVEMENT_VERSION = "movement-v1"
 const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2"
-const PLACES_KEY = "gps/places.json"
+/** The user-owned place list, at the mount root so it is easy to find and
+ * edit by hand. The previous `gps/places.json` location still reads (never
+ * writes) so an existing list is not silently dropped. */
+const PLACES_KEY = "places.json"
+const LEGACY_PLACES_KEY = "gps/places.json"
 const DAY_MS = 86_400_000
 const STAY_RADIUS_M = 200
 const GAP_MS = 3 * 60 * 60_000
@@ -91,7 +97,7 @@ export class Place extends Schema.Class<Place>("Place")({
   lon: Schema.Number,
   radiusMeters: Schema.Number
 }) {}
-const Places = Schema.Array(Place)
+export const Places = Schema.Array(Place)
 
 class StaySegment extends Schema.Class<StaySegment>("MovementStay")({
   kind: Schema.Literal("stay"), startTime: Schema.String, endTime: Schema.String,
@@ -185,6 +191,62 @@ const shortGeocodeName = (response: any): string | null => {
   return display || null
 }
 
+class ForwardResult extends Schema.Class<ForwardResult>("ForwardResult")({
+  name: Schema.String, lat: Schema.Number, lon: Schema.Number
+}) {}
+const ForwardResults = Schema.Array(ForwardResult)
+
+let lastFwdGeocodeAt = 0
+
+/** Address search via Nominatim: up to 5 matches for a query. Same 1 req/s
+ * discipline and write-once disk cache as reverse geocoding, so the places
+ * UI can refine pins without leaning on the public API every keystroke.
+ * Never fails — no matches is an empty list. */
+export const forwardGeocode = (query: string): Effect.Effect<ReadonlyArray<ForwardResult>, never, FileSystem.FileSystem> =>
+  Effect.gen(function*() {
+    const key = `gps/geocode-fwd-v1/${sha256(query.trim().toLowerCase())}.json`
+    const path = dataPath(key)
+    const fs = yield* FileSystem.FileSystem
+    if (yield* fs.exists(path)) {
+      try {
+        return yield* Schema.decodeUnknownEffect(ForwardResults)(JSON.parse(yield* fs.readFileString(path))).pipe(
+          Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<ForwardResult>))
+        )
+      } catch {
+        return [] as ReadonlyArray<ForwardResult>
+      }
+    }
+    const wait = Math.max(0, 1000 - (Date.now() - lastFwdGeocodeAt))
+    if (wait > 0) yield* Effect.sleep(`${wait} millis`)
+    const response = yield* Effect.tryPromise({
+      try: () => fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=${encodeURIComponent(query)}`, {
+        headers: { "user-agent": "medina-lifelog/1.0 (sco@scottraymond.net)" },
+        // The public API sometimes blackholes requests instead of refusing
+        // them; fail fast so one search can't stall the request path.
+        signal: AbortSignal.timeout(15_000)
+      }),
+      catch: () => new Error("geocode request failed")
+    }).pipe(Effect.catchCause(() => Effect.succeed(null)))
+    lastFwdGeocodeAt = Date.now()
+    if (!response || !response.ok) return [] as ReadonlyArray<ForwardResult>
+    const json = yield* Effect.tryPromise({
+      try: () => response.json(),
+      catch: () => new Error("geocode parse failed")
+    }).pipe(Effect.catchCause(() => Effect.succeed([] as Array<unknown>)))
+    const results = (Array.isArray(json) ? json : []).flatMap((entry): Array<ForwardResult> => {
+      if (typeof entry !== "object" || entry === null) return []
+      const record = entry as Record<string, unknown>
+      const lat = Number(record.lat)
+      const lon = Number(record.lon)
+      if (typeof record.display_name !== "string" || !Number.isFinite(lat) || !Number.isFinite(lon)) return []
+      return [new ForwardResult({ name: record.display_name, lat, lon })]
+    }).slice(0, 5)
+    yield* Files.writeJson(path, Schema.encodeSync(ForwardResults)([...results])).pipe(
+      Effect.catchCause(() => Effect.void)
+    )
+    return results
+  }).pipe(Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<ForwardResult>)))
+
 const reverseGeocode = (lat: number, lon: number) => Effect.gen(function*() {
   const roundedLat = lat.toFixed(4)
   const roundedLon = lon.toFixed(4)
@@ -198,7 +260,10 @@ const reverseGeocode = (lat: number, lon: number) => Effect.gen(function*() {
   if (wait > 0) yield* Effect.sleep(`${wait} millis`)
   const response = yield* Effect.tryPromise({
     try: () => fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&lat=${roundedLat}&lon=${roundedLon}`, {
-      headers: { "user-agent": "medina-lifelog/1.0 (sco@scottraymond.net)" }
+      headers: { "user-agent": "medina-lifelog/1.0 (sco@scottraymond.net)" },
+      // Same blackholing as forward search: fail fast so one lookup can't
+      // stall movement materialization (this already catches to null below).
+      signal: AbortSignal.timeout(15_000)
     }),
     catch: (error) => new Error(String(error))
   })
@@ -225,14 +290,110 @@ const narrative = (segments: ReadonlyArray<unknown>) => {
 
 const readPlaces = Effect.gen(function*() {
   const fs = yield* FileSystem.FileSystem
-  const path = dataPath(PLACES_KEY)
-  if (!(yield* fs.exists(path))) return { places: [] as ReadonlyArray<Place>, hash: sha256("") }
-  const text = yield* fs.readFileString(path)
-  const places = yield* Schema.decodeUnknownEffect(Places)(JSON.parse(text)).pipe(
-    Effect.mapError((error) => new Error(String(error)))
-  )
-  return { places, hash: sha256(text) }
+  for (const key of [PLACES_KEY, LEGACY_PLACES_KEY]) {
+    const path = dataPath(key)
+    if (!(yield* fs.exists(path))) continue
+    const text = yield* fs.readFileString(path)
+    const places = yield* Schema.decodeUnknownEffect(Places)(JSON.parse(text)).pipe(
+      Effect.mapError((error) => new Error(String(error)))
+    )
+    return { places, hash: sha256(text) }
+  }
+  return { places: [] as ReadonlyArray<Place>, hash: sha256("") }
 })
+
+/** The current place list, for the editing endpoint. Empty when no list
+ * exists yet — the candidates endpoint is how the first places get found. */
+export const listPlaces = Effect.map(readPlaces, ({ places }) => places)
+
+/** Whole-list replace for the editing endpoint: the validated request body
+ * becomes the new `places.json`. The movement basis already hashes places
+ * content, so saving re-derives affected days on the next pipeline pass. */
+export const replacePlaces = (places: ReadonlyArray<Place>) =>
+  Files.writeJson(dataPath(PLACES_KEY), Schema.encodeSync(Places)([...places]))
+
+/** One unnamed stay cluster worth naming, aggregated across days. */
+export interface PlaceCandidate {
+  readonly lat: number
+  readonly lon: number
+  readonly geocodedName: string | null
+  readonly dwellMinutes: number
+  readonly days: ReadonlyArray<string>
+}
+
+/** Merge raw suggestions across days: nearby clusters fold into one
+ * dwell-weighted centroid (the same math materialization uses within a day).
+ * Pure — safe to test. */
+export const mergePlaceSuggestions = (
+  suggestions: ReadonlyArray<{ lat: number; lon: number; geocodedName: string | null; dwellMinutes: number; day: string }>
+): Array<PlaceCandidate> => {
+  const merged: Array<{ lat: number; lon: number; geocodedName: string | null; dwellMinutes: number; days: Array<string> }> = []
+  for (const suggestion of suggestions) {
+    const existing = merged.find((candidate) => haversineMeters(candidate, suggestion) <= STAY_RADIUS_M)
+    if (existing) {
+      const total = existing.dwellMinutes + suggestion.dwellMinutes
+      existing.lat = total === 0 ? (existing.lat + suggestion.lat) / 2 : (existing.lat * existing.dwellMinutes + suggestion.lat * suggestion.dwellMinutes) / total
+      existing.lon = total === 0 ? (existing.lon + suggestion.lon) / 2 : (existing.lon * existing.dwellMinutes + suggestion.lon * suggestion.dwellMinutes) / total
+      existing.dwellMinutes = total
+      existing.geocodedName ??= suggestion.geocodedName
+      if (!existing.days.includes(suggestion.day)) existing.days.push(suggestion.day)
+    } else {
+      merged.push({
+        lat: suggestion.lat, lon: suggestion.lon, geocodedName: suggestion.geocodedName,
+        dwellMinutes: suggestion.dwellMinutes, days: [suggestion.day]
+      })
+    }
+  }
+  return merged.sort((a, b) => b.dwellMinutes - a.dwellMinutes)
+}
+
+/** Newest-per-day suggestions merged across days, minus anything the place
+ * list already covers. Reads run concurrently — the corpus is hundreds of
+ * small files on a network mount, where sequential round trips stall. */
+const computePlaceCandidates = (entries: ReadonlyArray<string>) =>
+  Effect.gen(function*() {
+    const byDay = new Map<string, Array<string>>()
+    for (const entry of entries) {
+      const [day, file] = entry.split("/")
+      if (!day || !file || !file.endsWith(".json")) continue
+      byDay.set(day, [...(byDay.get(day) ?? []), entry])
+    }
+    const perDay = yield* Effect.forEach([...byDay], ([day, keys]) =>
+      Effect.gen(function*() {
+        const movements = (yield* Effect.forEach(
+          keys,
+          (key) => Files.readJson(Movement, dataPath(`gps/${MOVEMENT_VERSION}/${key}`)),
+          { concurrency: 8 }
+        )).flatMap((movement) => Option.isSome(movement) ? [movement.value] : [])
+        const newest = movements.sort((a, b) => a.generatedAt.localeCompare(b.generatedAt)).at(-1)
+        return (newest?.suggestions ?? []).map((suggestion) => ({ ...suggestion, day }))
+      }), { concurrency: 8 })
+    const { places } = yield* readPlaces
+    return mergePlaceSuggestions(perDay.flat()).filter((candidate) =>
+      !places.some((place) => haversineMeters(candidate, place) <= place.radiusMeters)
+    )
+  })
+
+/** Memoized candidates, keyed on exactly what can change them: the places
+ * content hash (PUT /places rewrites it) and the movement file listing
+ * (content-addressed names, so the same names mean the same bytes). One
+ * listing per call stays cheap; the full read happens only when something
+ * actually changed. */
+let placeCandidatesMemo: { key: string; value: ReadonlyArray<PlaceCandidate> } | null = null
+
+/** Candidate places: unnamed stay clusters from the newest movement per day,
+ * merged across days and minus anything the place list already covers.
+ * Read-only over small JSON files — serving never touches derivation. */
+export const placeCandidates: Effect.Effect<ReadonlyArray<PlaceCandidate>, Error, FileSystem.FileSystem> =
+  Effect.gen(function*() {
+    const entries = yield* Files.listFiles(dataPath(`gps/${MOVEMENT_VERSION}`))
+    const { hash } = yield* readPlaces
+    const key = `${hash}\n${[...entries].sort().join("\n")}`
+    if (placeCandidatesMemo?.key === key) return placeCandidatesMemo.value
+    const value = yield* computePlaceCandidates(entries)
+    placeCandidatesMemo = { key, value }
+    return value
+  })
 
 /** Content hashes for the point partitions covering a set of UTC days. */
 const pointPartitionHashes = (utcDays: ReadonlyArray<string>) =>
@@ -341,7 +502,50 @@ export const movementBasis = (day: string) => Effect.gen(function*() {
   const places = yield* readPlaces
   const basisHash = yield* movementDayBasisHash(day)
   return { zone, start, end, points, stays, places: places.places, basisHash }
-})
+}).pipe(Effect.withSpan("movement.basis", { attributes: { day } }))
+
+/**
+ * Read-path movement summary for the journal key: whether the day counts
+ * as moving, plus its basis hash (null when it does not). `hasMovement`
+ * MUST be partition membership — the same test the batch enumeration
+ * uses — not an in-range point count: the two disagree on days whose
+ * partitions hold no in-range points, forking the journal key so the
+ * pipeline writes one file and reads look for another, forever.
+ */
+export interface MovementRead {
+  readonly hasMovement: boolean
+  readonly movementHash: string | null
+}
+
+const movementReadCache = Effect.runSync(Cache.makeWith(
+  (day: string) =>
+    Effect.gen(function*() {
+      const hasMovement = (yield* movementDays).includes(day)
+      return {
+        hasMovement,
+        movementHash: hasMovement ? yield* movementDayBasisHash(day) : null
+      } satisfies MovementRead
+    }),
+  {
+    capacity: 512,
+    // Failures must not poison reads: a transient failure expires almost
+    // immediately, while successes ride out the calm between ingests.
+    // Movement inputs only change when new GPS lands, far slower than the
+    // pipeline's hourly convergence.
+    timeToLive: (exit) => Exit.isSuccess(exit) ? "10 minutes" : "1 second",
+    requireServicesAt: "lookup"
+  }
+))
+
+/**
+ * Cached movement derivation for the read path only (`journalCachedForDay`
+ * via the lazy journal instance). Materialization — the pipeline's
+ * `movementInstance`/`movementBasis` calls — stays exact and never touches
+ * this cache, so ingest-time updates cannot be shadowed by it. Worst case
+ * a detail view keys off minutes-old movement while the list already flags
+ * the day stale; the next pass converges both.
+ */
+export const movementReadForDay = (day: string) => Cache.get(movementReadCache, day)
 
 interface MovementBasis {
   readonly zone: string
@@ -424,8 +628,30 @@ export const movementResource: Resource<FileSystem.FileSystem | LanguageModel.La
  * (each hourly pass, before movement/journal run). */
 let movementDaysMemo: { key: string; days: ReadonlyArray<string> } | null = null
 
-/** Every local civil day represented by a GPS point, via one duckdb scan of
- * all partitions (never per-day subprocesses — this runs on every GET /).
+/**
+ * The local civil days a UTC partition's points can fall in: the local day
+ * of its first and last millisecond (one day, or two across midnight).
+ * Pure and deterministic — safe to test.
+ */
+export const utcPartitionLocalDays = (utcDay: string, zone: string): ReadonlyArray<string> => {
+  const [year, month, date] = utcDay.split("-").map(Number) as [number, number, number]
+  // Parts, not a formatted string: component order varies by locale build.
+  const format = new Intl.DateTimeFormat("en", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" })
+  const localDay = (utcMs: number): string => {
+    const parts = Object.fromEntries(
+      format.formatToParts(new Date(utcMs)).filter((part) => part.type !== "literal").map((part) => [part.type, part.value])
+    )
+    return `${parts.year}-${parts.month}-${parts.day}`
+  }
+  const start = Date.UTC(year, month - 1, date)
+  const first = localDay(start)
+  const last = localDay(start + DAY_MS - 1)
+  return first === last ? [first] : [first, last]
+}
+
+/** Every local civil day represented by a GPS point, from the partition
+ * directory listing — no DuckDB, so this stays cheap on every GET. Matches
+ * the old DISTINCT scan exactly (any point in the local window counts).
  * Intentionally broader than movementResource's recent eager window:
  * movement-only days are journal inputs too. */
 export const movementDays = Effect.gen(function*() {
@@ -435,16 +661,10 @@ export const movementDays = Effect.gen(function*() {
   const zone = yield* homeTimeZone
   const root = dataPath("gps/points-v1")
   const entries = (yield* fs.exists(root)) ? yield* fs.readDirectory(root) : []
-  const files = entries
-    .filter((entry) => /^day=\d{4}-\d{2}-\d{2}$/.test(entry))
-    .map((entry) => dataPath(`gps/points-v1/${entry}/points.parquet`))
-  if (files.length === 0) return []
-  const json = yield* duckdb(
-    `SELECT DISTINCT strftime((CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC') AT TIME ZONE ${quote(zone)}, '%Y-%m-%d') AS day
-     FROM read_parquet([${files.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)
-     ORDER BY day`
-  )
-  const days = (JSON.parse(json || "[]") as Array<{ day: string }>).map(({ day }) => day)
+  const days = [...new Set(entries.flatMap((entry) => {
+    const match = /^day=(\d{4}-\d{2}-\d{2})$/.exec(entry)
+    return match ? utcPartitionLocalDays(match[1]!, zone) : []
+  }))].sort()
   movementDaysMemo = { key: memoKey, days }
   return days
 })

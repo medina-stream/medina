@@ -16,8 +16,29 @@ const STYLE = `
   h2 { font-size: 1.25rem; margin: 0 0 1rem; }
   h2 a { color: inherit; text-decoration: none; }
   h2 a:hover { text-decoration: underline; }
+  h3 { font-size: 1.05rem; margin: 1.5rem 0 .25rem; }
   p { margin: .75rem 0; }
   .stale { font-size: .75rem; font-weight: normal; color: #999; margin-left: .5rem; }
+  .vtable-tools { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; color: #777; }
+  .vtable-tools input { font: inherit; padding: .25rem .5rem; }
+  .vtable-tools button { font: inherit; padding: .25rem .75rem; cursor: pointer; }
+  .vtable { overflow-y: auto; height: 70vh; border-top: 1px solid #bbb; margin-top: 1rem; position: relative; }
+  .vspacer { position: relative; width: 100%; }
+  .vrow { position: absolute; left: 0; right: 0; height: 100px; }
+  .vrow-inner { box-sizing: border-box; height: 100px; padding: 10px 0; overflow: hidden; border-bottom: 1px solid #ddd; }
+  .vrow-inner h2 { font-size: 1.1rem; margin: 0 0 .25rem; }
+  .vrow-inner p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vrow-inner p.preview { color: #333; }
+  .prow { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; margin: .5rem 0; }
+  .prow input { font: inherit; padding: .25rem .5rem; }
+  .prow input.num { width: 6.5rem; }
+  .pcand { border-bottom: 1px solid #ddd; padding: .5rem 0; }
+  .pplace { border-bottom: 1px solid #ddd; padding: .5rem 0; }
+  .pmap { display: block; margin: .5rem 0; border: 1px solid #ddd; }
+  button { font: inherit; padding: .25rem .75rem; cursor: pointer; }
+  @media (prefers-color-scheme: dark) { .vrow-inner p.preview { color: #ccc; } }
+  .skel { height: .9rem; margin: .2rem 0; background: #e2e2e2; }
+  @media (prefers-color-scheme: dark) { .skel { background: #333; } }
 `
 
 const Layout = ({ title, children, scriptSrc }: { title: string; children?: Child; scriptSrc?: string }) => (
@@ -35,17 +56,35 @@ const Layout = ({ title, children, scriptSrc }: { title: string; children?: Chil
   </html>
 )
 
-/** The report is plain text: blank lines separate paragraphs, single
- * newlines are line breaks. Each line is escaped on the way in. */
+/** The report is a summary line followed by `##` time-chunk headers with
+ * terse lines under each: blank lines separate blocks, single newlines are
+ * line breaks. Each line is escaped on the way in. */
 const Report = ({ text }: { text: string }) => (
   <>
-    {text.split(/\n\s*\n/).filter(Boolean).map((paragraph) => (
-      <p>
-        {paragraph.split("\n").map((line, index) => (
-          <>{index > 0 ? raw("<br>") : ""}{line}</>
-        ))}
-      </p>
-    ))}
+    {text.split(/\n\s*\n/).filter(Boolean).map((block) => {
+      const [first, ...rest] = block.split("\n")
+      if (first!.trim().startsWith("## ")) {
+        return (
+          <>
+            <h3>{first!.trim().replace(/^##\s+/, "")}</h3>
+            {rest.length > 0 ? (
+              <p>
+                {rest.map((line, index) => (
+                  <>{index > 0 ? raw("<br>") : ""}{line}</>
+                ))}
+              </p>
+            ) : ""}
+          </>
+        )
+      }
+      return (
+        <p>
+          {block.split("\n").map((line, index) => (
+            <>{index > 0 ? raw("<br>") : ""}{line}</>
+          ))}
+        </p>
+      )
+    })}
   </>
 )
 

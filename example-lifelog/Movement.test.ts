@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { composeMovement, Movement, renderMovementTimeline, type MovementFix } from "./Movement.ts"
+import { composeMovement, mergePlaceSuggestions, Movement, renderMovementTimeline, utcPartitionLocalDays, type MovementFix } from "./Movement.ts"
 import type { StayRow } from "./Stays.ts"
 
 const fix = (minutes: number, lat: number, lon: number): MovementFix => ({
@@ -64,5 +64,40 @@ describe("renderMovementTimeline", () => {
         dwellMinutes: 15, fixes: 2 }]
     })
     expect(renderMovementTimeline(movement)).toBe("12:00-12:15 stay at Market Street (15 min)")
+  })
+})
+
+describe("mergePlaceSuggestions", () => {
+  test("nearby clusters across days fold into one dwell-weighted centroid", () => {
+    const merged = mergePlaceSuggestions([
+      { lat: 41.88, lon: -87.63, geocodedName: "Cafe", dwellMinutes: 60, day: "2026-08-29" },
+      { lat: 41.8801, lon: -87.6301, geocodedName: null, dwellMinutes: 30, day: "2026-08-30" }
+    ])
+    expect(merged.length).toBe(1)
+    expect(merged[0]!.dwellMinutes).toBe(90)
+    expect(merged[0]!.days).toEqual(["2026-08-29", "2026-08-30"])
+    expect(merged[0]!.geocodedName).toBe("Cafe")
+    expect(merged[0]!.lat).toBeCloseTo(41.88003, 4)
+  })
+
+  test("distant clusters stay separate, longest dwell first", () => {
+    const merged = mergePlaceSuggestions([
+      { lat: 41.88, lon: -87.63, geocodedName: null, dwellMinutes: 20, day: "2026-08-29" },
+      { lat: 42.0, lon: -87.7, geocodedName: "Far", dwellMinutes: 120, day: "2026-08-29" }
+    ])
+    expect(merged.length).toBe(2)
+    expect(merged[0]!.geocodedName).toBe("Far")
+    expect(merged[1]!.days).toEqual(["2026-08-29"])
+  })
+})
+
+describe("utcPartitionLocalDays", () => {
+  test("a UTC partition maps to the local days its milliseconds touch", () => {
+    // Chicago (UTC-5 in September): the UTC day starts at 19:00 local the day before.
+    expect(utcPartitionLocalDays("2026-09-02", "America/Chicago")).toEqual(["2026-09-01", "2026-09-02"])
+    // UTC: exactly one day.
+    expect(utcPartitionLocalDays("2026-09-02", "UTC")).toEqual(["2026-09-02"])
+    // Tokyo (UTC+9): the UTC day ends at 09:00 local the next day.
+    expect(utcPartitionLocalDays("2026-09-02", "Asia/Tokyo")).toEqual(["2026-09-02", "2026-09-03"])
   })
 })

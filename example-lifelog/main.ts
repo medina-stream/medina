@@ -8,9 +8,11 @@ import * as Config from "effect/Config"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schedule from "effect/Schedule"
+import * as Stream from "effect/Stream"
 import * as HttpRouter from "effect/unstable/http/HttpRouter"
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
+import * as Schema from "effect/Schema"
 import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
@@ -24,6 +26,9 @@ import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
 import * as RpcServer from "effect/unstable/rpc/RpcServer"
 import { JournalsGroup } from "./JournalApi.ts"
 import { JournalsHandlersLive } from "./JournalRpc.ts"
+import * as DayEvents from "./DayEvents.ts"
+import { TelemetryLive } from "./Telemetry.ts"
+import { refreshDayPreviews } from "./Views.ts"
 import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
 import { gpsCompactSource, gpsDay, gpsInboxWrite, locationSummary, parseGpsBody } from "./Gps.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
@@ -33,7 +38,7 @@ import { runPipeline } from "../lib/Pipeline.ts"
 import { dataPath } from "./Resources.ts"
 import { dayPage, pendingPage, spaHome } from "./Pages.tsx"
 import { audioSource, attributionResource, dayIndexResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
-import { movementCachedForDay, movementResource } from "./Movement.ts"
+import { forwardGeocode, listPlaces, movementCachedForDay, movementResource, placeCandidates, Places, replacePlaces } from "./Movement.ts"
 import { staysDay, staysSource } from "./Stays.ts"
 
 const Routes = HttpRouter.use((router) =>
@@ -59,6 +64,26 @@ const Routes = HttpRouter.use((router) =>
           headers: { "cache-control": "private, max-age=60" }
         })
       }).pipe(Effect.orDie)
+    )
+    // Live day updates: one event per (re)written journal. Payloads are
+    // hints, not data — clients re-fetch through the RPC. The stream ends
+    // (and its hub subscription releases) when the client disconnects.
+    yield* router.add(
+      "GET",
+      "/events",
+      Effect.succeed(
+        HttpServerResponse.stream(
+          Stream.fromPubSub(DayEvents.dayHub).pipe(
+            Stream.map((day) =>
+              new TextEncoder().encode(`data: ${JSON.stringify({ day })}\n\n`)
+            )
+          ),
+          {
+            contentType: "text/event-stream",
+            headers: { "cache-control": "no-store" }
+          }
+        )
+      )
     )
     yield* router.add(
       "GET",
@@ -176,6 +201,73 @@ const Routes = HttpRouter.use((router) =>
         })
       })
     )
+    // The user-owned place list: what is named so far, plus unnamed stay
+    // clusters worth naming. Reads are unauthenticated, like the journal;
+    // replacing the list requires the owner, like ingest below.
+    yield* router.add(
+      "GET",
+      "/places",
+      Effect.map(
+        Effect.orDie(listPlaces),
+        (places) => HttpServerResponse.jsonUnsafe({ places }, {
+          headers: { "cache-control": "private, max-age=60" }
+        })
+      )
+    )
+    yield* router.add(
+      "GET",
+      "/places/candidates",
+      Effect.map(
+        Effect.orDie(placeCandidates),
+        (candidates) => HttpServerResponse.jsonUnsafe({ count: candidates.length, candidates }, {
+          headers: { "cache-control": "private, max-age=60" }
+        })
+      )
+    )
+    // Address search for pin refinement: Nominatim behind a disk cache,
+    // so repeated searches cost no API calls. Read-only and unauthenticated.
+    yield* router.add(
+      "GET",
+      "/places/geocode",
+      Effect.gen(function*() {
+        const params = yield* HttpServerRequest.ParsedSearchParams
+        const query = typeof params.q === "string" ? params.q.trim() : ""
+        if (!query) return HttpServerResponse.text("missing ?q=", { status: 400 })
+        const results = yield* forwardGeocode(query)
+        return HttpServerResponse.jsonUnsafe({ results }, {
+          headers: { "cache-control": "private, max-age=3600" }
+        })
+      }).pipe(Effect.orDie)
+    )
+    yield* router.add(
+      "PUT",
+      "/places",
+      Effect.gen(function*() {
+        const request = yield* HttpServerRequest.HttpServerRequest
+        const owner = yield* Config.string("INGEST_OWNER")
+        const address = Option.getOrNull(request.remoteAddress)
+        const tailscale = yield* Tailscale
+        const login = yield* tailscale.identify(address, request.headers)
+        if (!login || login !== owner) {
+          yield* Effect.log(`places rejected: ${address ?? "unknown"} -> ${login ?? "unidentified"}`)
+          return HttpServerResponse.text("forbidden: not you", { status: 403 })
+        }
+        const text = yield* Effect.orDie(request.text)
+        let json: unknown
+        try {
+          json = JSON.parse(text)
+        } catch {
+          return HttpServerResponse.text("body must be a JSON array of places", { status: 400 })
+        }
+        const places = yield* Schema.decodeUnknownEffect(Places)(json).pipe(Effect.option)
+        if (Option.isNone(places)) {
+          return HttpServerResponse.text("body must be a JSON array of places (id, name, lat, lon, radiusMeters)", { status: 400 })
+        }
+        yield* Effect.orDie(replacePlaces(places.value))
+        yield* Effect.log(`places replaced (${login}): ${places.value.length} places`)
+        return HttpServerResponse.jsonUnsafe({ ok: true, places: places.value.length })
+      })
+    )
     // Push ingest: apps (e.g. a GPS logger) POST batches here from the
     // tailnet. Identity comes from Tailscale: the WireGuard peer behind the
     // source address must map to the owner's login. No tokens — the tailnet
@@ -234,19 +326,43 @@ const Ingest = Layer.effectDiscard(
     const folderId = yield* Config.string("GDRIVE_FOLDER_ID")
     const latest = yield* Config.int("SOURCE_LATEST").pipe(Config.withDefault(25))
     const notesRepo = yield* Config.string("NOTES_REPO_DIR")
-    yield* runPipeline<LifelogEnv>(
-      [audioSource(folderId, latest), notesSource(notesRepo), gpsCompactSource, staysSource],
-      // Order matters: movement enriches journals, after attribution/index.
-      // Order matters: notes are extraction from audio (stable across movement
-      // changes), movement enriches journals, and the journal reads both.
-      [attributionResource, dayIndexResource, movementResource, notesResource, journalResource],
-      dataPath
+    yield* Effect.andThen(
+      runPipeline<LifelogEnv>(
+        [audioSource(folderId, latest), notesSource(notesRepo), gpsCompactSource, staysSource],
+        // Order matters: movement enriches journals, after attribution/index.
+        // Order matters: notes are extraction from audio (stable across movement
+        // changes), movement enriches journals, and the journal reads both.
+        [attributionResource, dayIndexResource, movementResource, notesResource, journalResource],
+        dataPath
+      ).pipe(
+        Effect.catchCause((cause) => Effect.logError("pipeline run failed", cause))
+      ),
+      // The pass may have materialized new journals: reconverge the served
+      // previews behind, so readers see them without paying derivation.
+      Effect.forkDetach(refreshDayPreviews)
     ).pipe(
-      Effect.catchCause((cause) => Effect.logError("pipeline run failed", cause)),
       Effect.repeat(Schedule.spaced("1 hour")),
       Effect.forkScoped
     )
   })
+)
+
+/**
+ * Fill the previews memo after boot so the first visitor never pays the
+ * cold read over the mount. A request racing the warmup computes
+ * synchronously exactly once, as before.
+ */
+const Warmup = Layer.effectDiscard(Effect.forkDetach(refreshDayPreviews))
+
+/**
+ * Keep the served previews converging on journal writes: every published
+ * day triggers a memo refresh. Single-flight inside refreshDayPreviews
+ * collapses a materialization burst into one recompute.
+ */
+const DaySync = Layer.effectDiscard(
+  Stream.runForEach(Stream.fromPubSub(DayEvents.dayHub), () => refreshDayPreviews).pipe(
+    Effect.forkDetach
+  )
 )
 
 /** The journal language model: OpenAI Responses API via the exe.dev relay. */
@@ -275,7 +391,8 @@ const Services = Layer.mergeAll(
   Git.layer,
   tailscaleLayer,
   LlmLive,
-  WorkflowsLive
+  WorkflowsLive,
+  TelemetryLive
 ).pipe(
   // Engine on top of the single-process cluster; everything above can
   // execute workflows, the pipeline and routes included.
@@ -293,7 +410,9 @@ const RpcLive = RpcServer.layerHttp({ group: JournalsGroup, path: "/rpc", protoc
 
 const Main = Layer.mergeAll(
   HttpRouter.serve(Layer.mergeAll(Routes, RpcLive)),
-  Ingest
+  Ingest,
+  Warmup,
+  DaySync
 ).pipe(
   Layer.provide(Services),
   // Cold caches over the network mount can push the first / render past

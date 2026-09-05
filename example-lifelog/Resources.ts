@@ -16,7 +16,7 @@ export const DATA_DIR = process.env.DATA_DIR ?? "data/artifacts"
 export const dataPath = (key: string) => join(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
-export const JOURNAL_VERSION = "journal-v5"
+export const JOURNAL_VERSION = "journal-v7"
 /** Notes are keyed by the day they are about, not by ingest id: exactly one
  * journal note per day is what the journal reads. The previous
  * `notes-git-v1` (every markdown file in the checkout, keyed by ingest id)

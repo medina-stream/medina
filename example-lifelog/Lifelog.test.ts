@@ -69,6 +69,18 @@ describe("journal pages", () => {
     expect(html).toContain("&amp; left.")
   })
 
+  test("renders ## chunk headers as headings, not literal text", () => {
+    const journal = new Journal({
+      version: "journal-v7", day: "2026-08-29", inputHash: "hash", transcriptKeys: [],
+      model: null, generatedAt: "2026-08-29T00:00:00Z", status: "completed",
+      report: "Busy day out.\n\n## 9:00–10:30 — Home\nTook the bus, stopped for coffee.\n\n## 11:00–12:00 — Gym\nLifted, <script>alert(1)</script>."
+    })
+    const html = dayPage(journal)
+    expect(html).toContain("<h3>9:00–10:30 — Home</h3>")
+    expect(html).not.toContain("## 9:00")
+    expect(html).not.toContain("<script>alert(1)</script>")
+  })
+
   test("marks a day whose journal lags its inputs", () => {
     const journal = new Journal({
       version: "journal-v5", day: "2026-08-29", inputHash: "hash", transcriptKeys: [],

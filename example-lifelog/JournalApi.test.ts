@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import * as Schema from "effect/Schema"
-import { ApiError, GetJournal, JournalEntry, ListJournals } from "./JournalApi.ts"
+import { ApiError, DayRow, GetJournal, JournalEntry, ListDays, ListJournals } from "./JournalApi.ts"
 import { Journal } from "./Resources.ts"
 
 const journal = new Journal({
@@ -21,6 +21,17 @@ describe("journals RPC contract", () => {
       const json = JSON.parse(JSON.stringify(Schema.encodeSync(GetJournal.successSchema)(value)))
       expect(Schema.decodeUnknownSync(GetJournal.successSchema)(json)).toEqual(value)
     }
+  })
+
+  test("ListDays rows survive a JSON round-trip, limit/offset intact", () => {
+    const rows = [
+      new DayRow({ day: "2026-09-02", stale: false, preview: "A full day." }),
+      new DayRow({ day: "2026-09-01", stale: true, preview: "" })
+    ]
+    const json = JSON.parse(JSON.stringify(Schema.encodeSync(ListDays.successSchema)(rows)))
+    expect(Schema.decodeUnknownSync(ListDays.successSchema)(json)).toEqual(rows)
+    expect(Schema.decodeUnknownSync(ListDays.payloadSchema)({ limit: 20, offset: 5 })).toEqual({ limit: 20, offset: 5 })
+    expect(Schema.decodeUnknownSync(ListDays.payloadSchema)({} as const)).toEqual({})
   })
 
   test("failures carry a message", () => {
