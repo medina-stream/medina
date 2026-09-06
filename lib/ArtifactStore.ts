@@ -5,26 +5,17 @@
  * The Effect service is useful to embedders; `artifactPath` keeps the current
  * file-format modules source-compatible while they migrate to the service.
  */
-import { isAbsolute, join, normalize } from "node:path"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
+import { artifactPath } from "./ArtifactKey.ts"
 import * as Files from "./Files.ts"
 
-export type ArtifactKey = string & { readonly ArtifactKey: unique symbol }
-
-export const key = (value: string): ArtifactKey => {
-  const normalized = normalize(value).replace(/^\.\//, "")
-  if (!value || isAbsolute(value) || normalized === ".." || normalized.startsWith("../")) {
-    throw new Error(`invalid artifact key: ${value}`)
-  }
-  return normalized as ArtifactKey
-}
-
-export const artifactPath = (root: string, value: string): string => join(root, key(value))
+export type { ArtifactKey } from "./ArtifactKey.ts"
+export { artifactPath, key } from "./ArtifactKey.ts"
 
 export class ArtifactStore extends Context.Service<ArtifactStore, {
   readonly root: string

@@ -7,7 +7,7 @@
  * the data dir are reused as-is instead of re-processing audio.
  */
 import * as Schema from "effect/Schema"
-import { artifactPath } from "../ArtifactStore.ts"
+import { artifactPath } from "../ArtifactKey.ts"
 
 /** Where the data lives: a plain directory (local disk, or a mounted
  * filesystem such as an Archil disk). Keys below are paths relative to it. */
