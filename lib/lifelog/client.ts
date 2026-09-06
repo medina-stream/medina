@@ -6,10 +6,13 @@
  * Table rows arrive in `ListDays` pages — day, staleness, and a
  * truncated preview per row — appended as the scroll nears the bottom, so
  * the table scrolls endlessly with a constant-time initial load. In-flight
- * pages are cancelled on jump or navigation. Only the day detail view
- * fetches a full journal via `GetJournal`. Row previews arrive truncated
- * to one line, keeping every cell a fixed height regardless of report
- * length.
+ * pages are cancelled on navigation. Row previews arrive truncated to one
+ * line, keeping every cell a fixed height regardless of report length.
+ *
+ * Tapping a row opens the day in a modal and fetches the full journal via
+ * `GetJournal`; the list stays mounted behind it, so closing costs nothing
+ * and returns to the same scroll position. The modal is driven by the hash,
+ * which is what makes back close it and a day link shareable.
  *
  * Journal text is LLM output derived from untrusted transcripts: every
  * dynamic string goes through `escapeHtml` before it touches the DOM.
@@ -61,16 +64,49 @@ const renderReport = (text: string) =>
     return `<p>${block.split("\n").map((line) => escapeHtml(line)).join("<br>")}</p>`
   }).join("")
 
-const renderDay = (day: string, journal: Journal | null) =>
-  `<p><a href="#/">All days</a></p>
-   <h2>${escapeHtml(day)}</h2>` +
-  (journal === null
+/** A day's report, for the day modal. The heading lives in the modal head. */
+const renderDay = (journal: Journal | null) =>
+  journal === null
     ? `<p class="empty">writing…</p>`
     : journal.report
-      ? renderReport(journal.report)
-      : `<p class="empty">Nothing recorded.</p>`)
+    ? renderReport(journal.report)
+    : `<p class="empty">Nothing recorded.</p>`
 
 const mount = document.getElementById("app")!
+
+/**
+ * Modal helpers over the native `dialog`, which brings focus trapping, Esc,
+ * and inertness of the page behind it -- none of which is worth
+ * reimplementing.
+ *
+ * `showModal` throws if the dialog is already open, so opening is guarded;
+ * that happens when a row is tapped twice before the first paint lands.
+ */
+const openModal = (id: string) => {
+  const dialog = document.getElementById(id) as HTMLDialogElement | null
+  if (dialog && !dialog.open) dialog.showModal()
+  return dialog
+}
+
+const closeModal = (id: string) => {
+  const dialog = document.getElementById(id) as HTMLDialogElement | null
+  if (dialog?.open) dialog.close()
+}
+
+/** Close buttons, and a click on the backdrop. */
+const wireModals = () => {
+  for (const el of Array.from(document.querySelectorAll("dialog.modal"))) {
+    const dialog = el as HTMLDialogElement
+    for (const button of Array.from(dialog.querySelectorAll("[data-close-modal]"))) {
+      button.addEventListener("click", () => dialog.close())
+    }
+    // A click landing on the dialog itself (not its content) is the
+    // backdrop, since the padding belongs to the inner elements.
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) dialog.close()
+    })
+  }
+}
 
 const failureMessage = (error: unknown): string => {
   if (error instanceof Error) return error.message
@@ -108,6 +144,7 @@ const program = Effect.gen(function*() {
     const root = document.getElementById("pipeline-status")
     const summary = document.getElementById("status-summary")
     const details = document.getElementById("status-details")
+    const dot = document.getElementById("account-dot")
     if (!root || !summary || !details) return
     const sources = status.lastRun?.sources ?? []
     const stages = status.lastRun?.stages ?? []
@@ -115,13 +152,15 @@ const program = Effect.gen(function*() {
     const failing = observed.filter((entry) => entry.status === "failing")
     const degraded = observed.filter((entry) => entry.status === "degraded")
     const disabled = sources.filter((source) => source.status === "disabled")
-    root.className = `status ${
-      failing.length > 0 || status.lastRun === null
-        ? "bad"
-        : degraded.length > 0 || disabled.length > 0 || status.totals.stale > 0
-        ? "warn"
-        : "good"
-    }`
+    const tone = failing.length > 0 || status.lastRun === null
+      ? "bad"
+      : degraded.length > 0 || disabled.length > 0 || status.totals.stale > 0
+      ? "warn"
+      : "good"
+    root.className = `status ${tone}`
+    // The dot is the only always-visible signal now that status lives in a
+    // modal, so it carries the tone on the button itself.
+    if (dot) dot.className = `status-dot ${tone}`
     summary.textContent = status.pipeline.running
       ? "Updating data\u2026"
       : status.lastRun === null
@@ -138,9 +177,11 @@ const program = Effect.gen(function*() {
     const finished = status.pipeline.lastFinishedAt
       ? `<p>Last pass: ${escapeHtml(new Date(status.pipeline.lastFinishedAt).toLocaleString())}</p>`
       : `<p>No completed pass.</p>`
-    details.innerHTML = finished +
-      `<strong>Sources</strong><ul>${renderStatusRows(sources) || "<li>No sources configured.</li>"}</ul>` +
-      `<strong>Processing</strong><ul>${renderStatusRows(stages) || "<li>No processing stages.</li>"}</ul>`
+    const totals = `<p>${status.totals.days} days · ${status.totals.transcripts} transcripts · ` +
+      `${status.totals.current} current, ${status.totals.stale} pending</p>`
+    details.innerHTML = totals + finished +
+      `<h3>Sources</h3><ul>${renderStatusRows(sources) || "<li>No sources configured.</li>"}</ul>` +
+      `<h3>Processing</h3><ul>${renderStatusRows(stages) || "<li>No processing stages.</li>"}</ul>`
   }
 
   const refreshStatus = Effect.matchCause(client.GetStatus({}), {
@@ -489,28 +530,16 @@ const program = Effect.gen(function*() {
       }))
   })
 
-  const rowHtml = (row: DayRow): string => {
-    const heading =
-      `<h2><a href="#/day/${escapeHtml(row.day)}">${escapeHtml(row.day)}</a>` +
-      (row.stale ? `<span class="stale">rewriting</span>` : "") + `</h2>`
-    return heading +
-      (row.preview
-        ? `<p class="preview">${escapeHtml(row.preview)}</p>`
-        : `<p class="empty">Nothing recorded.</p>`)
-  }
+  const rowHtml = (row: DayRow): string =>
+    `<span class="vrow-title">${escapeHtml(row.day)}` +
+    (row.stale ? `<span class="stale">rewriting</span>` : "") + `</span>` +
+    (row.preview
+      ? `<p class="preview">${escapeHtml(row.preview)}</p>`
+      : `<p class="empty">Nothing recorded.</p>`)
 
-  /** Header count + spacer height follow the loaded rows. */
+  /** The spacer height follows the loaded rows. */
   const refreshChrome = () => {
-    const count = document.getElementById("daycount")
-    if (count !== null) {
-      count.textContent = exhausted ? `${rows.length} days` : `${rows.length}+ days`
-    }
     if (spacer !== null) spacer.style.height = `${rows.length * ROW_H}px`
-    const input = document.getElementById("jump") as HTMLInputElement | null
-    if (input !== null && rows.length > 0) {
-      input.max = rows[0]!.day
-      if (exhausted) input.min = rows[rows.length - 1]!.day
-    }
   }
 
   /** Append the next page, unless one is already in flight. Failures clear
@@ -561,7 +590,7 @@ const program = Effect.gen(function*() {
     for (let index = start; index < end; index++) {
       const row = rows[index]!
       html += `<div class="vrow" style="top:${index * ROW_H}px" data-day="${escapeHtml(row.day)}">` +
-        `<div class="vrow-inner">${rowHtml(row)}</div></div>`
+        `<button type="button" class="vrow-inner" data-open-day="${escapeHtml(row.day)}">${rowHtml(row)}</button></div>`
     }
     spacer.innerHTML = html
     // Near the loaded tail with more possibly behind: fetch the next page.
@@ -575,60 +604,6 @@ const program = Effect.gen(function*() {
       scrollQueued = false
       paintWindow()
     })
-  }
-
-  const scrollToIndex = (index: number) => {
-    if (table === null) return
-    table.scrollTop = index * ROW_H
-    paintWindow()
-  }
-
-  const jumpToDay = (value: string) => {
-    if (table === null || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return
-    // Rows are newest first: the target is the first row at or before it.
-    // Loaded rows answer immediately; otherwise pages load (and paint)
-    // until the target appears or the list ends. A new jump or navigation
-    // cancels the seek via the generation guard.
-    const gen = generation
-    const step = (): void => {
-      if (gen !== generation || table === null) return
-      const index = rows.findIndex((row) => row.day <= value)
-      if (index !== -1) {
-        scrollToIndex(index)
-        return
-      }
-      if (exhausted) {
-        scrollToIndex(Math.max(0, rows.length - 1))
-        return
-      }
-      if (pageFiber !== null) {
-        requestAnimationFrame(step)
-        return
-      }
-      const offset = rows.length
-      const seek = Effect.matchCauseEffect(client.ListDays({ limit: PAGE_SIZE, offset }), {
-        onFailure: () => Effect.succeed(null),
-        onSuccess: (days) => Effect.succeed(days)
-      }).pipe(
-        Effect.flatMap((days) =>
-          Effect.sync(() => {
-            pageFiber = null
-            if (gen !== generation) return
-            if (days === null) return
-            rows.push(...days)
-            if (days.length < PAGE_SIZE) exhausted = true
-            refreshChrome()
-            paintWindow()
-            step()
-          })
-        ),
-        Effect.catchCause(() => Effect.sync(() => {
-          pageFiber = null
-        }))
-      )
-      pageFiber = Effect.runFork(seek)
-    }
-    step()
   }
 
   // --- live updates ---------------------------------------------------
@@ -731,57 +706,85 @@ const program = Effect.gen(function*() {
     rows = []
     exhausted = false
     mount.innerHTML =
-      `<div class="vtable-tools">` +
-      `<span id="daycount">… days</span>` +
-      `<a class="placeslink" href="#/places">Places</a>` +
-      `<label><span>Go to day</span><input id="jump" type="date"></label>` +
-      `<button id="jump-go" type="button">Go</button>` +
-      `</div>` +
       `<div class="vtable" id="vtable" tabindex="0">` +
       `<div class="vspacer" id="vspacer"></div>` +
       `</div>` +
       `<noscript><p class="empty">The journal loads over a typed RPC and needs JavaScript.</p></noscript>`
     table = document.getElementById("vtable")!
     spacer = document.getElementById("vspacer")!
-    const input = document.getElementById("jump") as HTMLInputElement | null
-    document.getElementById("jump-go")!.addEventListener("click", () => {
-      if (input !== null) jumpToDay(input.value)
-    })
-    input?.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && input !== null) jumpToDay(input.value)
+    // Delegated: rows are recycled on every scroll paint, so per-row
+    // listeners would be re-attached constantly.
+    spacer.addEventListener("click", (event) => {
+      const target = (event.target as HTMLElement | null)?.closest("[data-open-day]")
+      const day = target?.getAttribute("data-open-day")
+      if (day) location.hash = `#/day/${day}`
     })
     table.addEventListener("scroll", onScroll, { passive: true })
     loadPage()
   }
 
+  /**
+   * Show a day in the modal, over whatever is behind it.
+   *
+   * The list stays mounted, so closing returns to the same scroll position
+   * without refetching. Closing rewrites the hash, which is what makes the
+   * back button close the modal rather than leave the page.
+   */
+  const showDay = (day: string): Effect.Effect<void, ApiError | RpcClientError> =>
+    Effect.gen(function*() {
+      if (table === null) showTable()
+      const dialog = openModal("day-modal")
+      const title = document.getElementById("day-title")
+      const body = document.getElementById("day-body")
+      if (!dialog || !title || !body) return
+      title.textContent = day
+      body.innerHTML = `<p class="empty">Loading…</p>`
+      if (!dialog.dataset.wired) {
+        dialog.dataset.wired = "1"
+        dialog.addEventListener("close", () => {
+          if (location.hash.startsWith("#/day/")) location.hash = "#/"
+        })
+      }
+      const journal = yield* client.GetJournal({ day })
+      // A late response for a day the user already navigated away from
+      // must not overwrite what they are looking at now.
+      if (location.hash !== `#/day/${day}`) return
+      body.innerHTML = renderDay(journal)
+      if (journal === null) {
+        const route = location.hash
+        yield* Effect.sleep("10 seconds").pipe(
+          Effect.flatMap(() => route === location.hash ? showDay(day) : Effect.void),
+          Effect.forkDetach
+        )
+      }
+    })
+
   const loadRoute = (): Effect.Effect<void> =>
     Effect.gen(function*() {
       const hash = location.hash
       if (hash === "#/places") {
+        closeModal("day-modal")
         yield* showPlaces
         return
       }
       const day = hash.startsWith("#/day/") ? hash.slice("#/day/".length) : null
       if (day === null) {
-        showTable()
+        closeModal("day-modal")
+        if (table === null) showTable()
         return
       }
-      cancelPage()
-      table = null
-      spacer = null
-      const journal = yield* client.GetJournal({ day })
-      mount.innerHTML = renderDay(day, journal)
-      if (journal === null) {
-        const route = location.hash
-        yield* Effect.sleep("10 seconds").pipe(
-          Effect.flatMap(() => route === location.hash ? loadRoute() : Effect.void),
-          Effect.forkDetach
-        )
-      }
+      yield* showDay(day)
     }).pipe(
       Effect.catchIf(isRpcFailure, (error) => Effect.sync(() => showError(error))),
       Effect.catchCause((cause) => Effect.sync(() => showError(cause)))
     )
+
+  wireModals()
+  document.getElementById("account-open")?.addEventListener("click", () => {
+    openModal("account-modal")
+    // Refresh on open: the 30s poll may have left it a little stale.
+    Effect.runFork(refreshStatus)
+  })
 
   yield* loadRoute()
   yield* refreshStatus

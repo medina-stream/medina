@@ -76,58 +76,83 @@ const STYLE = `
   button.danger { color: var(--bad); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  /* Status and live feed */
-  .status { margin-top: .75rem; font-family: var(--ui); font-size: .85rem; }
-  /* A flex summary drops the disclosure triangle, so keep the default box
-     and align the dot with vertical-align instead. */
-  .status summary, .live-events summary {
-    cursor: pointer; color: var(--muted); padding: .3rem 0;
+  /* Top bar: title left, actions right, on one line at every width. */
+  .topbar { display: flex; align-items: center; gap: .75rem; }
+  .topbar h1 { flex: 1 1 auto; min-width: 0; }
+  .topbar-actions { display: flex; align-items: center; gap: .5rem; flex: none; }
+  .iconbutton {
+    display: inline-flex; align-items: center; justify-content: center; gap: .35rem;
+    min-width: var(--tap); min-height: var(--tap);
+    padding: .25rem .5rem; border-radius: .5rem;
+    background: transparent; border: 1px solid transparent; color: var(--muted);
   }
+  .iconbutton:hover { background: var(--surface); border-color: var(--rule); color: var(--ink); }
+  #account-dot { margin: 0; }
+
+  /* Status and live feed (inside the account modal) */
+  .status { font-family: var(--ui); font-size: .875rem; }
+  .status-line { margin: 0 0 .5rem; font-weight: 600; }
   .status-dot {
-    display: inline-block; width: .65rem; height: .65rem; border-radius: 50%;
-    margin-right: .4rem; background: var(--muted); vertical-align: baseline;
+    display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
+    background: var(--muted); flex: none;
   }
-  .status.good .status-dot { background: var(--accent); }
-  .status.warn .status-dot { background: var(--warn); }
-  .status.bad .status-dot { background: var(--bad); }
-  .status ul { margin: .5rem 0; padding-left: 1.25rem; }
-  .live-events { margin-top: .25rem; font-family: var(--ui); font-size: .8rem; }
-  .live-events ol { max-height: 14rem; overflow-y: auto; margin: .5rem 0; padding-left: 1.5rem; }
-  .live-events li { margin: .2rem 0; }
+  .status.good #account-dot, .status-dot.good { background: var(--accent); }
+  .status.warn #account-dot, .status-dot.warn { background: var(--warn); }
+  .status.bad #account-dot, .status-dot.bad { background: var(--bad); }
+  .status ul { margin: .5rem 0 1rem; padding-left: 1.25rem; }
+  .status li { margin: .15rem 0; }
+  .live-list {
+    font-family: var(--ui); font-size: .8rem;
+    max-height: 40vh; overflow-y: auto; margin: .5rem 0 0; padding-left: 1.5rem;
+  }
+  .live-list li { margin: .2rem 0; }
   .event-time { color: var(--muted); margin-right: .4rem; }
   .event-failing { color: var(--bad); }
 
-  /* Days table. A grid rather than flex wrap: the phone layout wants an
-     explicit two-row arrangement, and letting flex choose the break points
-     kept orphaning the button or splitting the label. */
-  .vtable-tools {
-    display: grid; gap: .5rem .75rem; align-items: center;
-    grid-template-columns: auto auto 1fr auto;
-    color: var(--muted); font-family: var(--ui); font-size: .9rem;
-    margin-top: .75rem;
+  /* Modals. A native dialog gives focus trapping and Esc for free. */
+  .modal {
+    width: min(42rem, 100vw - 2rem);
+    max-height: min(85vh, 60rem);
+    padding: 0; border: 1px solid var(--rule); border-radius: .75rem;
+    background: var(--bg); color: var(--ink);
+    box-shadow: 0 12px 40px rgb(0 0 0 / .28);
+    overflow: hidden;
   }
-  .vtable-tools label { display: contents; }
-  .vtable-tools label span { white-space: nowrap; }
-  .vtable-tools #jump { width: 100%; min-width: 0; }
-  .vtable-tools .placeslink { justify-self: end; }
+  .modal::backdrop { background: rgb(0 0 0 / .45); }
+  .modal-head {
+    display: flex; align-items: center; gap: .75rem;
+    padding: .85rem 1.1rem; border-bottom: 1px solid var(--rule-soft);
+    position: sticky; top: 0; background: var(--bg);
+  }
+  .modal-head h2 { flex: 1 1 auto; margin: 0; font-size: 1.15rem; }
+  .modal-body { padding: 1rem 1.1rem 1.5rem; overflow-y: auto; max-height: calc(85vh - 4rem); }
+  .modal-body h3 { margin-top: 1.25rem; }
   @media (max-width: 34rem) {
-    .vtable-tools { grid-template-columns: auto 1fr auto; }
-    /* Row 1: count and Places. Row 2: the whole date picker. */
-    #daycount { grid-column: 1 / 3; }
-    .vtable-tools .placeslink { grid-column: 3; grid-row: 1; }
+    /* Full-bleed sheet on a phone: more room, and a familiar shape. */
+    .modal {
+      width: 100vw; max-width: 100vw; max-height: 92vh;
+      margin: auto auto 0; border-radius: .9rem .9rem 0 0; border-bottom: 0;
+    }
+    .modal-body { max-height: calc(92vh - 4rem); }
   }
-  /* Height is viewport-relative so the list fills the screen on a phone
-     without the page itself scrolling past it. */
-  .vtable { overflow-y: auto; height: min(70vh, 44rem); border-top: 1px solid var(--rule); margin-top: 1rem; position: relative; -webkit-overflow-scrolling: touch; }
+
+  /* Days table. No toolbar any more: the list is the whole view, so it gets
+     the height the tools used to share. */
+  .vtable { overflow-y: auto; height: min(78vh, 52rem); border-top: 1px solid var(--rule); margin-top: 1rem; position: relative; -webkit-overflow-scrolling: touch; }
   .vspacer { position: relative; width: 100%; }
   .vrow { position: absolute; left: 0; right: 0; height: 100px; }
+  /* The whole row is the target, so it is a button, not a link inside text. */
   .vrow-inner {
-    height: 100px; padding: 12px 0; overflow: hidden;
-    border-bottom: 1px solid var(--rule-soft);
+    display: block; width: 100%; height: 100px; text-align: left;
+    padding: 12px .5rem; margin: 0; overflow: hidden;
+    background: none; border: 0; border-bottom: 1px solid var(--rule-soft);
+    border-radius: 0; cursor: pointer; font: inherit; color: inherit;
   }
-  .vrow-inner h2 { font-size: 1.05rem; margin: 0 0 .25rem; }
+  .vrow-inner:hover { background: var(--surface); }
+  .vrow-inner:active { transform: none; }
+  .vrow-title { display: flex; align-items: baseline; gap: .5rem; font-size: 1.05rem; font-weight: 700; margin-bottom: .25rem; }
   .vrow-inner p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .vrow-inner p.preview { color: var(--ink); }
+  .vrow-inner p.preview { color: var(--ink); font-family: inherit; }
 
   /* Places editor. The row is a wrapping grid: wide screens get one line,
      narrow screens stack into labelled fields instead of a jumble. */
@@ -259,22 +284,50 @@ export const journalPage = (views: ReadonlyArray<JournalView>) =>
 export const spaHome = () =>
   "<!doctype html>" + render(
     <Layout title="Medina" scriptSrc="/app.js">
-      <header>
+      <header class="topbar">
         <h1>Journal</h1>
-        <p>Daily reports from the Medina data dir.</p>
-        <details class="status" id="pipeline-status">
-          <summary><span class="status-dot"></span><span id="status-summary">Checking data flow…</span></summary>
-          <div id="status-details"></div>
-        </details>
-        <details class="live-events">
-          <summary>Live events</summary>
-          <ol id="live-event-list"><li class="empty">Waiting for events…</li></ol>
-        </details>
+        <div class="topbar-actions">
+          <a class="placeslink" href="#/places">Places</a>
+          {/* Status lives behind this rather than on the page: it matters
+              when something is wrong, and the dot says when that is. */}
+          <button type="button" id="account-open" class="iconbutton" aria-label="Account and status" aria-haspopup="dialog">
+            <span class="status-dot" id="account-dot"></span>
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="8" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7" />
+              <path d="M4.5 20c0-4.1 3.4-6.4 7.5-6.4s7.5 2.3 7.5 6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
       </header>
       <main id="app">
         <p class="empty">Loading…</p>
       </main>
       <noscript><p class="empty">The journal loads over a typed RPC and needs JavaScript.</p></noscript>
+
+      {/* Account: pipeline health and the live feed. */}
+      <dialog id="account-modal" class="modal" aria-labelledby="account-title">
+        <div class="modal-head">
+          <h2 id="account-title">Status</h2>
+          <button type="button" class="iconbutton" data-close-modal aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="status" id="pipeline-status">
+            <p id="status-summary" class="status-line">Checking data flow…</p>
+            <div id="status-details"></div>
+          </div>
+          <h3>Live events</h3>
+          <ol id="live-event-list" class="live-list"><li class="empty">Waiting for events…</li></ol>
+        </div>
+      </dialog>
+
+      {/* Day detail, opened by tapping a row. */}
+      <dialog id="day-modal" class="modal" aria-labelledby="day-title">
+        <div class="modal-head">
+          <h2 id="day-title"></h2>
+          <button type="button" class="iconbutton" data-close-modal aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body" id="day-body"></div>
+      </dialog>
     </Layout>
   )
 
