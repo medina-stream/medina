@@ -6,7 +6,7 @@ content-addressed resource model (key bakes in dependency hashes, so file
 existence is the freshness check). What's left is incremental: serving
 behavior, Effect-native consistency, scale headroom, and small hygiene items.
 
-Baseline: `bun test` 41 pass, `bun run typecheck` clean.
+Baseline: `bun test` 57 pass, `bun run typecheck` clean (tests included).
 
 ## Next
 
@@ -96,6 +96,14 @@ Baseline: `bun test` 41 pass, `bun run typecheck` clean.
   tiny) — recorded so the window isn't mistaken for a data bound.
 
 ## Done
+
+- The UI is one typed RPC surface: status, places, address search, saves and
+  live events all decode against shared schemas, with no hand-written
+  interfaces or `fetch` left in the client. Authorization is a `canWrite`
+  parameter the application supplies.
+- Place maps render OSM tiles (`staticmap.openstreetmap.de` is gone), and
+  the UI is responsive with labelled fields and touch-sized controls.
+- `.env` still ships dev settings; see "Dev settings must not ship" below.
 
 - Journal re-derivation cascade: movement basis is per-day (≤3 partitions),
   steady-state cost of a new GPS point is ~1–3 report calls, not 31 notes +
