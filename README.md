@@ -59,15 +59,25 @@ Create the local configuration:
 cp .env.example .env
 ```
 
-At minimum, change the filesystem paths in `.env`:
+The fastest way to see it run is with no external services at all. Set
+`MEDINA_SOURCES=` (empty) and Medina starts, serves the UI, and reports every
+source as disabled rather than failing:
 
 ```dotenv
+MEDINA_SOURCES=
 DATA_DIR=data/artifacts
 CLUSTER_DB=data/cluster.db
+HOME_TZ=UTC
+PORT=8000
+```
+
+That gives you an empty but honest instance — "3 sources disabled", "No
+journal days yet." Add sources once you want data flowing:
+
+```dotenv
 MEDINA_SOURCES=notes
 NOTES_REPO_URL=git@github.com:you/notes.git
 NOTES_REPO_REF=main
-HOME_TZ=UTC
 LIFELOG_EPOCH_DAY=1900-01-01
 LIFELOG_MAIN_CHANNEL=main
 ```
@@ -142,3 +152,31 @@ The development server listens on `PORT` (8000 by default). The first pipeline
 pass starts immediately, then repeats hourly. Source failures are isolated and
 recorded rather than terminating the server; the home page and `GET /status`
 show whether data is flowing, empty, disabled, degraded, or failing.
+
+## Exposure and identity
+
+**Medina does not authenticate reads.** `GET /journal/:day`, `/gps/:day`,
+`/status` and the rest serve whoever connects. That is deliberate — the
+authenticating front door lives outside the process — but it means the bind
+address is a real security decision, not a preference.
+
+The server therefore binds `127.0.0.1` by default. Put something
+authenticating in front of it:
+
+- **exe.dev** (recommended): the proxy authenticates the VM owner before a
+  request reaches the port. Nothing to configure.
+- **Tailscale**: `tailscale serve` terminates TLS for the tailnet and
+  forwards to loopback, injecting a verified `Tailscale-User-Login`.
+- **Anything else**: a reverse proxy that authenticates and forwards to
+  loopback.
+
+Set `HOST=0.0.0.0` only when one of those is in front. On a laptop on shared
+wifi, an unguarded bind publishes a personal lifelog to the local network.
+
+Writes (`POST /in`, `PUT /places`) are gated on `INGEST_OWNER`, matched
+against the Tailscale login behind the request. An unset `INGEST_OWNER` is
+treated as unconfigured, not open: writes are refused with 503 while reads
+continue to work. Identity resolution is in `lib/Tailscale.ts` — tailnet
+peers are identified via `tailscale whois`, and the `Tailscale-User-Login`
+header is trusted only from loopback, where the front door set it.
+

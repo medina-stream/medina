@@ -45,6 +45,42 @@ import { audioSource, recordingObjectSource, attributionResource, dayIndexResour
 import { forwardGeocode, listPlaces, movementCachedForDay, movementResource, placeCandidates, Places, replacePlaces } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 
+/**
+ * Who may write: the single owner named by `INGEST_OWNER`.
+ *
+ * Returns the login on success, or the response to send instead. Writing is
+ * refused unless an owner is configured -- an unset `INGEST_OWNER` is an
+ * unconfigured deployment, not an open one, and it must not read as a
+ * server bug. `Config.string` would fail the request with an opaque 500.
+ *
+ * Identity comes from Tailscale (see `lib/Tailscale.ts`). Read paths stay
+ * open: this gates writes only.
+ */
+const ownerOnly = (what: string) =>
+  Effect.gen(function*() {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const owner = (Option.getOrNull(yield* Config.option(Config.string("INGEST_OWNER"))) ?? "").trim()
+    if (!owner) {
+      yield* Effect.log(`${what} refused: INGEST_OWNER is not configured, so no one may write`)
+      return {
+        login: null,
+        response: HttpServerResponse.text(
+          "writes are disabled: set INGEST_OWNER to the Tailscale login allowed to write",
+          { status: 503 }
+        )
+      }
+    }
+    const address = Option.getOrNull(request.remoteAddress)
+    const tailscale = yield* Tailscale
+    const login = yield* tailscale.identify(address, request.headers)
+    if (!login || login !== owner) {
+      yield* Effect.log(`${what} rejected: ${address ?? "unknown"} -> ${login ?? "unidentified"}`)
+      return { login: null, response: HttpServerResponse.text("forbidden: not you", { status: 403 }) }
+    }
+    return { login, response: null }
+  })
+
+
 const Routes = HttpRouter.use((router) =>
   Effect.gen(function*() {
     // The home page is an SPA: a static shell plus the client bundle. All
@@ -254,14 +290,8 @@ const Routes = HttpRouter.use((router) =>
       "/places",
       Effect.gen(function*() {
         const request = yield* HttpServerRequest.HttpServerRequest
-        const owner = yield* Config.string("INGEST_OWNER")
-        const address = Option.getOrNull(request.remoteAddress)
-        const tailscale = yield* Tailscale
-        const login = yield* tailscale.identify(address, request.headers)
-        if (!login || login !== owner) {
-          yield* Effect.log(`places rejected: ${address ?? "unknown"} -> ${login ?? "unidentified"}`)
-          return HttpServerResponse.text("forbidden: not you", { status: 403 })
-        }
+        const { login, response } = yield* ownerOnly("places")
+        if (response) return response
         const text = yield* Effect.orDie(request.text)
         let json: unknown
         try {
@@ -290,14 +320,8 @@ const Routes = HttpRouter.use((router) =>
       Effect.gen(function*() {
         const request = yield* HttpServerRequest.HttpServerRequest
         const params = yield* HttpServerRequest.ParsedSearchParams
-        const owner = yield* Config.string("INGEST_OWNER")
-        const address = Option.getOrNull(request.remoteAddress)
-        const tailscale = yield* Tailscale
-        const login = yield* tailscale.identify(address, request.headers)
-        if (!login || login !== owner) {
-          yield* Effect.log(`ingest rejected: ${address ?? "unknown"} -> ${login ?? "unidentified"}`)
-          return HttpServerResponse.text("forbidden: not you", { status: 403 })
-        }
+        const { login, response } = yield* ownerOnly("ingest")
+        if (response) return response
         const source = typeof params.source === "string" && params.source ? params.source : "http"
         if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(source)) {
           return HttpServerResponse.text("source must be [a-z0-9-], e.g. gps-gpslogger", { status: 400 })
@@ -494,7 +518,17 @@ const Main = Layer.mergeAll(
   Layer.provide(Services),
   // Cold caches over the network mount can push the first / render past
   // Bun's default 10s request timeout; give handlers more room.
-  Layer.provide(BunHttpServer.layer({ port: Number(process.env.PORT ?? 8000), idleTimeout: 120 }))
+  // Bind loopback by default. Reads (journals, GPS, transcripts) are
+  // unauthenticated by design -- something in front is expected to
+  // authenticate: `tailscale serve` and the exe.dev proxy both terminate
+  // outside and forward to 127.0.0.1. Defaulting to 0.0.0.0 would instead
+  // publish a personal lifelog to whatever network the host is on. Set
+  // `HOST=0.0.0.0` deliberately, and only behind such a front door.
+  Layer.provide(BunHttpServer.layer({
+    hostname: process.env.HOST ?? "127.0.0.1",
+    port: Number(process.env.PORT ?? 8000),
+    idleTimeout: 120
+  }))
 )
 
 BunRuntime.runMain(Layer.launch(Main))
