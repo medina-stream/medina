@@ -11,11 +11,10 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["node"],
+    "types": ["node", "bun"],
     "jsx": "react-jsx",
     "jsxImportSource": "#jsx"
   },
   "include": ["lib", "example-lifelog"],
-  "files": ["lib/jsx/jsx-runtime.ts"],
-  "exclude": ["**/*.test.ts"]
+  "files": ["lib/jsx/jsx-runtime.ts"]
 }

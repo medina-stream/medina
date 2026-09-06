@@ -101,7 +101,7 @@ const dialSecure = (host: string, port: number): Effect.Effect<Duplex, Error> =>
       }
       const secure = tls.connect({ socket: raw, servername: host })
       secure.on("secureConnect", () => done(Effect.succeed(secure as unknown as Duplex)))
-      secure.on("error", (cause) => done(Effect.fail(cause)))
+      secure.on("error", (cause: Error) => done(Effect.fail(cause)))
     })
   })
 

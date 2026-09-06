@@ -22,7 +22,9 @@ const build = async () => {
     minify: true
   })
   if (!result.success) throw new AggregateError(result.logs, "client bundle failed to build")
-  return await result.outputs[0].text()
+  const output = result.outputs[0]
+  if (!output) throw new Error("client bundle produced no output")
+  return await output.text()
 }
 
 describe("client bundle", () => {
