@@ -27,7 +27,7 @@ import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
 import { RuntimeEvent } from "../RuntimeEvents.ts"
 import { JournalsGroup } from "./JournalApi.ts"
 import { Place } from "./Places.ts"
-import { MAP_H, MAP_W, MAP_ZOOM, nudgeLatLon, staticMapUrl } from "./Maps.ts"
+import { MAP_COVER, MAP_ZOOM, mapTiles, nudgeLatLon, TILE_SIZE } from "./Maps.ts"
 import type { DayRow, PipelineStatus, SourceStatus, StageStatus } from "./JournalApi.ts"
 import type { ApiError } from "./JournalApi.ts"
 import type { PlaceCandidate } from "./Places.ts"
@@ -234,14 +234,34 @@ const program = Effect.gen(function*() {
     return { places }
   }
 
-  /** Thumbnail plus address search for one pin. Lat/lon live in
+  /**
+   * A tile-grid map plus address search for one pin. Lat/lon live in
    * `${prefix}-lat` / `${prefix}-lon` inputs; the map centers on them and a
-   * click writes a nudged pin back. */
+   * tap writes a nudged pin back.
+   *
+   * The pin is a CSS marker at the viewport center rather than something
+   * baked into an image, so moving it is a repaint of one element instead
+   * of a network round trip.
+   *
+   * Tiles are generated for the widest layout the map can reach (the body's
+   * max width) and centred by CSS, so one grid covers every viewport and a
+   * resize needs no refetch. Overhang is clipped by the map box.
+   */
+  const mapTilesHtml = (lat: number, lon: number) =>
+    mapTiles(lat, lon, MAP_ZOOM, MAP_COVER).map((tile) =>
+      `<img class="ptile" src="${escapeHtml(tile.url)}" width="${TILE_SIZE}" height="${TILE_SIZE}" ` +
+      `loading="lazy" alt="" draggable="false" ` +
+      `style="left:${tile.left}px;top:${tile.top}px">`
+    ).join("")
+
   const mapBlock = (prefix: string, lat: number, lon: number): string =>
-    `<img class="pmap" data-prefix="${prefix}" src="${escapeHtml(staticMapUrl(lat, lon))}" ` +
-    `width="${MAP_W}" height="${MAP_H}" loading="lazy" alt="Map — click to move the pin" ` +
-    `style="max-width:100%;cursor:crosshair">` +
-    `<div class="prow">` +
+    `<div class="pmap" data-prefix="${prefix}" role="button" tabindex="0" ` +
+    `aria-label="Map — tap to move the pin">` +
+    `<div class="ptiles">${mapTilesHtml(lat, lon)}</div>` +
+    `<div class="ppin" aria-hidden="true"></div>` +
+    `<a class="pattrib" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a>` +
+    `</div>` +
+    `<div class="paddr">` +
     `<input id="${prefix}-addr" placeholder="Search address" aria-label="Search address">` +
     `<button type="button" data-addr="${prefix}">Search</button>` +
     `</div><div id="${prefix}-results"></div>`
@@ -254,27 +274,46 @@ const program = Effect.gen(function*() {
 
   const refreshMap = (prefix: string) => {
     const center = mapCenter(prefix)
-    const img = document.querySelector(`img.pmap[data-prefix="${prefix}"]`) as HTMLImageElement | null
-    if (center && img) img.src = staticMapUrl(center.lat, center.lon)
+    const tiles = document.querySelector(`.pmap[data-prefix="${prefix}"] .ptiles`)
+    if (center && tiles) tiles.innerHTML = mapTilesHtml(center.lat, center.lon)
   }
 
   const wireMaps = () => {
-    for (const el of Array.from(document.querySelectorAll("img.pmap"))) {
-      const img = el as HTMLImageElement
-      const prefix = img.getAttribute("data-prefix") ?? ""
-      img.addEventListener("click", (event) => {
+    for (const el of Array.from(document.querySelectorAll(".pmap"))) {
+      const map = el as HTMLElement
+      const prefix = map.getAttribute("data-prefix") ?? ""
+      const movePin = (clientX: number, clientY: number) => {
         const center = mapCenter(prefix)
         if (!center) return
-        const rect = img.getBoundingClientRect()
+        const rect = map.getBoundingClientRect()
         if (rect.width === 0 || rect.height === 0) return
-        const dx = (event.clientX - rect.left) * (MAP_W / rect.width) - MAP_W / 2
-        const dy = (event.clientY - rect.top) * (MAP_H / rect.height) - MAP_H / 2
+        // The tile layer is not scaled, so viewport pixels are map pixels.
+        const dx = clientX - rect.left - rect.width / 2
+        const dy = clientY - rect.top - rect.height / 2
         const next = nudgeLatLon(center.lat, center.lon, MAP_ZOOM, dx, dy)
         ;(document.getElementById(`${prefix}-lat`) as HTMLInputElement | null)!.value =
           String(Math.round(next.lat * 1e6) / 1e6)
         ;(document.getElementById(`${prefix}-lon`) as HTMLInputElement | null)!.value =
           String(Math.round(next.lon * 1e6) / 1e6)
         refreshMap(prefix)
+      }
+      map.addEventListener("click", (event) => movePin(event.clientX, event.clientY))
+      // Keyboard nudge, so the pin is reachable without a pointer.
+      map.addEventListener("keydown", (event) => {
+        const step = event.shiftKey ? 40 : 8
+        const rect = map.getBoundingClientRect()
+        const midX = rect.left + rect.width / 2
+        const midY = rect.top + rect.height / 2
+        const moves: Record<string, [number, number]> = {
+          ArrowLeft: [-step, 0],
+          ArrowRight: [step, 0],
+          ArrowUp: [0, -step],
+          ArrowDown: [0, step]
+        }
+        const move = moves[event.key]
+        if (!move) return
+        event.preventDefault()
+        movePin(midX + move[0], midY + move[1])
       })
     }
     for (const el of Array.from(document.querySelectorAll("button[data-addr]"))) {
@@ -319,26 +358,37 @@ const program = Effect.gen(function*() {
       const prefix = `pl-${index}`
       return `<div class="pplace">` +
       `<div class="prow" data-id="${escapeHtml(place.id)}">` +
-      `<input data-field="name" value="${escapeHtml(place.name)}" placeholder="Name" aria-label="Name">` +
-      `<input class="num" id="${prefix}-lat" data-field="lat" value="${place.lat}" placeholder="Lat" aria-label="Latitude">` +
-      `<input class="num" id="${prefix}-lon" data-field="lon" value="${place.lon}" placeholder="Lon" aria-label="Longitude">` +
-      `<input class="num" data-field="radiusMeters" value="${place.radiusMeters}" placeholder="Radius m" aria-label="Radius in meters">` +
-      `<button type="button" data-delete="${escapeHtml(place.id)}">Delete</button>` +
+      `<label class="pfield pfield-name"><span>Name</span>` +
+      `<input data-field="name" value="${escapeHtml(place.name)}" placeholder="Name"></label>` +
+      `<label class="pfield"><span>Latitude</span>` +
+      `<input inputmode="decimal" id="${prefix}-lat" data-field="lat" value="${place.lat}"></label>` +
+      `<label class="pfield"><span>Longitude</span>` +
+      `<input inputmode="decimal" id="${prefix}-lon" data-field="lon" value="${place.lon}"></label>` +
+      `<label class="pfield pfield-narrow"><span>Radius m</span>` +
+      `<input inputmode="numeric" data-field="radiusMeters" value="${place.radiusMeters}"></label>` +
+      `<button type="button" class="danger" data-delete="${escapeHtml(place.id)}">Delete</button>` +
       `</div>` + mapBlock(prefix, place.lat, place.lon) + `</div>`
     }).join("")
     const candRows = candidateState.length === 0
       ? `<p class="empty">No unnamed stays — everything is covered.</p>`
       : candidateState.map((candidate, index) => {
         const prefix = `cand-${index}`
+        const days = candidate.days.length > 3
+          ? `${candidate.days.slice(0, 3).map((day) => escapeHtml(day)).join(", ")} +${candidate.days.length - 3} more`
+          : candidate.days.map((day) => escapeHtml(day)).join(", ")
         return `<div class="pcand">` +
-        `<div><strong>${escapeHtml(candidate.geocodedName ?? "Unnamed stay")}</strong> — ` +
-        `${candidate.dwellMinutes} min, ${candidate.days.map((day) => escapeHtml(day)).join(", ")}</div>` +
+        `<div class="pcand-head"><strong>${escapeHtml(candidate.geocodedName ?? "Unnamed stay")}</strong>` +
+        `<span class="pcand-meta">${candidate.dwellMinutes} min · ${days}</span></div>` +
         mapBlock(prefix, candidate.lat, candidate.lon) +
         `<div class="prow">` +
-        `<input id="cand-name-${index}" value="${escapeHtml(candidate.geocodedName ?? "")}" placeholder="Name" aria-label="Name">` +
-        `<input class="num" id="${prefix}-lat" value="${candidate.lat}" placeholder="Lat" aria-label="Latitude">` +
-        `<input class="num" id="${prefix}-lon" value="${candidate.lon}" placeholder="Lon" aria-label="Longitude">` +
-        `<input class="num" id="cand-radius-${index}" value="150" placeholder="Radius m" aria-label="Radius in meters">` +
+        `<label class="pfield pfield-name"><span>Name</span>` +
+        `<input id="cand-name-${index}" value="${escapeHtml(candidate.geocodedName ?? "")}" placeholder="Name"></label>` +
+        `<label class="pfield"><span>Latitude</span>` +
+        `<input inputmode="decimal" id="${prefix}-lat" value="${candidate.lat}"></label>` +
+        `<label class="pfield"><span>Longitude</span>` +
+        `<input inputmode="decimal" id="${prefix}-lon" value="${candidate.lon}"></label>` +
+        `<label class="pfield pfield-narrow"><span>Radius m</span>` +
+        `<input inputmode="numeric" id="cand-radius-${index}" value="150"></label>` +
         `<button type="button" data-add="${index}">Name this place</button>` +
         `</div></div>`
       }).join("")
@@ -347,7 +397,8 @@ const program = Effect.gen(function*() {
       `<p class="empty">A stay keeps the place name when it falls inside its radius. ` +
       `Name candidates below to grow the list; saving replaces the whole list.</p>` +
       `<div id="place-list">${placeRows || `<p class="empty">No places yet.</p>`}</div>` +
-      `<p><button type="button" id="places-save">Save all</button> <span id="place-status">${escapeHtml(status)}</span></p>` +
+      `<div class="psave"><button type="button" id="places-save">Save all</button>` +
+      `<span id="place-status" role="status">${escapeHtml(status)}</span></div>` +
       `<h2>Suggested</h2><div id="cand-list">${candRows}</div>`
     document.getElementById("places-save")!.addEventListener("click", () => {
       const collected = collectPlaceInputs()
@@ -682,9 +733,9 @@ const program = Effect.gen(function*() {
     mount.innerHTML =
       `<div class="vtable-tools">` +
       `<span id="daycount">… days</span>` +
-      `<label>Go to day <input id="jump" type="date"></label>` +
+      `<a class="placeslink" href="#/places">Places</a>` +
+      `<label><span>Go to day</span><input id="jump" type="date"></label>` +
       `<button id="jump-go" type="button">Go</button>` +
-      `<a href="#/places">Places</a>` +
       `</div>` +
       `<div class="vtable" id="vtable" tabindex="0">` +
       `<div class="vspacer" id="vspacer"></div>` +

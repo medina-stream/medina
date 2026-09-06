@@ -1,12 +1,38 @@
 import { describe, expect, test } from "bun:test"
-import { MAP_H, MAP_W, MAP_ZOOM, nudgeLatLon, staticMapUrl } from "./Maps.ts"
+import { MAP_H, MAP_W, MAP_ZOOM, mapTiles, nudgeLatLon, TILE_SIZE } from "./Maps.ts"
 
-describe("staticMapUrl", () => {
-  test("centers on the pin with a marker", () => {
-    const url = staticMapUrl(41.88, -87.63)
-    expect(url).toContain("center=41.88000%2C-87.63000")
-    expect(url).toContain("markers=41.88000%2C-87.63000%2Cred")
-    expect(url).toContain(`size=${MAP_W}x${MAP_H}`)
+describe("mapTiles", () => {
+  test("covers the viewport, and the center pixel sits at the middle", () => {
+    const tiles = mapTiles(41.88, -87.63)
+    expect(tiles.length).toBeGreaterThan(0)
+    // Every pixel of the viewport is covered by some tile.
+    for (const [x, y] of [[0, 0], [MAP_W - 1, 0], [0, MAP_H - 1], [MAP_W - 1, MAP_H - 1], [MAP_W / 2, MAP_H / 2]]) {
+      const covering = tiles.filter((tile) =>
+        x! >= tile.left && x! < tile.left + TILE_SIZE && y! >= tile.top && y! < tile.top + TILE_SIZE)
+      expect(covering.length).toBe(1)
+    }
+  })
+
+  test("tile urls are well-formed and in range", () => {
+    const zoom = 3
+    for (const tile of mapTiles(41.88, -87.63, zoom)) {
+      const match = tile.url.match(/^https:\/\/tile\.openstreetmap\.org\/(\d+)\/(\d+)\/(\d+)\.png$/)
+      expect(match).not.toBeNull()
+      const [, z, x, y] = match!
+      expect(Number(z)).toBe(zoom)
+      expect(Number(x)).toBeGreaterThanOrEqual(0)
+      expect(Number(x)).toBeLessThan(2 ** zoom)
+      expect(Number(y)).toBeGreaterThanOrEqual(0)
+      expect(Number(y)).toBeLessThan(2 ** zoom)
+    }
+  })
+
+  test("x wraps at the antimeridian instead of going out of range", () => {
+    for (const tile of mapTiles(0, 179.99, 4)) {
+      const x = Number(tile.url.split("/").at(-2))
+      expect(x).toBeGreaterThanOrEqual(0)
+      expect(x).toBeLessThan(16)
+    }
   })
 })
 
