@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
-import { hasJournalInputs, journalInputHash } from "./Lifelog.ts"
+import { hasJournalInputs, journalInputHash } from "./Journal.ts"
 import { dayPage, journalPage } from "./Pages.tsx"
 import { DayEntry, Journal } from "./Resources.ts"
 import { withinEagerWindow } from "./Time.ts"

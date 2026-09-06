@@ -3,7 +3,7 @@
  * `lib/Html.ts` escapes every interpolated string, so journal text — which
  * is LLM output derived from untrusted transcripts — cannot inject markup.
  */
-import { raw, render, type Child } from "../lib/Html.ts"
+import { raw, render, type Child } from "../Html.ts"
 import type { Journal } from "./Resources.ts"
 import type { JournalView } from "./Views.ts"
 

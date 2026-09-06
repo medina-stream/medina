@@ -10,7 +10,11 @@
  * instance nobody pre-generated — the journal for 2525-01-01 is a valid,
  * instantly-computable (empty) resource, not a 404.
  */
-import type * as Effect from "effect/Effect"
+import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
+import * as Option from "effect/Option"
+import * as Schema from "effect/Schema"
+import * as Files from "./Files.ts"
 
 export interface SourceReport {
   readonly discovered: number
@@ -42,3 +46,27 @@ export interface Resource<R> {
   /** Lazy: dereference one instance by label, on demand. */
   readonly instance?: (label: string) => Effect.Effect<ResourceInstance<R>, Error, R>
 }
+
+/** Read an already-materialized instance without doing derivative work. */
+export const readCachedInstance = <S extends Schema.Codec<any, any>, R>(
+  schema: S,
+  instance: ResourceInstance<R>,
+  path: (key: string) => string
+) => Files.readJson(schema, path(instance.key))
+
+/** Read an instance, materializing exactly the selected basis on a miss. */
+export const readInstance = <S extends Schema.Codec<any, any>, R>(
+  schema: S,
+  instance: ResourceInstance<R>,
+  path: (key: string) => string
+): Effect.Effect<S["Type"], Error, R | FileSystem.FileSystem> =>
+  Effect.gen(function*() {
+    const existing = yield* Files.readJson(schema, path(instance.key))
+    if (Option.isSome(existing)) return existing.value
+    yield* instance.materialize
+    const written = yield* Files.readJson(schema, path(instance.key))
+    if (Option.isNone(written)) {
+      return yield* Effect.fail(new Error(`resource materializer did not write ${instance.key}`))
+    }
+    return written.value
+  })

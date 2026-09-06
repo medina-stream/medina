@@ -10,10 +10,11 @@ import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Stream from "effect/Stream"
-import * as Files from "../lib/Files.ts"
-import { AssemblyAI, type VendorTranscript } from "../lib/AssemblyAI.ts"
-import { Drive, type DriveFile } from "../lib/Drive.ts"
-import type { Source, SourceReport } from "../lib/Resource.ts"
+import * as Files from "../Files.ts"
+import { AssemblyAI, type VendorTranscript } from "../AssemblyAI.ts"
+import { Drive, type DriveFile } from "../Drive.ts"
+import type { Source } from "../Resource.ts"
+import { makeItemSource } from "../Source.ts"
 import {
   captureBlobName,
   captureDir,
@@ -28,7 +29,7 @@ import {
   TRANSCRIPT_VERSION,
   transcriptKey,
   vendorKey
-} from "./Resources.ts"
+} from "../lifelog/Resources.ts"
 
 const AUDIO_SOURCE_NAME = "audio-drive"
 
@@ -190,40 +191,26 @@ const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
 export const audioSource = (
   folderId: string,
   latest: number
-): Source<Drive | AssemblyAI | FileSystem.FileSystem> => ({
+): Source<Drive | AssemblyAI | FileSystem.FileSystem> => makeItemSource({
   name: AUDIO_SOURCE_NAME,
-  ingest: Effect.gen(function*() {
+  discover: Effect.gen(function*() {
     const drive = yield* Drive
     const files = yield* drive.list(folderId, latest)
     yield* Effect.log(`discovered ${files.length} files`)
-    const failures: Array<{ item: string; error: string }> = []
-    // Bounded concurrency; one failure doesn't stop the rest.
-    const outcomes = yield* Effect.forEach(files, (driveFile: DriveFile) => {
-      const file: RecordingObject = {
-        id: driveFile.id,
-        name: driveFile.name,
-        mimeType: driveFile.mimeType,
-        modifiedTime: driveFile.modifiedTime,
-        ...(driveFile.md5Checksum === undefined ? {} : { checksum: driveFile.md5Checksum })
-      }
-      return ingestAudioFile(AUDIO_SOURCE_NAME, file, drive.download(driveFile.id)).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logError(`ingest failed for ${file.name}`, cause).pipe(
-            Effect.tap(() => Effect.sync(() => failures.push({ item: file.name, error: String(cause).slice(0, 500) }))),
-            Effect.as("failed" as const)
-          )
-        )
-      )
-    }, { concurrency: 2 })
-    const count = (outcome: string) => outcomes.filter((entry) => entry === outcome).length
-    return {
-      discovered: files.length,
-      ingested: count("ingested"),
-      cached: count("cached"),
-      skipped: count("skipped"),
-      failures
-    } satisfies SourceReport
-  })
+    return files
+  }),
+  ingest: (driveFile: DriveFile) => {
+    const file: RecordingObject = {
+      id: driveFile.id,
+      name: driveFile.name,
+      mimeType: driveFile.mimeType,
+      modifiedTime: driveFile.modifiedTime,
+      ...(driveFile.md5Checksum === undefined ? {} : { checksum: driveFile.md5Checksum })
+    }
+    return Effect.flatMap(Drive, (drive) => ingestAudioFile(AUDIO_SOURCE_NAME, file, drive.download(driveFile.id)))
+  },
+  label: (file) => file.name,
+  concurrency: 2
 })
 
 /** Build an audio source for any object listing/downloader, including S3. */
@@ -231,27 +218,10 @@ export const recordingObjectSource = <R>(
   name: string,
   list: Effect.Effect<ReadonlyArray<RecordingObject>, Error, R>,
   download: (file: RecordingObject) => Effect.Effect<Stream.Stream<Uint8Array, Error>, Error, R>
-): Source<R | AssemblyAI | FileSystem.FileSystem> => ({
+): Source<R | AssemblyAI | FileSystem.FileSystem> => makeItemSource({
   name,
-  ingest: Effect.gen(function*() {
-    const files = yield* list
-    const failures: Array<{ item: string; error: string }> = []
-    const outcomes = yield* Effect.forEach(files, (file) =>
-      Effect.flatMap(download(file), (stream) => ingestAudioFile(name, file, Effect.succeed(stream))).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logError(`ingest failed for ${file.name}`, cause).pipe(
-            Effect.tap(() => Effect.sync(() => failures.push({ item: file.name, error: String(cause).slice(0, 500) }))),
-            Effect.as("failed" as const)
-          )
-        )
-      ), { concurrency: 2 })
-    const count = (outcome: string) => outcomes.filter((entry) => entry === outcome).length
-    return {
-      discovered: files.length,
-      ingested: count("ingested"),
-      cached: count("cached"),
-      skipped: count("skipped"),
-      failures
-    } satisfies SourceReport
-  })
+  discover: list,
+  ingest: (file) => Effect.flatMap(download(file), (stream) => ingestAudioFile(name, file, Effect.succeed(stream))),
+  label: (file) => file.name,
+  concurrency: 2
 })

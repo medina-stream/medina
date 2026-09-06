@@ -2,12 +2,19 @@
   "name": "medina",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./lib/index.ts",
+    "./capture": "./lib/capture/index.ts",
+    "./connectors": "./lib/connectors/index.ts",
+    "./lifelog": "./lib/lifelog/index.ts",
+    "./runtime": "./lib/runtime/index.ts"
+  },
   "imports": {
     "#jsx/jsx-runtime": "./lib/jsx/jsx-runtime.ts",
     "#jsx/jsx-dev-runtime": "./lib/jsx/jsx-runtime.ts"
   },
   "scripts": {
-    "build:client": "bun build ./example-lifelog/client.ts --outfile ./example-lifelog/public/app.js --target browser --minify",
+    "build:client": "bun build ./lib/lifelog/client.ts --outfile ./example-lifelog/public/app.js --target browser --minify",
     "dev": "bun run build:client && bun --watch example-lifelog/main.ts",
     "start": "bun run build:client && bun example-lifelog/main.ts",
     "typecheck": "tsc --noEmit"

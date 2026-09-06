@@ -15,13 +15,14 @@
  */
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
-import { spawn } from "node:child_process"
-import { promises as fsp } from "node:fs"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Schema from "effect/Schema"
 import { dataPath } from "./Resources.ts"
-import type { Source, SourceReport } from "../lib/Resource.ts"
+import type { Source, SourceReport } from "../Resource.ts"
+import { queryJson as duckdb, quote } from "../connectors/DuckDB.ts"
+
+export { queryJson as duckdb, quote } from "../connectors/DuckDB.ts"
 
 export const GPS_VERSION = "points-v1"
 
@@ -156,42 +157,6 @@ export const gpsInboxWrite = Effect.fn("gpsInboxWrite")(function*(points: Readon
 })
 
 // --- compaction --------------------------------------------------------------
-
-/** Run a DuckDB statement and return its `-json` output. The script goes in
- * on stdin (`.output <file>` first, `.output none` after the SQL so nothing
- * extra reaches stdout), and the result is read back from that local temp
- * file instead of crossing exec stdout -- so a large result now fails at
- * worst with ENOSPC, not execFile's MAXBUFFER, which kills the subprocess
- * and the query with it. */
-export const duckdb = (sql: string) =>
-  Effect.callback<string, Error>((resume) => {
-    const out = `${tmpdir()}/medina-duckdb-out-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
-    const child = spawn("duckdb", ["-json"], { timeout: 120_000 })
-    let settled = false
-    const done = (result: Effect.Effect<string, Error>) => {
-      if (settled) return
-      settled = true
-      void fsp.rm(out, { force: true })
-      resume(result)
-    }
-    let stderr = ""
-    child.stderr.setEncoding("utf8")
-    child.stderr.on("data", (chunk: string) => {
-      stderr = (stderr + chunk).slice(-2000)
-    })
-    child.on("error", (error) => done(Effect.fail(new Error(`duckdb failed: ${error.message}`))))
-    child.on("close", (code, signal) => {
-      if (code !== 0) return done(Effect.fail(new Error(`duckdb exited ${signal ?? code}: ${stderr}`)))
-      fsp.readFile(out, "utf8").then(
-        (text: string) => done(Effect.succeed(text)),
-        (readError: unknown) => done(Effect.fail(new Error(`duckdb output unreadable: ${String(readError)}`)))
-      )
-    })
-    child.stdin.on("error", () => {}) // dying before stdin closes is reported by "close"
-    child.stdin.end(`.output ${out}\n${sql};\n.output none\n`)
-  })
-
-export const quote = (value: string) => `'${value.replace(/'/g, "''")}'`
 
 /**
  * Merge inbox rows into their days' parquet partitions, then delete the

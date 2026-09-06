@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
-import * as Files from "../lib/Files.ts"
-import type { Source, SourceReport } from "../lib/Resource.ts"
+import * as Files from "../Files.ts"
+import { sha256 } from "../Hash.ts"
+import type { Source, SourceReport } from "../Resource.ts"
 import { dataPath } from "./Resources.ts"
 import { duckdb, haversineMeters, quote } from "./Gps.ts"
 
@@ -81,7 +81,6 @@ export class StaysBasis extends Schema.Class<StaysBasis>("StaysBasis")({
   stays: Schema.Number
 }) {}
 
-const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex")
 const radius = () => {
   const configured = Number(process.env.STAY_RADIUS_M ?? DEFAULT_STAY_RADIUS_M)
   if (!Number.isFinite(configured) || configured <= 0) throw new Error("STAY_RADIUS_M must be a positive number")

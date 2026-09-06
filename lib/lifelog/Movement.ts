@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import * as Cache from "effect/Cache"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -7,8 +6,9 @@ import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
-import * as Files from "../lib/Files.ts"
-import type { Resource } from "../lib/Resource.ts"
+import * as Files from "../Files.ts"
+import { sha256 } from "../Hash.ts"
+import { readCachedInstance, readInstance, type Resource } from "../Resource.ts"
 import { gpsDay, haversineMeters } from "./Gps.ts"
 import { readStaysBasis, staysDayBasisHash, staysOverlappingDay, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
@@ -25,7 +25,6 @@ const DAY_MS = 86_400_000
 const STAY_RADIUS_M = 200
 const GAP_MS = 3 * 60 * 60_000
 
-const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex")
 export const movementKey = (day: string, basisHash: string) => `gps/${MOVEMENT_VERSION}/${day}/${basisHash}.json`
 
 export interface MovementFix {
@@ -220,7 +219,7 @@ export const forwardGeocode = (query: string): Effect.Effect<ReadonlyArray<Forwa
     if (wait > 0) yield* Effect.sleep(`${wait} millis`)
     const response = yield* Effect.tryPromise({
       try: () => fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=${encodeURIComponent(query)}`, {
-        headers: { "user-agent": "medina-lifelog/1.0 (sco@scottraymond.net)" },
+        headers: { "user-agent": process.env.NOMINATIM_USER_AGENT?.trim() || "medina-lifelog/1.0" },
         // The public API sometimes blackholes requests instead of refusing
         // them; fail fast so one search can't stall the request path.
         signal: AbortSignal.timeout(15_000)
@@ -260,7 +259,7 @@ const reverseGeocode = (lat: number, lon: number) => Effect.gen(function*() {
   if (wait > 0) yield* Effect.sleep(`${wait} millis`)
   const response = yield* Effect.tryPromise({
     try: () => fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&lat=${roundedLat}&lon=${roundedLon}`, {
-      headers: { "user-agent": "medina-lifelog/1.0 (sco@scottraymond.net)" },
+      headers: { "user-agent": process.env.NOMINATIM_USER_AGENT?.trim() || "medina-lifelog/1.0" },
       // Same blackholing as forward search: fail fast so one lookup can't
       // stall movement materialization (this already catches to null below).
       signal: AbortSignal.timeout(15_000)
@@ -671,10 +670,7 @@ export const movementDays = Effect.gen(function*() {
 
 export const movementForDay = (day: string) => Effect.gen(function*() {
   const instance = yield* movementResource.instance!(day)
-  const existing = yield* Files.readJson(Movement, dataPath(instance.key))
-  if (Option.isSome(existing)) return existing.value
-  yield* instance.materialize
-  return Option.getOrThrow(yield* Files.readJson(Movement, dataPath(instance.key)))
+  return yield* readInstance(Movement, instance, dataPath)
 })
 
 /** Read-only dereference for the request path: return the current movement
@@ -683,5 +679,5 @@ export const movementForDay = (day: string) => Effect.gen(function*() {
  * serving a stale day costs no LLM narrative or geocoding calls. */
 export const movementCachedForDay = (day: string) => Effect.gen(function*() {
   const instance = yield* movementResource.instance!(day)
-  return yield* Files.readJson(Movement, dataPath(instance.key))
+  return yield* readCachedInstance(Movement, instance, dataPath)
 })

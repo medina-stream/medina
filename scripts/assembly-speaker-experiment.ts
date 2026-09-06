@@ -5,7 +5,7 @@ import * as Layer from "effect/Layer"
 import * as Stream from "effect/Stream"
 import * as Files from "../lib/Files.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
-import { captureDir, dataPath } from "../example-lifelog/Resources.ts"
+import { captureDir, dataPath } from "../lib/lifelog/Resources.ts"
 
 const captureId = process.argv[2]
 if (!captureId) throw new Error("usage: bun scripts/assembly-speaker-experiment.ts <capture-id>")

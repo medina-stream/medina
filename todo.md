@@ -10,7 +10,7 @@ Baseline: `bun test` 41 pass, `bun run typecheck` clean.
 
 ## Next
 
-- [ ] **Durable speaker identity** (`Resources.ts`, `Journal.ts`, UI)
+- [ ] **Durable speaker identity** (`lib/lifelog/Resources.ts`, `lib/lifelog/Journal.ts`, UI)
   Store per-capture mappings from AssemblyAI's local diarization labels to a
   person, with human confirmation outranking inference. Seed the three known
   mappings: `source-574… A = Scott`, `source-eac… A = Scott`, and
@@ -28,63 +28,62 @@ Baseline: `bun test` 41 pass, `bun run typecheck` clean.
   provider fields are wanted. The separate speaker experiment already retains
   one complete response under `experiments/` in the local data dir.
 
-- [x] **Request-path LLM spend** (`Journal.ts`, `Movement.ts`, `main.ts`)
+- [x] **Request-path LLM spend** (`lib/lifelog/Journal.ts`, `lib/lifelog/Movement.ts`, `example-lifelog/main.ts`)
   Done: `GET /journal/:day` and `GET /movement/:day` serve via read-only
   `journalCachedForDay` / `movementCachedForDay` and return a 202
   "writing…" placeholder on a stale/missing day; the hourly pass remains the
   sole materializer.
-- [ ] **Clock, not wall time** (25 sites: `Pipeline.ts`, `Attribution.ts`,
-  `Audio.ts`, `DayIndex.ts`, `Gps.ts`, `HttpIngest.ts`, `Journal.ts`,
-  `Movement.ts`, `Notes.ts`, `Stays.ts`, `lib/Files.ts`)
+- [ ] **Clock, not wall time** (25 sites across `lib/Pipeline.ts`,
+  `lib/capture/`, `lib/lifelog/`, and `lib/Files.ts`)
   Replace `new Date().toISOString()` with a `nowIso` helper over
   `DateTime.now`, and the geocode rate-limiter's `Date.now()` with
   `Clock.currentTimeMillis` (it breaks under a test clock).
-- [ ] **Typed HTTP errors, not `orDie`** (`main.ts` ×10, `Journal.ts` ×9)
+- [ ] **Typed HTTP errors, not `orDie`** (`example-lifelog/main.ts` ×10,
+  `lib/lifelog/Journal.ts` ×9)
   `orDie` in handlers turns materialization failures into fiber aborts; let
   them propagate so the server returns proper 500/503s and the error type
   stays visible in signatures.
-- [ ] **Kill the hand-rolled memos** (`Movement.ts`, `DayIndex.ts`)
+- [ ] **Kill the hand-rolled memos** (`lib/lifelog/Movement.ts`, `lib/lifelog/DayIndex.ts`)
   `movementDaysMemo` (plain `let`, concurrent misses both scan parquet),
   `dayIndexMemo` (manual guard around `Effect.cached` can race), and
   `lastGeocodeAt` (rate-limit state). Use `Cache.make` keyed on basis
   hash+zone, and a `Semaphore` or `Schedule.spaced` for the 1 req/s geocode
   limit.
-- [ ] **Scoped temp dirs** (`Stays.ts`, `Gps.ts`)
+- [ ] **Scoped temp dirs** (`lib/lifelog/Stays.ts`, `lib/lifelog/Gps.ts`)
   `makeTempDirectoryScoped` in an `Effect.scoped` block instead of
   `${tmpdir()}/medina-…` + manual `remove`. Fixes the `materializeStays`
   `work/` leak when DuckDB fails mid-run. (`Audio.ts` already streams to a
   same-filesystem temp + renames; `Files.writeJson` tmpfiles are fine.)
-- [ ] **Structured child processes** (`Gps.ts` `duckdb()`, `Tailscale.ts`
+- [ ] **Structured child processes** (`lib/connectors/DuckDB.ts`, `lib/Tailscale.ts`
   `whois()`)
   Rewrite the raw `spawn`/`execFile`-in-`Effect.callback` helpers with
   `ChildProcess` + `ChildProcessSpawner` as `Git.ts` already does. Keeps the
   duckdb temp-file-output trick; lifecycle/stdin/exit handling becomes
   scoped and cancellable.
 - [ ] **One `sha256`, one config path**
-  `createHash` is copy-pasted in `Hash.ts`, `Movement.ts`, `Stays.ts`,
-  `Gps.ts` — consolidate on `Hash.ts` (keep `node:crypto` there: the
-  `Crypto` service can't stream, and audio ingest needs incremental
-  `.update()`). Move the last `process.env` reads into `Config` (`DATA_DIR`,
-  `CLUSTER_DB`, `PORT`, and `STAY_RADIUS_M` — currently read in *two*
-  places, `Stays.ts` and `Movement.ts`); `DATA_DIR` wants a small
-  `Context.Service` since `dataPath()` is called from pure functions.
-- [x] **Empty journals from lazy derefs** (`Journal.ts`)
+  `Movement.ts` and `Stays.ts` now use `lib/Hash.ts`; `Gps.ts` and audio
+  capture legitimately need incremental hashing, so keep `node:crypto`
+  there. Move the remaining `process.env` reads behind config services.
+  `ArtifactStore` now owns safe key-to-path resolution, but lifelog modules
+  still use compatibility `dataPath()` calls while they migrate to the
+  service.
+- [x] **Empty journals from lazy derefs** (`lib/lifelog/Journal.ts`)
   Done: `journalResource.instance` fails with `no inputs for <day>` when a
   day has no transcripts, movement, or note; `journalForDay` /
   `journalCachedForDay` answer those days with a transient empty journal and
   never touch the filesystem. Pinned by `hasJournalInputs` truth-table tests
-  in `Lifelog.test.ts`.
+  in `lib/lifelog/Lifelog.test.ts`.
 - [ ] **Small readability pass**
   Declarative `HttpRouter.addAll` + `route` instead of imperative
-  `router.add` (×8 in `main.ts`); functional accumulation in `Pipeline.ts`
+  `router.add` in `example-lifelog/main.ts`; functional accumulation in `Pipeline.ts`
   instead of `Effect.sync(() => …push…)`; rename `batches()`' shadowed inner
   `entry`, and stop it splitting UTF-16 surrogate pairs at chunk boundaries;
-  memoize `locationSummary` (`Gps.ts`), which spawns 1–2 DuckDB subprocesses
+  memoize `locationSummary` (`lib/lifelog/Gps.ts`), which spawns 1–2 DuckDB subprocesses
   per `/location` request.
 
 ## Later (fine at months-of-data scale)
 
-- [ ] **`staysSource` re-hashes the corpus hourly** (`Stays.ts`) — every
+- [ ] **`staysSource` re-hashes the corpus hourly** (`lib/lifelog/Stays.ts`) — every
   points parquet, every pass, plus `pointPartitions` running twice per
   materialization.
 - [ ] **`detectStays` is O(n²)** (`Stays.ts`) — median re-sorted per point;
@@ -106,7 +105,7 @@ Baseline: `bun test` 41 pass, `bun run typecheck` clean.
 - Drive mint token cached (`cachedWithTTL`, 50 min); audio ingest streams to
   disk while hashing; AssemblyAI upload/submit retry transport/5xx (1s ×3).
   Each covered by a colocated test (`lib/Drive.test.ts`,
-  `example-lifelog/Audio.test.ts`, `lib/AssemblyAI.test.ts`); tests pin
+  `lib/capture/Audio.test.ts`, `lib/AssemblyAI.test.ts`); tests pin
   config via `ConfigProvider.fromEnv({ env })` since `process.env` mutation
   leaks across files in one Bun process.
 - Earlier: day-index memo races, notes-source scoping (4534 files → 90-day

@@ -18,6 +18,27 @@ see `Medina Themes.md` in the notes repo for background.
 - DuckDB
 - Any writable filesystem locally; Archil is an optional cloud deployment choice
 
+## Architecture
+
+The repository deliberately separates the reusable Medina library from one
+personal application:
+
+- `lib/` contains the context-lake framework, connectors, reusable capture
+  ingestion, lifelog derivatives, runtime support, and common web UI.
+- `example-lifelog/` chooses concrete source locations and personal policy,
+  then wires those library capabilities into an application.
+
+The public entry points are `medina`, `medina/connectors`, `medina/capture`,
+`medina/lifelog`, and `medina/runtime`. The lifelog package includes normalized transcripts,
+correctable attribution, day indexing, GPS/places/movement, durable daily
+synthesis, typed RPC contracts, and the journal UI. Applications should
+configure these capabilities rather than copy their implementations.
+
+Artifact keys remain relative and content/basis addressed. `ArtifactStore`
+owns safe key-to-filesystem resolution, and `Resource` provides common cached
+and materializing reads. Existing artifact layouts remain compatible across
+the library/application split.
+
 ## Local development
 
 Medina does not require Archil locally. `DATA_DIR` is an ordinary writable
@@ -46,6 +67,9 @@ CLUSTER_DB=data/cluster.db
 MEDINA_SOURCES=notes
 NOTES_REPO_URL=git@github.com:you/notes.git
 NOTES_REPO_REF=main
+HOME_TZ=UTC
+LIFELOG_EPOCH_DAY=1900-01-01
+LIFELOG_MAIN_CHANNEL=main
 ```
 
 Both local data paths are ignored by Git. Medina clones `NOTES_REPO_URL` into

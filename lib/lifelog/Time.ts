@@ -5,7 +5,7 @@ import * as Option from "effect/Option"
 
 /** The zone used to interpret zone-less evidence and request labels. A
  * capture's own believed IANA zone always takes precedence. */
-export const homeTimeZone = Config.string("HOME_TZ").pipe(Config.withDefault("America/Chicago"))
+export const homeTimeZone = Config.string("HOME_TZ").pipe(Config.withDefault("UTC"))
 
 /**
  * A development window: when set, only the last N days are enumerated

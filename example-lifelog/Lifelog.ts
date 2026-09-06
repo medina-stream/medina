@@ -3,21 +3,14 @@
  * it, and everything served is derived from the result. Each stage lives in
  * its own module; this re-exports them as the application's surface.
  *
- * - `Audio` / `Notes` / `HttpIngest` — sources. They record what they saw
- *   and interpret nothing.
- * - `Attribution` — the believed time, zone, channel, and day of a capture,
- *   correctable via `correction/<captureId>.json`.
- * - `DayIndex` — the one derived view over all attributions, so serving
- *   never scans the corpus.
- * - `Journal` — a day's journal, written by the LLM from that day's
- *   transcripts, note, and movement.
- * - `Views` — what the HTTP layer reads.
+ * The implementations are Medina library capabilities. This compatibility
+ * surface adds only Scott's notes-repository policy.
  */
-export { audioSource, recordingObjectSource } from "./Audio.ts"
+export { audioSource, recordingObjectSource } from "../lib/capture/index.ts"
 export { notesSource, noteForDay, NOTE_RECHECK_DAYS, NOTE_WINDOW_DAYS } from "./Notes.ts"
-export { httpIngest } from "./HttpIngest.ts"
-export { attributionResource, currentAttribution, readCorrections, transcribedCaptures } from "./Attribution.ts"
-export { currentDayIndex, dayIndexResource, dayTranscripts } from "./DayIndex.ts"
+export { httpIngest } from "../lib/capture/index.ts"
+export { attributionResource, currentAttribution, readCorrections, transcribedCaptures } from "../lib/lifelog/Attribution.ts"
+export { currentDayIndex, dayIndexResource, dayTranscripts } from "../lib/lifelog/DayIndex.ts"
 export {
   hasJournalInputs,
   journalCachedForDay,
@@ -30,6 +23,6 @@ export {
   notesResource,
   NotesWorkflowLayer,
   todayDay
-} from "./Journal.ts"
-export { currentJournals, pipelineStatus, type JournalView } from "./Views.ts"
-export { homeTimeZone } from "./Time.ts"
+} from "../lib/lifelog/Journal.ts"
+export { currentJournals, pipelineStatus, type JournalView } from "../lib/lifelog/Views.ts"
+export { homeTimeZone } from "../lib/lifelog/Time.ts"

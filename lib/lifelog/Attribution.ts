@@ -11,9 +11,9 @@ import * as DateTime from "effect/DateTime"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
-import * as Files from "../lib/Files.ts"
-import type { Resource } from "../lib/Resource.ts"
-import { sha256 } from "./Hash.ts"
+import * as Files from "../Files.ts"
+import type { Resource } from "../Resource.ts"
+import { sha256 } from "../Hash.ts"
 import { homeTimeZone } from "./Time.ts"
 import {
   Attribution,

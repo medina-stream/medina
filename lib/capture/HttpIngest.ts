@@ -4,9 +4,9 @@
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
-import * as Files from "../lib/Files.ts"
-import { sha256 } from "./Hash.ts"
-import { captureBlobName, captureDir, dataPath, Provenance, provenanceKey } from "./Resources.ts"
+import * as Files from "../Files.ts"
+import { sha256 } from "../Hash.ts"
+import { captureBlobName, captureDir, dataPath, Provenance, provenanceKey } from "../lifelog/Resources.ts"
 
 /**
  * Ingest one HTTP-posted body (e.g. a GPS app posting location batches) as a

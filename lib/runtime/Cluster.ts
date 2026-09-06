@@ -25,7 +25,7 @@ import * as SingleRunner from "effect/unstable/cluster/SingleRunner"
 import * as ClusterWorkflowEngine from "effect/unstable/cluster/ClusterWorkflowEngine"
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient"
 import * as PgClient from "@effect/sql-pg/PgClient"
-import * as ExeWirePg from "../lib/ExeWirePg.ts"
+import * as ExeWirePg from "../ExeWirePg.ts"
 import { dirname } from "node:path"
 
 /**

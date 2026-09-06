@@ -17,12 +17,12 @@ import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import * as Workflow from "effect/unstable/workflow/Workflow"
 import { WorkflowEngine } from "effect/unstable/workflow/WorkflowEngine"
 import * as Activity from "effect/unstable/workflow/Activity"
-import * as Files from "../lib/Files.ts"
-import type { Resource } from "../lib/Resource.ts"
-import { sha256 } from "./Hash.ts"
+import * as Files from "../Files.ts"
+import type { Resource } from "../Resource.ts"
+import { sha256 } from "../Hash.ts"
 import * as DayEvents from "./DayEvents.ts"
 import { currentDayIndex, dayTranscripts } from "./DayIndex.ts"
-import { noteForDay } from "./Notes.ts"
+import { noteForDay } from "./DailyNotes.ts"
 import { eagerSinceDay, withinEagerWindow } from "./Time.ts"
 import { movementDays, movementDayBasisHashes, movementForDay, movementKey, movementReadForDay, renderMovementTimeline } from "./Movement.ts"
 import { dataPath, DayEntry, DayIndex, Journal, JOURNAL_VERSION, journalKey, NotesLlm, NOTES_LLM_VERSION, notesLlmKey, NOTE_VERSION, noteKey, Transcript } from "./Resources.ts"
@@ -395,7 +395,7 @@ export const journalResource: Resource<JournalEnv> = {
 /** No captures can exist before this day (nothing to lifelog pre-birth) or
  * after today; those journals get a hard-coded empty response and are never
  * persisted, so lazy derefs can't fill the data dir with noise. */
-const EPOCH_DAY = "1979-01-01"
+const EPOCH_DAY = process.env.LIFELOG_EPOCH_DAY?.trim() || "1900-01-01"
 
 /** Today as a capture day, from the ambient Clock (not the wall). */
 export const todayDay = Effect.map(DateTime.now, DateTime.formatIsoDate)

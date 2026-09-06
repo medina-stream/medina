@@ -7,13 +7,13 @@
  * the data dir are reused as-is instead of re-processing audio.
  */
 import * as Schema from "effect/Schema"
-import { join } from "node:path"
+import { artifactPath } from "../ArtifactStore.ts"
 
 /** Where the data lives: a plain directory (local disk, or a mounted
  * filesystem such as an Archil disk). Keys below are paths relative to it. */
 export const DATA_DIR = process.env.DATA_DIR ?? "data/artifacts"
 
-export const dataPath = (key: string) => join(DATA_DIR, key)
+export const dataPath = (key: string) => artifactPath(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
 // v9: journal derivation consumes notes-v2's diarized evidence. v8 established
@@ -29,7 +29,7 @@ export const DAY_INDEX_VERSION = "days-v1"
 
 /** The main body-recorder channel. Channels separate simultaneous audio
  * perspectives within the stream (e.g. a future headphone-audio channel). */
-export const CHANNEL_MAIN = "lifelog-audio-1"
+export const CHANNEL_MAIN = process.env.LIFELOG_MAIN_CHANNEL?.trim() || "main"
 
 export const noteKey = (day: string) => `note/${NOTE_VERSION}/${day}.json`
 
