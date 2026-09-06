@@ -89,14 +89,11 @@ export const composeMovement = (stays: ReadonlyArray<StayRow>, input: ReadonlyAr
   return result
 }
 
-export class Place extends Schema.Class<Place>("Place")({
-  id: Schema.String,
-  name: Schema.String,
-  lat: Schema.Number,
-  lon: Schema.Number,
-  radiusMeters: Schema.Number
-}) {}
-export const Places = Schema.Array(Place)
+// Place shapes live in `Places.ts` so the browser can import them without
+// this module's DuckDB and filesystem dependencies. Re-exported here because
+// server callers have always found them at this path.
+import { GeocodeResult, Place, PlaceCandidate, Places } from "./Places.ts"
+export { GeocodeResult, Place, PlaceCandidate, Places } from "./Places.ts"
 
 class StaySegment extends Schema.Class<StaySegment>("MovementStay")({
   kind: Schema.Literal("stay"), startTime: Schema.String, endTime: Schema.String,
@@ -190,10 +187,7 @@ const shortGeocodeName = (response: any): string | null => {
   return display || null
 }
 
-class ForwardResult extends Schema.Class<ForwardResult>("ForwardResult")({
-  name: Schema.String, lat: Schema.Number, lon: Schema.Number
-}) {}
-const ForwardResults = Schema.Array(ForwardResult)
+const GeocodeResults = Schema.Array(GeocodeResult)
 
 let lastFwdGeocodeAt = 0
 
@@ -201,18 +195,18 @@ let lastFwdGeocodeAt = 0
  * discipline and write-once disk cache as reverse geocoding, so the places
  * UI can refine pins without leaning on the public API every keystroke.
  * Never fails — no matches is an empty list. */
-export const forwardGeocode = (query: string): Effect.Effect<ReadonlyArray<ForwardResult>, never, FileSystem.FileSystem> =>
+export const forwardGeocode = (query: string): Effect.Effect<ReadonlyArray<GeocodeResult>, never, FileSystem.FileSystem> =>
   Effect.gen(function*() {
     const key = `gps/geocode-fwd-v1/${sha256(query.trim().toLowerCase())}.json`
     const path = dataPath(key)
     const fs = yield* FileSystem.FileSystem
     if (yield* fs.exists(path)) {
       try {
-        return yield* Schema.decodeUnknownEffect(ForwardResults)(JSON.parse(yield* fs.readFileString(path))).pipe(
-          Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<ForwardResult>))
+        return yield* Schema.decodeUnknownEffect(GeocodeResults)(JSON.parse(yield* fs.readFileString(path))).pipe(
+          Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<GeocodeResult>))
         )
       } catch {
-        return [] as ReadonlyArray<ForwardResult>
+        return [] as ReadonlyArray<GeocodeResult>
       }
     }
     const wait = Math.max(0, 1000 - (Date.now() - lastFwdGeocodeAt))
@@ -227,24 +221,24 @@ export const forwardGeocode = (query: string): Effect.Effect<ReadonlyArray<Forwa
       catch: () => new Error("geocode request failed")
     }).pipe(Effect.catchCause(() => Effect.succeed(null)))
     lastFwdGeocodeAt = Date.now()
-    if (!response || !response.ok) return [] as ReadonlyArray<ForwardResult>
+    if (!response || !response.ok) return [] as ReadonlyArray<GeocodeResult>
     const json = yield* Effect.tryPromise({
       try: () => response.json(),
       catch: () => new Error("geocode parse failed")
     }).pipe(Effect.catchCause(() => Effect.succeed([] as Array<unknown>)))
-    const results = (Array.isArray(json) ? json : []).flatMap((entry): Array<ForwardResult> => {
+    const results = (Array.isArray(json) ? json : []).flatMap((entry): Array<GeocodeResult> => {
       if (typeof entry !== "object" || entry === null) return []
       const record = entry as Record<string, unknown>
       const lat = Number(record.lat)
       const lon = Number(record.lon)
       if (typeof record.display_name !== "string" || !Number.isFinite(lat) || !Number.isFinite(lon)) return []
-      return [new ForwardResult({ name: record.display_name, lat, lon })]
+      return [new GeocodeResult({ name: record.display_name, lat, lon })]
     }).slice(0, 5)
-    yield* Files.writeJson(path, Schema.encodeSync(ForwardResults)([...results])).pipe(
+    yield* Files.writeJson(path, Schema.encodeSync(GeocodeResults)([...results])).pipe(
       Effect.catchCause(() => Effect.void)
     )
     return results
-  }).pipe(Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<ForwardResult>)))
+  }).pipe(Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<GeocodeResult>)))
 
 const reverseGeocode = (lat: number, lon: number) => Effect.gen(function*() {
   const roundedLat = lat.toFixed(4)
@@ -311,14 +305,6 @@ export const listPlaces = Effect.map(readPlaces, ({ places }) => places)
 export const replacePlaces = (places: ReadonlyArray<Place>) =>
   Files.writeJson(dataPath(PLACES_KEY), Schema.encodeSync(Places)([...places]))
 
-/** One unnamed stay cluster worth naming, aggregated across days. */
-export interface PlaceCandidate {
-  readonly lat: number
-  readonly lon: number
-  readonly geocodedName: string | null
-  readonly dwellMinutes: number
-  readonly days: ReadonlyArray<string>
-}
 
 /** Merge raw suggestions across days: nearby clusters fold into one
  * dwell-weighted centroid (the same math materialization uses within a day).

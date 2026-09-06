@@ -139,7 +139,11 @@ export const runPipeline = <R>(
       yield* publishEvent({
         type: "source",
         name: source.name,
-        status,
+        // Progress vocabulary, not health: the event says this source's read
+        // finished, which `healthy` and `empty` both are. The health
+        // distinction is preserved in `sourceReports` above, which is what
+        // `/status` reports.
+        status: status === "failing" ? "failing" : status === "degraded" ? "degraded" : "complete",
         message: `${source.name}: ${report.ingested} new, ${report.cached} cached, ${report.discovered} found`
       })
     }

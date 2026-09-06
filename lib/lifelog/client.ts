@@ -15,22 +15,28 @@
  * dynamic string goes through `escapeHtml` before it touches the DOM.
  */
 import "./browser-prelude.ts"
+import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import * as Fiber from "effect/Fiber"
 import * as Layer from "effect/Layer"
+import * as Schedule from "effect/Schedule"
+import * as Stream from "effect/Stream"
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient"
 import * as RpcClient from "effect/unstable/rpc/RpcClient"
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
+import { RuntimeEvent } from "../RuntimeEvents.ts"
 import { JournalsGroup } from "./JournalApi.ts"
+import { Place } from "./Places.ts"
 import { MAP_H, MAP_W, MAP_ZOOM, nudgeLatLon, staticMapUrl } from "./Maps.ts"
-import type { DayRow } from "./JournalApi.ts"
+import type { DayRow, PipelineStatus, SourceStatus, StageStatus } from "./JournalApi.ts"
 import type { ApiError } from "./JournalApi.ts"
+import type { PlaceCandidate } from "./Places.ts"
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError"
 import type { Journal } from "./Resources.ts"
 
 const RpcLive = RpcClient.layerProtocolHttp({ url: "/rpc" }).pipe(
   Layer.provide(FetchHttpClient.layer),
-  Layer.provide(RpcSerialization.layerJson)
+  Layer.provide(RpcSerialization.layerNdjson)
 )
 
 /** Fixed row pitch in px; must match `.vrow` in Pages.tsx. */
@@ -66,80 +72,6 @@ const renderDay = (day: string, journal: Journal | null) =>
 
 const mount = document.getElementById("app")!
 
-interface StatusSource {
-  name: string
-  status: "disabled" | "healthy" | "empty" | "degraded" | "failing"
-  message: string | null
-  discovered: number
-  ingested: number
-  cached: number
-  skipped: number
-}
-
-interface MedinaStatus {
-  pipeline: { running: boolean; lastFinishedAt: string | null; nextRunAt: string | null }
-  lastRun: null | {
-    sources: Array<StatusSource>
-    stages: Array<StatusSource>
-    failures: Array<{ stage: string; item: string; error: string }>
-  }
-  totals: { current: number; stale: number }
-}
-
-const refreshStatus = async () => {
-  const root = document.getElementById("pipeline-status")
-  const summary = document.getElementById("status-summary")
-  const details = document.getElementById("status-details")
-  if (!root || !summary || !details) return
-  try {
-    const response = await fetch("/status")
-    if (!response.ok) throw new Error(`status ${response.status}`)
-    const status = await response.json() as MedinaStatus
-    const sources = status.lastRun?.sources ?? []
-    const stages = status.lastRun?.stages ?? []
-    const observed = [...sources, ...stages]
-    const failures = observed.filter((source) => source.status === "failing")
-    const degraded = observed.filter((source) => source.status === "degraded")
-    const disabled = sources.filter((source) => source.status === "disabled")
-    const tone = failures.length > 0 || status.lastRun === null
-      ? "bad"
-      : degraded.length > 0 || disabled.length > 0 || status.totals.stale > 0
-        ? "warn"
-        : "good"
-    root.className = `status ${tone}`
-    summary.textContent = status.pipeline.running
-      ? "Updating data…"
-      : status.lastRun === null
-        ? "No pipeline run yet"
-        : failures.length > 0
-          ? `${failures.length} source${failures.length === 1 ? "" : "s"} failing`
-          : degraded.length > 0
-            ? "Data flow degraded"
-            : disabled.length > 0
-              ? `${disabled.length} source${disabled.length === 1 ? "" : "s"} disabled`
-              : status.totals.stale > 0
-                ? `${status.totals.stale} day${status.totals.stale === 1 ? "" : "s"} pending`
-                : "Data flowing"
-    const renderRows = (entries: Array<StatusSource>) => entries.map((source) => {
-      const counts = source.status === "disabled"
-        ? ""
-        : ` — ${source.ingested} new, ${source.cached} cached, ${source.discovered} found`
-      const message = source.message ? `: ${source.message}` : ""
-      return `<li><strong>${escapeHtml(source.name)}</strong>: ${escapeHtml(source.status)}${escapeHtml(counts + message)}</li>`
-    }).join("")
-    const finished = status.pipeline.lastFinishedAt
-      ? `<p>Last pass: ${escapeHtml(new Date(status.pipeline.lastFinishedAt).toLocaleString())}</p>`
-      : `<p>No completed pass.</p>`
-    details.innerHTML = finished +
-      `<strong>Sources</strong><ul>${renderRows(sources) || "<li>No sources configured.</li>"}</ul>` +
-      `<strong>Processing</strong><ul>${renderRows(stages) || "<li>No processing stages.</li>"}</ul>`
-  } catch (error) {
-    root.className = "status bad"
-    summary.textContent = "Status unavailable"
-    details.textContent = failureMessage(error)
-  }
-}
-
 const failureMessage = (error: unknown): string => {
   if (error instanceof Error) return error.message
   if (typeof error === "object" && error !== null && "message" in error) return String(error.message)
@@ -156,6 +88,73 @@ const isRpcFailure = (error: unknown): error is ApiError | RpcClientError => tru
 
 const program = Effect.gen(function*() {
   const client = yield* RpcClient.make(JournalsGroup)
+
+  // --- pipeline status --------------------------------------------------
+  // Sources and stages are rendered from their own types: only a source can
+  // be `disabled`, which is why the counts line is suppressed for exactly
+  // that case and no other.
+  const renderStatusRows = (entries: ReadonlyArray<SourceStatus | StageStatus>) =>
+    entries.map((entry) => {
+      const counts = entry.status === "disabled"
+        ? ""
+        : ` \u2014 ${entry.ingested} new, ${entry.cached} cached, ${entry.discovered} found`
+      const message = entry.message ? `: ${entry.message}` : ""
+      return `<li><strong>${escapeHtml(entry.name)}</strong>: ${escapeHtml(entry.status)}${
+        escapeHtml(counts + message)
+      }</li>`
+    }).join("")
+
+  const paintStatus = (status: PipelineStatus) => {
+    const root = document.getElementById("pipeline-status")
+    const summary = document.getElementById("status-summary")
+    const details = document.getElementById("status-details")
+    if (!root || !summary || !details) return
+    const sources = status.lastRun?.sources ?? []
+    const stages = status.lastRun?.stages ?? []
+    const observed: ReadonlyArray<SourceStatus | StageStatus> = [...sources, ...stages]
+    const failing = observed.filter((entry) => entry.status === "failing")
+    const degraded = observed.filter((entry) => entry.status === "degraded")
+    const disabled = sources.filter((source) => source.status === "disabled")
+    root.className = `status ${
+      failing.length > 0 || status.lastRun === null
+        ? "bad"
+        : degraded.length > 0 || disabled.length > 0 || status.totals.stale > 0
+        ? "warn"
+        : "good"
+    }`
+    summary.textContent = status.pipeline.running
+      ? "Updating data\u2026"
+      : status.lastRun === null
+      ? "No pipeline run yet"
+      : failing.length > 0
+      ? `${failing.length} source${failing.length === 1 ? "" : "s"} failing`
+      : degraded.length > 0
+      ? "Data flow degraded"
+      : disabled.length > 0
+      ? `${disabled.length} source${disabled.length === 1 ? "" : "s"} disabled`
+      : status.totals.stale > 0
+      ? `${status.totals.stale} day${status.totals.stale === 1 ? "" : "s"} pending`
+      : "Data flowing"
+    const finished = status.pipeline.lastFinishedAt
+      ? `<p>Last pass: ${escapeHtml(new Date(status.pipeline.lastFinishedAt).toLocaleString())}</p>`
+      : `<p>No completed pass.</p>`
+    details.innerHTML = finished +
+      `<strong>Sources</strong><ul>${renderStatusRows(sources) || "<li>No sources configured.</li>"}</ul>` +
+      `<strong>Processing</strong><ul>${renderStatusRows(stages) || "<li>No processing stages.</li>"}</ul>`
+  }
+
+  const refreshStatus = Effect.matchCause(client.GetStatus({}), {
+    onSuccess: paintStatus,
+    onFailure: (cause) => {
+      const root = document.getElementById("pipeline-status")
+      const summary = document.getElementById("status-summary")
+      const details = document.getElementById("status-details")
+      if (!root || !summary || !details) return
+      root.className = "status bad"
+      summary.textContent = "Status unavailable"
+      details.textContent = failureMessage(Cause.squash(cause))
+    }
+  })
 
   // --- virtual days table -----------------------------------------------
   // `rows` grows in ListDays pages appended near the bottom, so the table
@@ -178,44 +177,47 @@ const program = Effect.gen(function*() {
   }
 
   // --- places ---------------------------------------------------------
-  // User-owned place list plus naming candidates, over the REST endpoints.
-  // Edits keep a working copy in `placeState`; every mutation PUTs the whole
-  // list (the server replaces it outright) and repaints from local state —
-  // no re-fetch, so saves stay instant even though candidates are expensive
-  // to compute. The next visit re-fetches and reconverges coverage.
-  interface PlaceRow { id: string; name: string; lat: number; lon: number; radiusMeters: number }
-  interface PlaceCandidateRow { lat: number; lon: number; geocodedName: string | null; dwellMinutes: number; days: Array<string> }
-
-  let placeState: Array<PlaceRow> = []
-  let candidateState: Array<PlaceCandidateRow> = []
+  // User-owned place list plus naming candidates, over the typed RPC.
+  // Edits keep a working copy in `placeState`; every mutation saves the
+  // whole list (the server replaces it outright) and repaints from local
+  // state -- no re-fetch, so saves stay instant even though candidates are
+  // expensive to compute. The next visit re-fetches and reconverges
+  // coverage.
+  //
+  // `Place` and `PlaceCandidate` are the server's own schemas: the shapes
+  // are not restated here, so a field change is a build error.
+  let placeState: Array<Place> = []
+  let candidateState: Array<PlaceCandidate> = []
 
   const placeIdFor = (name: string) =>
     `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "place"}-${Math.random().toString(36).slice(2, 8)}`
 
-  const getJson = async (url: string): Promise<any> => {
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`${url}: ${response.status}`)
-    return response.json()
-  }
-
-  const putPlaces = async (places: Array<PlaceRow>): Promise<void> => {
-    const response = await fetch("/places", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(places)
+  /**
+   * Save the whole place list. Refusals (not the owner, or no owner
+   * configured) arrive as a typed `ApiError`, so the reason reaches the
+   * user instead of a bare status code.
+   */
+  const savePlaces = (places: ReadonlyArray<Place>) =>
+    Effect.matchCause(client.SavePlaces({ places }), {
+      onSuccess: () => null,
+      onFailure: (cause) => failureMessage(Cause.squash(cause))
     })
-    if (!response.ok) throw new Error(`save failed (${response.status}): ${await response.text()}`)
-  }
 
   const numField = (value: string): number | null => {
     const parsed = Number(value)
     return value.trim() !== "" && Number.isFinite(parsed) ? parsed : null
   }
 
-  /** Current input values as a place list, or an error to show. */
-  const collectPlaceInputs = (): { places: Array<PlaceRow> } | { error: string } => {
-    const places: Array<PlaceRow> = []
-    for (const row of Array.from(document.querySelectorAll("#place-list .prow"))) {
+  /**
+   * Current input values as a place list, or an error to show.
+   *
+   * Selects `[data-id]`, not every `.prow`: `mapBlock` reuses that class for
+   * its address-search line, so a bare `.prow` sweep also picks up those
+   * field-less rows and reports every save as "every place needs a name".
+   */
+  const collectPlaceInputs = (): { places: Array<Place> } | { error: string } => {
+    const places: Array<Place> = []
+    for (const row of Array.from(document.querySelectorAll("#place-list .prow[data-id]"))) {
       const id = row.getAttribute("data-id") ?? ""
       const value = (field: string) =>
         (row.querySelector(`input[data-field="${field}"]`) as HTMLInputElement | null)?.value ?? ""
@@ -227,7 +229,7 @@ const program = Effect.gen(function*() {
       if (lat === null || lon === null || radiusMeters === null) {
         return { error: `“${name}” needs numeric latitude, longitude, and radius` }
       }
-      places.push({ id, name, lat, lon, radiusMeters })
+      places.push(new Place({ id, name, lat, lon, radiusMeters }))
     }
     return { places }
   }
@@ -283,34 +285,31 @@ const program = Effect.gen(function*() {
         const q = (document.getElementById(`${prefix}-addr`) as HTMLInputElement | null)?.value.trim() ?? ""
         if (!q || !box) return
         box.innerHTML = `<p class="empty">Searching…</p>`
-        void (async () => {
-          try {
-            const data = await getJson(`/places/geocode?q=${encodeURIComponent(q)}`)
-            const results: Array<any> = Array.isArray(data.results) ? data.results : []
+        Effect.runFork(Effect.matchCause(client.SearchAddress({ query: q }), {
+          onSuccess: (results) => {
             if (results.length === 0) {
               box.innerHTML = `<p class="empty">No matches.</p>`
               return
             }
             box.innerHTML = results.map((result, index) =>
-              `<p><button type="button" data-pick="${prefix}:${index}">${escapeHtml(String(result.name ?? "match"))}</button></p>`
+              `<p><button type="button" data-pick="${prefix}:${index}">${escapeHtml(result.name)}</button></p>`
             ).join("")
             for (const pickEl of Array.from(box.querySelectorAll("button[data-pick]"))) {
               const pick = pickEl as HTMLButtonElement
               pick.addEventListener("click", () => {
                 const chosen = results[Number((pick.getAttribute("data-pick") ?? ":").split(":")[1] ?? "-1")]
-                const lat = Number(chosen?.lat)
-                const lon = Number(chosen?.lon)
-                if (!chosen || !Number.isFinite(lat) || !Number.isFinite(lon)) return
-                ;(document.getElementById(`${prefix}-lat`) as HTMLInputElement | null)!.value = String(lat)
-                ;(document.getElementById(`${prefix}-lon`) as HTMLInputElement | null)!.value = String(lon)
+                if (!chosen) return
+                ;(document.getElementById(`${prefix}-lat`) as HTMLInputElement | null)!.value = String(chosen.lat)
+                ;(document.getElementById(`${prefix}-lon`) as HTMLInputElement | null)!.value = String(chosen.lon)
                 box.innerHTML = ""
                 refreshMap(prefix)
               })
             }
-          } catch (error) {
-            box.innerHTML = `<p class="empty">${escapeHtml(failureMessage(error))}</p>`
+          },
+          onFailure: (cause) => {
+            box.innerHTML = `<p class="empty">${escapeHtml(failureMessage(Cause.squash(cause)))}</p>`
           }
-        })()
+        }))
       })
     }
   }
@@ -351,35 +350,34 @@ const program = Effect.gen(function*() {
       `<p><button type="button" id="places-save">Save all</button> <span id="place-status">${escapeHtml(status)}</span></p>` +
       `<h2>Suggested</h2><div id="cand-list">${candRows}</div>`
     document.getElementById("places-save")!.addEventListener("click", () => {
-      void (async () => {
-        const collected = collectPlaceInputs()
-        if ("error" in collected) {
-          document.getElementById("place-status")!.textContent = collected.error
+      const collected = collectPlaceInputs()
+      if ("error" in collected) {
+        document.getElementById("place-status")!.textContent = collected.error
+        return
+      }
+      Effect.runFork(Effect.map(savePlaces(collected.places), (error) => {
+        if (error) {
+          document.getElementById("place-status")!.textContent = error
           return
         }
-        try {
-          await putPlaces(collected.places)
-          placeState = collected.places
-          paintPlaces(`Saved ${collected.places.length} places.`)
-        } catch (error) {
-          document.getElementById("place-status")!.textContent = failureMessage(error)
-        }
-      })()
+        placeState = collected.places
+        paintPlaces(`Saved ${collected.places.length} places.`)
+      }))
     })
     for (const button of Array.from(document.querySelectorAll("button[data-delete]"))) {
       button.addEventListener("click", () => {
         const id = button.getAttribute("data-delete") ?? ""
         const name = placeState.find((place) => place.id === id)?.name ?? "this place"
         if (!confirm(`Delete “${name}”?`)) return
-        void (async () => {
-          try {
-            await putPlaces(placeState.filter((place) => place.id !== id))
-            placeState = placeState.filter((place) => place.id !== id)
-            paintPlaces("Deleted.")
-          } catch (error) {
-            document.getElementById("place-status")!.textContent = failureMessage(error)
+        const remaining = placeState.filter((place) => place.id !== id)
+        Effect.runFork(Effect.map(savePlaces(remaining), (error) => {
+          if (error) {
+            document.getElementById("place-status")!.textContent = error
+            return
           }
-        })()
+          placeState = remaining
+          paintPlaces("Deleted.")
+        }))
       })
     }
     wireMaps()
@@ -396,47 +394,49 @@ const program = Effect.gen(function*() {
           document.getElementById("place-status")!.textContent = "a name, numeric radius, and pin location are required"
           return
         }
-        void (async () => {
-          try {
-            const named: PlaceRow = {
-              id: placeIdFor(name), name,
-              lat: center.lat, lon: center.lon, radiusMeters
-            }
-            await putPlaces([...placeState, named])
-            placeState = [...placeState, named]
-            candidateState = candidateState.filter((_, candidateIndex) => candidateIndex !== index)
-            paintPlaces(`Named “${name}”.`)
-          } catch (error) {
-            document.getElementById("place-status")!.textContent = failureMessage(error)
+        const named = new Place({
+          id: placeIdFor(name),
+          name,
+          lat: center.lat,
+          lon: center.lon,
+          radiusMeters
+        })
+        Effect.runFork(Effect.map(savePlaces([...placeState, named]), (error) => {
+          if (error) {
+            document.getElementById("place-status")!.textContent = error
+            return
           }
-        })()
+          placeState = [...placeState, named]
+          candidateState = candidateState.filter((_, candidateIndex) => candidateIndex !== index)
+          paintPlaces(`Named “${name}”.`)
+        }))
       })
     }
   }
 
-  const refreshPlaces = async (status: string): Promise<void> => {
-    const [placesData, candData] = await Promise.all([getJson("/places"), getJson("/places/candidates")])
-    if (!Array.isArray(placesData.places) || !Array.isArray(candData.candidates)) {
-      throw new Error("bad response from /places")
-    }
-    placeState = placesData.places
-    candidateState = candData.candidates
-    paintPlaces(status)
-  }
+  /** Both place reads in one round of concurrency: candidates are the slow
+   * one, and the editor needs both before it can paint. */
+  const refreshPlaces = (status: string) =>
+    Effect.map(
+      Effect.all([client.ListPlaces({}), client.ListPlaceCandidates({})], { concurrency: 2 }),
+      ([places, candidates]) => {
+        placeState = [...places]
+        candidateState = [...candidates]
+        paintPlaces(status)
+      }
+    )
 
-  const showPlaces = async (): Promise<void> => {
+  const showPlaces = Effect.suspend(() => {
     cancelPage()
     table = null
     spacer = null
     mount.innerHTML = `<p><a href="#/">All days</a></p><h2>Places</h2><p class="empty">Loading…</p>`
-    try {
-      await refreshPlaces("")
-    } catch (error) {
-      mount.innerHTML =
-        `<p><a href="#/">All days</a></p><h2>Places</h2>` +
-        `<p class="empty">Could not load places: ${escapeHtml(failureMessage(error))}</p>`
-    }
-  }
+    return Effect.catchCause(refreshPlaces(""), (cause) =>
+      Effect.sync(() => {
+        mount.innerHTML = `<p><a href="#/">All days</a></p><h2>Places</h2>` +
+          `<p class="empty">Could not load places: ${escapeHtml(failureMessage(Cause.squash(cause)))}</p>`
+      }))
+  })
 
   const rowHtml = (row: DayRow): string => {
     const heading =
@@ -622,53 +622,58 @@ const program = Effect.gen(function*() {
 
   let liveSeenError = false
 
-  const showLiveEvent = (event: {
-    at?: unknown
-    type?: unknown
-    message?: unknown
-    status?: unknown
-  }) => {
+  /**
+   * One line in the live feed. `event` is a decoded `RuntimeEvent`, so the
+   * fields are known to exist and known to be strings -- no duck-typing.
+   */
+  const showLiveEvent = (event: RuntimeEvent) => {
     const list = document.getElementById("live-event-list")
-    if (list === null || typeof event.message !== "string") return
+    if (list === null) return
     if (list.children.length === 1 && list.firstElementChild?.classList.contains("empty")) {
       list.innerHTML = ""
     }
     const item = document.createElement("li")
     if (event.status === "failing" || event.status === "degraded") item.className = "event-failing"
-    const time = typeof event.at === "string" && !Number.isNaN(Date.parse(event.at))
-      ? new Date(event.at).toLocaleTimeString()
-      : "now"
+    const time = Number.isNaN(Date.parse(event.at))
+      ? "now"
+      : new Date(event.at).toLocaleTimeString()
     item.innerHTML = `<span class="event-time">${escapeHtml(time)}</span>${escapeHtml(event.message)}`
     list.append(item)
     while (list.children.length > 100) list.firstElementChild?.remove()
     list.scrollTop = list.scrollHeight
   }
 
-  const subscribeLive = () => {
-    const source = new EventSource("/events")
-    source.onmessage = (event) => {
-      try {
-        const data: unknown = JSON.parse(event.data)
-        if (typeof data === "object" && data !== null) {
-          showLiveEvent(data)
-          if ("day" in data && typeof data.day === "string") handleDayEvent(data.day)
-        }
-      } catch {
-        // Malformed event: ignore, the next one resyncs.
-      }
-    }
-    source.onerror = () => {
-      liveSeenError = true
-    }
-    source.onopen = () => {
-      // Reconnected after a drop: reload the current view outright, since
-      // events may have been missed while away.
-      if (liveSeenError) {
-        liveSeenError = false
-        Effect.runFork(loadRoute())
-      }
-    }
-  }
+  /**
+   * Live pipeline progress over the RPC stream.
+   *
+   * Retried forever with a backoff: a dropped stream is normal (server
+   * restart, sleep, flaky network), and each reconnect reloads the current
+   * view because events may have been missed while away. `Stream.runForEach`
+   * only returns when the stream ends, so the reload belongs on the retry
+   * path, not in a separate open handler.
+   */
+  const subscribeLive = Effect.forkScoped(
+    Stream.runForEach(client.StreamEvents({}), (event) =>
+      Effect.sync(() => {
+        showLiveEvent(event)
+        if (event.day !== null) handleDayEvent(event.day)
+      })).pipe(
+        Effect.andThen(Effect.fail(new Error("event stream ended"))),
+        Effect.tapCause(() => Effect.sync(() => { liveSeenError = true })),
+        Effect.retry({
+          // Exponential backoff, capped: `min` takes the shorter of the two
+          // delays, so waits grow to 10s and stay there rather than
+          // doubling forever.
+          schedule: Schedule.min([Schedule.exponential(500, 2), Schedule.spaced(10_000)])
+        }),
+        Effect.andThen(Effect.sync(() => {
+          if (liveSeenError) {
+            liveSeenError = false
+            Effect.runFork(loadRoute())
+          }
+        }))
+      )
+  )
 
   const showTable = () => {
     cancelPage()
@@ -702,7 +707,7 @@ const program = Effect.gen(function*() {
     Effect.gen(function*() {
       const hash = location.hash
       if (hash === "#/places") {
-        yield* Effect.promise(() => showPlaces())
+        yield* showPlaces
         return
       }
       const day = hash.startsWith("#/day/") ? hash.slice("#/day/".length) : null
@@ -728,12 +733,12 @@ const program = Effect.gen(function*() {
     )
 
   yield* loadRoute()
-  yield* Effect.promise(refreshStatus)
-  window.setInterval(() => { void refreshStatus() }, 30_000)
+  yield* refreshStatus
+  window.setInterval(() => Effect.runFork(refreshStatus), 30_000)
   window.addEventListener("hashchange", () => {
     Effect.runFork(loadRoute())
   })
-  subscribeLive()
+  yield* subscribeLive
   // Keep this scope — and the RPC client living in it — open for the life of
   // the page. Route loads fork into it; closing it would strand them.
   yield* Effect.never

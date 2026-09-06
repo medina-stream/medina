@@ -12,7 +12,6 @@ import * as Stream from "effect/Stream"
 import * as HttpRouter from "effect/unstable/http/HttpRouter"
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
-import * as Schema from "effect/Schema"
 import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
 import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
@@ -25,7 +24,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
 import * as RpcServer from "effect/unstable/rpc/RpcServer"
 import { JournalsGroup } from "../lib/lifelog/JournalApi.ts"
-import { JournalsHandlersLive } from "../lib/lifelog/JournalRpc.ts"
+import { liveEvents, makeJournalsHandlers } from "../lib/lifelog/JournalRpc.ts"
 import * as DayEvents from "../lib/lifelog/DayEvents.ts"
 import { TelemetryLive } from "../lib/runtime/Telemetry.ts"
 import { refreshDayPreviews } from "../lib/lifelog/Views.ts"
@@ -36,13 +35,12 @@ import * as Bucket from "../lib/Bucket.ts"
 import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
-import * as RuntimeEvents from "../lib/RuntimeEvents.ts"
 import type { PipelineSource } from "../lib/Pipeline.ts"
 import type { Source } from "../lib/Resource.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
 import { audioSource, recordingObjectSource, attributionResource, dayIndexResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
-import { forwardGeocode, listPlaces, movementCachedForDay, movementResource, placeCandidates, Places, replacePlaces } from "../lib/lifelog/Movement.ts"
+import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 
 /**
@@ -56,28 +54,84 @@ import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
  * Identity comes from Tailscale (see `lib/Tailscale.ts`). Read paths stay
  * open: this gates writes only.
  */
-const ownerOnly = (what: string) =>
+/**
+ * Who may write: the single owner named by `INGEST_OWNER`.
+ *
+ * Writing is refused unless an owner is configured -- an unset
+ * `INGEST_OWNER` is an unconfigured deployment, not an open one, and it
+ * must not read as a server bug.
+ *
+ * Identity comes from Tailscale (see `lib/Tailscale.ts`). Read paths stay
+ * open: this gates writes only.
+ */
+const writeAccess = Effect.gen(function*() {
+  const request = yield* HttpServerRequest.HttpServerRequest
+  const owner = (Option.getOrNull(yield* Config.option(Config.string("INGEST_OWNER"))) ?? "").trim()
+  if (!owner) {
+    return {
+      login: null,
+      allowed: false,
+      reason: "writes are disabled: set INGEST_OWNER to the Tailscale login allowed to write",
+      status: 503 as const
+    }
+  }
+  const address = Option.getOrNull(request.remoteAddress)
+  const tailscale = yield* Tailscale
+  const login = yield* tailscale.identify(address, request.headers)
+  if (!login || login !== owner) {
+    yield* Effect.log(`write rejected: ${address ?? "unknown"} -> ${login ?? "unidentified"}`)
+    return { login: null, allowed: false, reason: "forbidden: not you", status: 403 as const }
+  }
+  return { login, allowed: true, reason: "", status: 200 as const }
+})
+
+/**
+ * The same decision for RPC handlers, which are handed request headers
+ * rather than an `HttpServerRequest`.
+ *
+ * The remote address is read from the request when one is in scope and
+ * omitted otherwise; `Tailscale.identify` already refuses an unknown
+ * address, so an absent one fails closed rather than trusting the header.
+ */
+const canWrite = (headers: Record<string, string | undefined>) =>
   Effect.gen(function*() {
-    const request = yield* HttpServerRequest.HttpServerRequest
     const owner = (Option.getOrNull(yield* Config.option(Config.string("INGEST_OWNER"))) ?? "").trim()
     if (!owner) {
-      yield* Effect.log(`${what} refused: INGEST_OWNER is not configured, so no one may write`)
+      yield* Effect.log("write refused: INGEST_OWNER is not configured, so no one may write")
       return {
-        login: null,
-        response: HttpServerResponse.text(
-          "writes are disabled: set INGEST_OWNER to the Tailscale login allowed to write",
-          { status: 503 }
-        )
+        allowed: false,
+        reason: "writes are disabled: set INGEST_OWNER to the Tailscale login allowed to write"
       }
     }
-    const address = Option.getOrNull(request.remoteAddress)
+    const address = yield* Effect.map(
+      Effect.serviceOption(HttpServerRequest.HttpServerRequest),
+      Option.match({
+        onNone: () => null,
+        onSome: (request) => Option.getOrNull(request.remoteAddress)
+      })
+    )
     const tailscale = yield* Tailscale
-    const login = yield* tailscale.identify(address, request.headers)
+    const login = yield* tailscale.identify(address, headers)
     if (!login || login !== owner) {
-      yield* Effect.log(`${what} rejected: ${address ?? "unknown"} -> ${login ?? "unidentified"}`)
-      return { login: null, response: HttpServerResponse.text("forbidden: not you", { status: 403 }) }
+      yield* Effect.log(`write rejected: ${address ?? "unknown"} -> ${login ?? "unidentified"}`)
+      return { allowed: false, reason: "forbidden: not you" }
     }
-    return { login, response: null }
+    return { allowed: true, reason: "" }
+  })
+
+const ownerOnly = (what: string) =>
+  Effect.gen(function*() {
+    const access = yield* writeAccess
+    if (!access.allowed) {
+      if (access.status === 503) {
+        yield* Effect.log(`${what} refused: INGEST_OWNER is not configured, so no one may write`)
+      }
+      return {
+        login: null,
+        response: HttpServerResponse.text(access.reason, { status: access.status })
+      }
+    }
+    return { login: access.login, response: null }
   })
 
 
@@ -105,25 +159,18 @@ const Routes = HttpRouter.use((router) =>
         })
       }).pipe(Effect.orDie)
     )
-    // Live day updates: one event per (re)written journal. Payloads are
-    // hints, not data — clients re-fetch through the RPC. The stream ends
-    // (and its hub subscription releases) when the client disconnects.
+    // Live progress as SSE, for curl and anything that is not the SPA. The
+    // browser uses the `StreamEvents` RPC instead; both read `liveEvents`,
+    // so the two feeds cannot diverge.
     yield* router.add(
       "GET",
       "/events",
       Effect.succeed(
         HttpServerResponse.stream(
-          Stream.merge(
-            Stream.map(Stream.fromPubSub(DayEvents.dayHub), (day) => ({
-              at: new Date().toISOString(),
-              type: "day",
-              message: `Journal updated for ${day}`,
-              day
-            })),
-            Stream.fromPubSub(RuntimeEvents.eventHub)
-          ).pipe(Stream.map((event) =>
-            new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)
-          )),
+          Stream.map(
+            liveEvents,
+            (event) => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)
+          ),
           {
             contentType: "text/event-stream",
             headers: { "cache-control": "no-store" }
@@ -198,6 +245,9 @@ const Routes = HttpRouter.use((router) =>
         return HttpServerResponse.jsonUnsafe(movement, { headers: { "cache-control": cacheControl } })
       })
     )
+    // Operator surface, kept as plain HTTP for curl and monitoring. Encoded
+    // through the same `PipelineStatus` schema the RPC serves, so the two
+    // views of pipeline health cannot describe different shapes.
     yield* router.add(
       "GET",
       "/status",
@@ -247,67 +297,10 @@ const Routes = HttpRouter.use((router) =>
         })
       })
     )
-    // The user-owned place list: what is named so far, plus unnamed stay
-    // clusters worth naming. Reads are unauthenticated, like the journal;
-    // replacing the list requires the owner, like ingest below.
-    yield* router.add(
-      "GET",
-      "/places",
-      Effect.map(
-        Effect.orDie(listPlaces),
-        (places) => HttpServerResponse.jsonUnsafe({ places }, {
-          headers: { "cache-control": "private, max-age=60" }
-        })
-      )
-    )
-    yield* router.add(
-      "GET",
-      "/places/candidates",
-      Effect.map(
-        Effect.orDie(placeCandidates),
-        (candidates) => HttpServerResponse.jsonUnsafe({ count: candidates.length, candidates }, {
-          headers: { "cache-control": "private, max-age=60" }
-        })
-      )
-    )
-    // Address search for pin refinement: Nominatim behind a disk cache,
-    // so repeated searches cost no API calls. Read-only and unauthenticated.
-    yield* router.add(
-      "GET",
-      "/places/geocode",
-      Effect.gen(function*() {
-        const params = yield* HttpServerRequest.ParsedSearchParams
-        const query = typeof params.q === "string" ? params.q.trim() : ""
-        if (!query) return HttpServerResponse.text("missing ?q=", { status: 400 })
-        const results = yield* forwardGeocode(query)
-        return HttpServerResponse.jsonUnsafe({ results }, {
-          headers: { "cache-control": "private, max-age=3600" }
-        })
-      }).pipe(Effect.orDie)
-    )
-    yield* router.add(
-      "PUT",
-      "/places",
-      Effect.gen(function*() {
-        const request = yield* HttpServerRequest.HttpServerRequest
-        const { login, response } = yield* ownerOnly("places")
-        if (response) return response
-        const text = yield* Effect.orDie(request.text)
-        let json: unknown
-        try {
-          json = JSON.parse(text)
-        } catch {
-          return HttpServerResponse.text("body must be a JSON array of places", { status: 400 })
-        }
-        const places = yield* Schema.decodeUnknownEffect(Places)(json).pipe(Effect.option)
-        if (Option.isNone(places)) {
-          return HttpServerResponse.text("body must be a JSON array of places (id, name, lat, lon, radiusMeters)", { status: 400 })
-        }
-        yield* Effect.orDie(replacePlaces(places.value))
-        yield* Effect.log(`places replaced (${login}): ${places.value.length} places`)
-        return HttpServerResponse.jsonUnsafe({ ok: true, places: places.value.length })
-      })
-    )
+    // The place editor's reads and its one write now live on the typed RPC
+    // (`ListPlaces`, `ListPlaceCandidates`, `SearchAddress`, `SavePlaces`).
+    // They were only ever the UI's plumbing, and keeping a second,
+    // hand-decoded copy of the write path is how the two drift apart.
     // Push ingest: apps (e.g. a GPS logger) POST batches here from the
     // tailnet. Identity comes from Tailscale: the WireGuard peer behind the
     // source address must map to the owner's login. No tokens — the tailnet
@@ -505,8 +498,8 @@ const Services = Layer.mergeAll(
 
 /** Typed journals RPC at POST /rpc, over plain HTTP on the same router. */
 const RpcLive = RpcServer.layerHttp({ group: JournalsGroup, path: "/rpc", protocol: "http" }).pipe(
-  Layer.provide(RpcSerialization.layerJson),
-  Layer.provide(JournalsHandlersLive)
+  Layer.provide(RpcSerialization.layerNdjson),
+  Layer.provide(makeJournalsHandlers({ canWrite }))
 )
 
 const Main = Layer.mergeAll(
