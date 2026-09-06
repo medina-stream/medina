@@ -25,16 +25,29 @@ export class VendorTranscript extends Schema.Class<VendorTranscript>("VendorTran
   error: Schema.optional(Schema.NullOr(Schema.String))
 }) {}
 
+/** Parsed fields Medina depends on plus the untouched JSON response. */
+export interface AssemblyAIResult {
+  readonly transcript: VendorTranscript
+  readonly raw: unknown
+}
+
 const Upload = Schema.Struct({ upload_url: Schema.String })
 
 export class AssemblyAI extends Context.Service<AssemblyAI, {
-  readonly transcribe: (audio: Stream.Stream<Uint8Array, Error>) => Effect.Effect<VendorTranscript, Error>
+  readonly transcribe: (audio: Stream.Stream<Uint8Array, Error>) => Effect.Effect<AssemblyAIResult, Error>
 }>()("medina/AssemblyAI") {}
 
 export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpClient> = Layer.effect(AssemblyAI)(
   Effect.gen(function*() {
-    const baseUrl = (yield* Config.string("ASSEMBLYAI_API_URL")).replace(/\/$/, "")
+    const baseUrl = (yield* Config.string("ASSEMBLYAI_API_URL").pipe(
+      Config.withDefault("https://api.assemblyai.com")
+    )).replace(/\/$/, "")
     const apiKey = yield* Config.string("ASSEMBLYAI_API_KEY").pipe(Config.withDefault(""))
+    const prompt = yield* Config.string("ASSEMBLYAI_PROMPT").pipe(Config.withDefault(""))
+    const speakerNames = (yield* Config.string("ASSEMBLYAI_SPEAKER_NAMES").pipe(Config.withDefault("")))
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean)
     const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient).pipe(
       HttpClient.mapRequest((request) => apiKey ? HttpClientRequest.setHeader(request, "authorization", apiKey) : request)
     )
@@ -53,9 +66,13 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
       schedule: Schedule.max([Schedule.spaced("1 second"), Schedule.recurs(3)])
     } as const
 
+    const decodeTranscript = (raw: unknown) =>
+      Schema.decodeUnknownEffect(VendorTranscript)(raw).pipe(Effect.mapError(asError))
+
     const getTranscript = (id: string) =>
       client.get(`${baseUrl}/v2/transcript/${encodeURIComponent(id)}`).pipe(
-        Effect.flatMap(HttpClientResponse.schemaBodyJson(VendorTranscript)),
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(Schema.Unknown)),
+        Effect.flatMap((raw) => Effect.map(decodeTranscript(raw), (transcript) => ({ transcript, raw }))),
         Effect.mapError(asError)
       )
 
@@ -70,24 +87,38 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
             Effect.mapError(asError)
           )
 
-          const submitted = yield* client.post(`${baseUrl}/v2/transcript`, {
+          const submittedRaw = yield* client.post(`${baseUrl}/v2/transcript`, {
             body: HttpBody.jsonUnsafe({
               audio_url: upload.upload_url,
               speech_models: ["universal-3-5-pro"],
               speaker_labels: true,
-              language_detection: true
+              language_detection: true,
+              ...(prompt ? { prompt } : {}),
+              ...(speakerNames.length > 0
+                ? {
+                  speech_understanding: {
+                    request: {
+                      speaker_identification: {
+                        speaker_type: "name",
+                        known_values: speakerNames
+                      }
+                    }
+                  }
+                }
+                : {})
             })
           }).pipe(
-            Effect.flatMap(HttpClientResponse.schemaBodyJson(VendorTranscript)),
+            Effect.flatMap(HttpClientResponse.schemaBodyJson(Schema.Unknown)),
             Effect.retry(retryTransient),
             Effect.mapError(asError)
           )
+          const submitted = yield* decodeTranscript(submittedRaw)
 
           return yield* getTranscript(submitted.id).pipe(
-            Effect.flatMap((transcript) =>
-              transcript.status === "completed" || transcript.status === "error"
-                ? Effect.succeed(transcript)
-                : Effect.fail(new Pending(transcript.id))
+            Effect.flatMap((result) =>
+              result.transcript.status === "completed" || result.transcript.status === "error"
+                ? Effect.succeed(result)
+                : Effect.fail(new Pending(result.transcript.id))
             ),
             Effect.retry({
               while: (error) => error instanceof Pending,

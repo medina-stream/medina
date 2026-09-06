@@ -32,7 +32,7 @@ export class Drive extends Context.Service<Drive, {
 
 export const layer: Layer.Layer<Drive, Config.ConfigError, HttpClient.HttpClient> = Layer.effect(Drive)(
   Effect.gen(function*() {
-    const tokenUrl = yield* Config.string("GOOGLE_TOKEN_URL")
+    const tokenUrl = yield* Config.string("GOOGLE_TOKEN_URL").pipe(Config.withDefault("http://127.0.0.1/disabled-google-token"))
     const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient)
     const asError = (cause: unknown) => new Error("Google Drive request failed", { cause })
 

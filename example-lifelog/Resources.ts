@@ -16,7 +16,9 @@ export const DATA_DIR = process.env.DATA_DIR ?? "data/artifacts"
 export const dataPath = (key: string) => join(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
-export const JOURNAL_VERSION = "journal-v7"
+// v9: journal derivation consumes notes-v2's diarized evidence. v8 established
+// separately materialized notes as a prerequisite.
+export const JOURNAL_VERSION = "journal-v9"
 /** Notes are keyed by the day they are about, not by ingest id: exactly one
  * journal note per day is what the journal reads. The previous
  * `notes-git-v1` (every markdown file in the checkout, keyed by ingest id)
@@ -55,7 +57,9 @@ export const journalKey = (day: string, inputHash: string) => `journal/${JOURNAL
  * Movement and the day's written note are NOT part of the key — notes are
  * extraction from audio only, and re-running them when movement changes is
  * the waste this resource eliminates. */
-export const NOTES_LLM_VERSION = "notes-llm-v1"
+// v2 feeds timestamped diarized turns to extraction instead of flattening all
+// speakers into one undifferentiated block.
+export const NOTES_LLM_VERSION = "notes-llm-v2"
 export const notesLlmKey = (day: string, inputHash: string) => `notes/${NOTES_LLM_VERSION}/${day}/${inputHash}.json`
 
 /** LLM-derived notes from a day's audio transcripts. Stable across movement

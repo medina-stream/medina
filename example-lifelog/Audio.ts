@@ -30,7 +30,15 @@ import {
   vendorKey
 } from "./Resources.ts"
 
-const AUDIO_SOURCE_NAME = "easy-voice"
+const AUDIO_SOURCE_NAME = "audio-drive"
+
+export interface RecordingObject {
+  readonly id: string
+  readonly name: string
+  readonly mimeType: string
+  readonly modifiedTime: string
+  readonly checksum?: string
+}
 
 /**
  * Stream chunks to `tmpPath` while hashing them; resolves to the hex sha256.
@@ -58,7 +66,7 @@ export const hashStreamToFile = (
     return hash.digest("hex")
   })
 
-const normalize = (file: DriveFile, id: string, vendor: VendorTranscript): Transcript =>
+const normalize = (file: RecordingObject, id: string, vendor: VendorTranscript): Transcript =>
   new Transcript({
     provider: "assemblyai",
     version: TRANSCRIPT_VERSION,
@@ -88,9 +96,14 @@ const normalize = (file: DriveFile, id: string, vendor: VendorTranscript): Trans
  * receipt makes the next pass a single existence check, since the capture id
  * is not derivable without downloading the bytes.
  */
-const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(file: DriveFile) {
+const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
+  sourceName: string,
+  file: RecordingObject,
+  download: Effect.Effect<Stream.Stream<Uint8Array, Error>, Error>
+) {
   const fs = yield* FileSystem.FileSystem
-  const receiptKey = ingestReceiptKey(AUDIO_SOURCE_NAME, file.id, file.md5Checksum ?? file.modifiedTime)
+  const version = file.checksum ?? file.modifiedTime
+  const receiptKey = ingestReceiptKey(sourceName, file.id, version)
   if (yield* fs.exists(dataPath(receiptKey))) return "cached" as const
   if (!file.mimeType.startsWith("audio/")) {
     yield* Effect.logDebug(`skipping non-audio file ${file.name} (${file.mimeType})`)
@@ -100,7 +113,7 @@ const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(file: DriveFile) 
   // Grandfather: a transcript already exists under the pre-contenthash id.
   // Adopt that id as the capture id (audio bytes not retained; backfilling
   // legacy audio is a separate migration).
-  const legacyId = ingestId(AUDIO_SOURCE_NAME, file.id, file.md5Checksum ?? file.modifiedTime)
+  const legacyId = ingestId(sourceName, file.id, version)
   if (yield* fs.exists(dataPath(transcriptKey(legacyId)))) {
     yield* Files.writeJson(
       dataPath(receiptKey),
@@ -110,7 +123,6 @@ const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(file: DriveFile) 
   }
 
   yield* Effect.log(`capturing ${file.name}`)
-  const drive = yield* Drive
   // Stream straight to disk while hashing: hours-long recordings can be
   // hundreds of MB, so the bytes must never sit in memory whole. The
   // capture id (content hash) is known only once the stream ends, hence a
@@ -119,7 +131,7 @@ const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(file: DriveFile) 
   // temp file is invisible to enumeration while it exists.
   const tmpPath = dataPath(`tmp/capture-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   yield* fs.makeDirectory(dataPath("tmp"), { recursive: true })
-  const captureId = yield* hashStreamToFile(yield* drive.download(file.id), tmpPath)
+  const captureId = yield* hashStreamToFile(yield* download, tmpPath)
 
   const blobKey = `${captureDir(captureId)}/${captureBlobName(file.name)}`
   if (yield* fs.exists(dataPath(blobKey))) {
@@ -137,7 +149,7 @@ const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(file: DriveFile) 
   const provenance = yield* Files.readJson(Provenance, dataPath(provenanceKey(captureId)))
   const records = Option.isSome(provenance) ? provenance.value.records : []
   const seen = records.some((record) =>
-    record.source === AUDIO_SOURCE_NAME && record.fileId === file.id && record.filename === file.name
+    record.source === sourceName && record.fileId === file.id && record.filename === file.name
   )
   if (!seen) {
     yield* Files.writeJson(
@@ -145,12 +157,12 @@ const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(file: DriveFile) 
       new Provenance({
         captureId,
         records: [...records, {
-          source: AUDIO_SOURCE_NAME,
+          source: sourceName,
           filename: file.name,
           fileId: file.id,
           mimeType: file.mimeType,
           modifiedTime: file.modifiedTime,
-          md5Checksum: file.md5Checksum ?? null,
+          md5Checksum: file.checksum ?? null,
           fetchedAt: new Date().toISOString()
         }]
       })
@@ -161,9 +173,11 @@ const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(file: DriveFile) 
     yield* Effect.log(`transcribing ${file.name}`)
     const assemblyai = yield* AssemblyAI
     const audio = fs.stream(dataPath(blobKey)).pipe(Stream.mapError((cause) => new Error(String(cause))))
-    const vendor = yield* assemblyai.transcribe(audio)
-    yield* Files.writeJson(dataPath(vendorKey(captureId)), vendor)
-    yield* Files.writeJson(dataPath(transcriptKey(captureId)), normalize(file, captureId, vendor))
+    const result = yield* assemblyai.transcribe(audio)
+    // Keep the provider response losslessly for future features and audits;
+    // the normalized transcript remains Medina's stable internal contract.
+    yield* Files.writeJson(dataPath(vendorKey(captureId)), result.raw)
+    yield* Files.writeJson(dataPath(transcriptKey(captureId)), normalize(file, captureId, result.transcript))
   }
 
   yield* Files.writeJson(
@@ -184,8 +198,46 @@ export const audioSource = (
     yield* Effect.log(`discovered ${files.length} files`)
     const failures: Array<{ item: string; error: string }> = []
     // Bounded concurrency; one failure doesn't stop the rest.
+    const outcomes = yield* Effect.forEach(files, (driveFile: DriveFile) => {
+      const file: RecordingObject = {
+        id: driveFile.id,
+        name: driveFile.name,
+        mimeType: driveFile.mimeType,
+        modifiedTime: driveFile.modifiedTime,
+        ...(driveFile.md5Checksum === undefined ? {} : { checksum: driveFile.md5Checksum })
+      }
+      return ingestAudioFile(AUDIO_SOURCE_NAME, file, drive.download(driveFile.id)).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError(`ingest failed for ${file.name}`, cause).pipe(
+            Effect.tap(() => Effect.sync(() => failures.push({ item: file.name, error: String(cause).slice(0, 500) }))),
+            Effect.as("failed" as const)
+          )
+        )
+      )
+    }, { concurrency: 2 })
+    const count = (outcome: string) => outcomes.filter((entry) => entry === outcome).length
+    return {
+      discovered: files.length,
+      ingested: count("ingested"),
+      cached: count("cached"),
+      skipped: count("skipped"),
+      failures
+    } satisfies SourceReport
+  })
+})
+
+/** Build an audio source for any object listing/downloader, including S3. */
+export const recordingObjectSource = <R>(
+  name: string,
+  list: Effect.Effect<ReadonlyArray<RecordingObject>, Error, R>,
+  download: (file: RecordingObject) => Effect.Effect<Stream.Stream<Uint8Array, Error>, Error, R>
+): Source<R | AssemblyAI | FileSystem.FileSystem> => ({
+  name,
+  ingest: Effect.gen(function*() {
+    const files = yield* list
+    const failures: Array<{ item: string; error: string }> = []
     const outcomes = yield* Effect.forEach(files, (file) =>
-      ingestAudioFile(file).pipe(
+      Effect.flatMap(download(file), (stream) => ingestAudioFile(name, file, Effect.succeed(stream))).pipe(
         Effect.catchCause((cause) =>
           Effect.logError(`ingest failed for ${file.name}`, cause).pipe(
             Effect.tap(() => Effect.sync(() => failures.push({ item: file.name, error: String(cause).slice(0, 500) }))),

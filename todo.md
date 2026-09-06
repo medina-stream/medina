@@ -6,9 +6,27 @@ content-addressed resource model (key bakes in dependency hashes, so file
 existence is the freshness check). What's left is incremental: serving
 behavior, Effect-native consistency, scale headroom, and small hygiene items.
 
-Baseline: `bun test` 22 pass, `bun run typecheck` clean.
+Baseline: `bun test` 41 pass, `bun run typecheck` clean.
 
 ## Next
+
+- [ ] **Durable speaker identity** (`Resources.ts`, `Journal.ts`, UI)
+  Store per-capture mappings from AssemblyAI's local diarization labels to a
+  person, with human confirmation outranking inference. Seed the three known
+  mappings: `source-574… A = Scott`, `source-eac… A = Scott`, and
+  `source-940… C = Scott`. Feed confirmed `Scott:` turns as first-person
+  evidence and retain other speakers as conversational context. Add a small
+  confirmation UI for unmapped recordings. Universal-3.5 Pro Speaker
+  Identification was tested on the seven-speaker `source-eac…` recording with
+  Scott Raymond as a known value, but declined to identify anyone (its mapping
+  remained A→A through G→G), so it is not a substitute for confirmed mappings.
+- [ ] **Backfill lossless AssemblyAI artifacts** (`lib/AssemblyAI.ts`)
+  New `.assemblyai.json` files preserve the complete provider response while
+  normalized transcripts remain Medina's stable contract. The three original
+  artifacts predate that fix and were schema-stripped; refetch their completed
+  transcript IDs (no retranscription required) if their word-level and other
+  provider fields are wanted. The separate speaker experiment already retains
+  one complete response under `experiments/` in the local data dir.
 
 - [x] **Request-path LLM spend** (`Journal.ts`, `Movement.ts`, `main.ts`)
   Done: `GET /journal/:day` and `GET /movement/:day` serve via read-only

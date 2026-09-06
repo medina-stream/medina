@@ -66,6 +66,80 @@ const renderDay = (day: string, journal: Journal | null) =>
 
 const mount = document.getElementById("app")!
 
+interface StatusSource {
+  name: string
+  status: "disabled" | "healthy" | "empty" | "degraded" | "failing"
+  message: string | null
+  discovered: number
+  ingested: number
+  cached: number
+  skipped: number
+}
+
+interface MedinaStatus {
+  pipeline: { running: boolean; lastFinishedAt: string | null; nextRunAt: string | null }
+  lastRun: null | {
+    sources: Array<StatusSource>
+    stages: Array<StatusSource>
+    failures: Array<{ stage: string; item: string; error: string }>
+  }
+  totals: { current: number; stale: number }
+}
+
+const refreshStatus = async () => {
+  const root = document.getElementById("pipeline-status")
+  const summary = document.getElementById("status-summary")
+  const details = document.getElementById("status-details")
+  if (!root || !summary || !details) return
+  try {
+    const response = await fetch("/status")
+    if (!response.ok) throw new Error(`status ${response.status}`)
+    const status = await response.json() as MedinaStatus
+    const sources = status.lastRun?.sources ?? []
+    const stages = status.lastRun?.stages ?? []
+    const observed = [...sources, ...stages]
+    const failures = observed.filter((source) => source.status === "failing")
+    const degraded = observed.filter((source) => source.status === "degraded")
+    const disabled = sources.filter((source) => source.status === "disabled")
+    const tone = failures.length > 0 || status.lastRun === null
+      ? "bad"
+      : degraded.length > 0 || disabled.length > 0 || status.totals.stale > 0
+        ? "warn"
+        : "good"
+    root.className = `status ${tone}`
+    summary.textContent = status.pipeline.running
+      ? "Updating data…"
+      : status.lastRun === null
+        ? "No pipeline run yet"
+        : failures.length > 0
+          ? `${failures.length} source${failures.length === 1 ? "" : "s"} failing`
+          : degraded.length > 0
+            ? "Data flow degraded"
+            : disabled.length > 0
+              ? `${disabled.length} source${disabled.length === 1 ? "" : "s"} disabled`
+              : status.totals.stale > 0
+                ? `${status.totals.stale} day${status.totals.stale === 1 ? "" : "s"} pending`
+                : "Data flowing"
+    const renderRows = (entries: Array<StatusSource>) => entries.map((source) => {
+      const counts = source.status === "disabled"
+        ? ""
+        : ` — ${source.ingested} new, ${source.cached} cached, ${source.discovered} found`
+      const message = source.message ? `: ${source.message}` : ""
+      return `<li><strong>${escapeHtml(source.name)}</strong>: ${escapeHtml(source.status)}${escapeHtml(counts + message)}</li>`
+    }).join("")
+    const finished = status.pipeline.lastFinishedAt
+      ? `<p>Last pass: ${escapeHtml(new Date(status.pipeline.lastFinishedAt).toLocaleString())}</p>`
+      : `<p>No completed pass.</p>`
+    details.innerHTML = finished +
+      `<strong>Sources</strong><ul>${renderRows(sources) || "<li>No sources configured.</li>"}</ul>` +
+      `<strong>Processing</strong><ul>${renderRows(stages) || "<li>No processing stages.</li>"}</ul>`
+  } catch (error) {
+    root.className = "status bad"
+    summary.textContent = "Status unavailable"
+    details.textContent = failureMessage(error)
+  }
+}
+
 const failureMessage = (error: unknown): string => {
   if (error instanceof Error) return error.message
   if (typeof error === "object" && error !== null && "message" in error) return String(error.message)
@@ -548,13 +622,36 @@ const program = Effect.gen(function*() {
 
   let liveSeenError = false
 
+  const showLiveEvent = (event: {
+    at?: unknown
+    type?: unknown
+    message?: unknown
+    status?: unknown
+  }) => {
+    const list = document.getElementById("live-event-list")
+    if (list === null || typeof event.message !== "string") return
+    if (list.children.length === 1 && list.firstElementChild?.classList.contains("empty")) {
+      list.innerHTML = ""
+    }
+    const item = document.createElement("li")
+    if (event.status === "failing" || event.status === "degraded") item.className = "event-failing"
+    const time = typeof event.at === "string" && !Number.isNaN(Date.parse(event.at))
+      ? new Date(event.at).toLocaleTimeString()
+      : "now"
+    item.innerHTML = `<span class="event-time">${escapeHtml(time)}</span>${escapeHtml(event.message)}`
+    list.append(item)
+    while (list.children.length > 100) list.firstElementChild?.remove()
+    list.scrollTop = list.scrollHeight
+  }
+
   const subscribeLive = () => {
     const source = new EventSource("/events")
     source.onmessage = (event) => {
       try {
         const data: unknown = JSON.parse(event.data)
-        if (typeof data === "object" && data !== null && "day" in data && typeof data.day === "string") {
-          handleDayEvent(data.day)
+        if (typeof data === "object" && data !== null) {
+          showLiveEvent(data)
+          if ("day" in data && typeof data.day === "string") handleDayEvent(data.day)
         }
       } catch {
         // Malformed event: ignore, the next one resyncs.
@@ -631,6 +728,8 @@ const program = Effect.gen(function*() {
     )
 
   yield* loadRoute()
+  yield* Effect.promise(refreshStatus)
+  window.setInterval(() => { void refreshStatus() }, 30_000)
   window.addEventListener("hashchange", () => {
     Effect.runFork(loadRoute())
   })

@@ -12,7 +12,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import * as Files from "../lib/Files.ts"
-import { RUN_REPORT_KEY, RunReport } from "../lib/Pipeline.ts"
+import { pipelineRuntime, RUN_REPORT_KEY, RunReport } from "../lib/Pipeline.ts"
 import { currentDayIndex } from "./DayIndex.ts"
 import { journalResource } from "./Journal.ts"
 import { DayRow, ListDays } from "./JournalApi.ts"
@@ -53,6 +53,17 @@ export const pipelineStatus = Effect.gen(function*() {
       return { day, transcripts: index.days[day]?.length ?? 0, journal }
     })
   return {
+    service: {
+      startedAt: pipelineRuntime.processStartedAt,
+      status: "ready" as const
+    },
+    pipeline: {
+      running: pipelineRuntime.running,
+      currentStartedAt: pipelineRuntime.currentStartedAt,
+      lastStartedAt: Option.isSome(lastRun) ? lastRun.value.startedAt : null,
+      lastFinishedAt: Option.isSome(lastRun) ? lastRun.value.finishedAt : pipelineRuntime.lastFinishedAt,
+      nextRunAt: pipelineRuntime.nextRunAt
+    },
     lastRun: Option.getOrNull(lastRun),
     days,
     totals: {

@@ -19,6 +19,19 @@ const STYLE = `
   h3 { font-size: 1.05rem; margin: 1.5rem 0 .25rem; }
   p { margin: .75rem 0; }
   .stale { font-size: .75rem; font-weight: normal; color: #999; margin-left: .5rem; }
+  .status { margin-top: .75rem; font-family: ui-sans-serif, system-ui, sans-serif; font-size: .85rem; }
+  .status summary { cursor: pointer; color: #777; }
+  .status-dot { display: inline-block; width: .65rem; height: .65rem; border-radius: 50%; margin-right: .4rem; background: #999; }
+  .status.good .status-dot { background: #319b55; }
+  .status.warn .status-dot { background: #d69b22; }
+  .status.bad .status-dot { background: #c94747; }
+  .status ul { margin: .5rem 0; padding-left: 1.25rem; }
+  .live-events { margin-top: .5rem; font-family: ui-sans-serif, system-ui, sans-serif; font-size: .8rem; }
+  .live-events summary { cursor: pointer; color: #777; }
+  .live-events ol { max-height: 14rem; overflow-y: auto; margin: .5rem 0; padding-left: 1.5rem; }
+  .live-events li { margin: .2rem 0; }
+  .event-time { color: #999; margin-right: .4rem; }
+  .event-failing { color: #c94747; }
   .vtable-tools { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; color: #777; }
   .vtable-tools input { font: inherit; padding: .25rem .5rem; }
   .vtable-tools button { font: inherit; padding: .25rem .75rem; cursor: pointer; }
@@ -121,6 +134,14 @@ export const spaHome = () =>
       <header>
         <h1>Journal</h1>
         <p>Daily reports from the Medina data dir.</p>
+        <details class="status" id="pipeline-status">
+          <summary><span class="status-dot"></span><span id="status-summary">Checking data flow…</span></summary>
+          <div id="status-details"></div>
+        </details>
+        <details class="live-events">
+          <summary>Live events</summary>
+          <ol id="live-event-list"><li class="empty">Waiting for events…</li></ol>
+        </details>
       </header>
       <main id="app">
         <p class="empty">Loading…</p>

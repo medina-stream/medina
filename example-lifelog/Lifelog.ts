@@ -13,7 +13,7 @@
  *   transcripts, note, and movement.
  * - `Views` — what the HTTP layer reads.
  */
-export { audioSource } from "./Audio.ts"
+export { audioSource, recordingObjectSource } from "./Audio.ts"
 export { notesSource, noteForDay, NOTE_RECHECK_DAYS, NOTE_WINDOW_DAYS } from "./Notes.ts"
 export { httpIngest } from "./HttpIngest.ts"
 export { attributionResource, currentAttribution, readCorrections, transcribedCaptures } from "./Attribution.ts"

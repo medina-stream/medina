@@ -71,12 +71,30 @@ interface DayInput {
   readonly transcript: Transcript
 }
 
+const offsetLabel = (milliseconds: number) => {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":")
+}
+
+/** Preserve who said what for the notes model. Diarization labels are local
+ * to one recording and deliberately remain anonymous until an identification
+ * layer can support a stronger claim. */
+const transcriptEvidence = (transcript: Transcript) =>
+  transcript.utterances.length > 0
+    ? transcript.utterances.map((utterance) =>
+      `[+${offsetLabel(utterance.startMs)}] Speaker ${utterance.speaker ?? "unknown"}: ${utterance.text}`
+    ).join("\n")
+    : transcript.text ?? ""
+
 const batches = (inputs: ReadonlyArray<DayInput>) => {
   const result: Array<string> = []
   let batch = ""
   for (const { entry, transcript } of inputs) {
     const label = `\n\n--- recording ${entry.startTime} (${entry.captureId}) ---\n`
-    const text = transcript.text ?? ""
+    const text = transcriptEvidence(transcript)
     for (let offset = 0; offset < text.length;) {
       const room = Math.max(1, MAX_BATCH_CHARS - batch.length - label.length)
       const part = text.slice(offset, offset + room)
@@ -135,6 +153,14 @@ const notesInputHash = (entries: ReadonlyArray<DayEntry>) =>
     .map((entry) => entry.correctionHash ? `${entry.transcriptKey}:${entry.correctionHash}` : entry.transcriptKey)
     .join("\n")
 
+/**
+ * Durable workflows memoize terminal failures as well as successes. Give each
+ * pipeline hour a fresh execution identity so a transient vendor/configuration
+ * failure can be retried by the next pass. Successful resources still never
+ * rerun: their materialized file is checked before workflow execution.
+ */
+const workflowAttemptWindow = () => new Date().toISOString().slice(0, 13)
+
 type NotesEnv = FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine
 
 /** Materialize LLM-derived notes for a day: read transcripts, batch them, and
@@ -145,9 +171,10 @@ const NotesWorkflow = Workflow.make("NotesWorkflow", {
   payload: {
     day: Schema.String,
     key: Schema.String,
-    inputKeys: Schema.Array(Schema.String)
+    inputKeys: Schema.Array(Schema.String),
+    attemptWindow: Schema.String
   },
-  idempotencyKey: ({ key }) => key
+  idempotencyKey: ({ key, attemptWindow }) => `${key}:${attemptWindow}`
 })
 
 export const NotesWorkflowLayer = NotesWorkflow.toLayer(Effect.fn(function*({ day, key, inputKeys }) {
@@ -199,7 +226,7 @@ const notesInstance = (day: string, index: DayIndex) =>
       key,
       label: day,
       dependencies: inputKeys,
-      materialize: NotesWorkflow.execute({ day, key, inputKeys }).pipe(Effect.asVoid)
+      materialize: NotesWorkflow.execute({ day, key, inputKeys, attemptWindow: workflowAttemptWindow() }).pipe(Effect.asVoid)
     }
   })
 
@@ -234,7 +261,12 @@ export const notesForDay = (day: string) =>
     const key = notesLlmKey(day, inputHash)
     const existing = yield* Files.readJson(NotesLlm, dataPath(key))
     if (Option.isSome(existing)) return existing.value
-    yield* NotesWorkflow.execute({ day, key, inputKeys: entries.map((entry) => entry.transcriptKey) })
+    yield* NotesWorkflow.execute({
+      day,
+      key,
+      inputKeys: entries.map((entry) => entry.transcriptKey),
+      attemptWindow: workflowAttemptWindow()
+    })
     return Option.getOrThrow(yield* Files.readJson(NotesLlm, dataPath(key)))
   })
 
@@ -262,9 +294,16 @@ const journalInstance = (
         ...(movementBasisHash ? [movementKey(day, movementBasisHash)] : []),
         ...(noteHash ? [noteKey(day)] : [])
       ],
-      // Durable: the workflow's idempotency key is the journal key, and each
-      // LLM call is an Activity, so retries resume rather than re-pay.
-      materialize: JournalWorkflow.execute({ day, key, inputKeys, movementBasisHash, noteHash }).pipe(Effect.asVoid)
+      // Durable: completed Activities are reused within an attempt window;
+      // terminal failures become eligible again on a later pipeline pass.
+      materialize: JournalWorkflow.execute({
+        day,
+        key,
+        inputKeys,
+        movementBasisHash,
+        noteHash,
+        attemptWindow: workflowAttemptWindow()
+      }).pipe(Effect.asVoid)
     }
   })
 
@@ -422,8 +461,9 @@ export const journalCachedForDay = (day: string) =>
  * expensive, flaky steps: each notes batch and the final report are
  * Activities whose results persist in the cluster journal, so a crash,
  * restart, or interrupt resumes past completed LLM calls instead of
- * re-paying for them. The workflow is idempotent per journal key — the
- * key already bakes in the day's input hash.
+ * re-paying for them. An hourly attempt window permits recovery from a
+ * terminal vendor/configuration failure; the materialized journal file keeps
+ * successful executions deduplicated across later windows.
  */
 export const JournalWorkflow = Workflow.make("JournalWorkflow", {
   payload: {
@@ -431,9 +471,10 @@ export const JournalWorkflow = Workflow.make("JournalWorkflow", {
     key: Schema.String,
     inputKeys: Schema.Array(Schema.String),
     movementBasisHash: Schema.NullOr(Schema.String),
-    noteHash: Schema.NullOr(Schema.String)
+    noteHash: Schema.NullOr(Schema.String),
+    attemptWindow: Schema.String
   },
-  idempotencyKey: ({ key }) => key
+  idempotencyKey: ({ key, attemptWindow }) => `${key}:${attemptWindow}`
 })
 
 export const JournalWorkflowLayer = JournalWorkflow.toLayer(Effect.fn(function*({ day, inputKeys, key, movementBasisHash, noteHash }) {

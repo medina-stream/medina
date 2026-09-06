@@ -38,7 +38,12 @@ const flakyClient = (uploadHits: Ref.Ref<number>, submitHits: Ref.Ref<number>) =
       )
     }
     return Effect.succeed(
-      HttpClientResponse.fromWeb(request, json({ id: "t-1", status: "completed", text: "hi" }))
+      HttpClientResponse.fromWeb(request, json({
+        id: "t-1",
+        status: "completed",
+        text: "hi",
+        provider_future_field: { preserved: true }
+      }))
     )
   })
 
@@ -63,8 +68,14 @@ describe("AssemblyAI transient retries", () => {
       }
     })
     const { transcript, uploads, submits } = await Effect.runPromise(prog)
-    expect(transcript.status).toBe("completed")
-    expect(transcript.text).toBe("hi")
+    expect(transcript.transcript.status).toBe("completed")
+    expect(transcript.transcript.text).toBe("hi")
+    expect(transcript.raw).toEqual({
+      id: "t-1",
+      status: "completed",
+      text: "hi",
+      provider_future_field: { preserved: true }
+    })
     expect(uploads).toBe(2)
     expect(submits).toBe(2)
   })

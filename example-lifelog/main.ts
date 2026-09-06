@@ -32,12 +32,16 @@ import { refreshDayPreviews } from "./Views.ts"
 import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
 import { gpsCompactSource, gpsDay, gpsInboxWrite, locationSummary, parseGpsBody } from "./Gps.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
+import * as Bucket from "../lib/Bucket.ts"
 import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
-import { dataPath } from "./Resources.ts"
+import * as RuntimeEvents from "../lib/RuntimeEvents.ts"
+import type { PipelineSource } from "../lib/Pipeline.ts"
+import type { Source } from "../lib/Resource.ts"
+import { DATA_DIR, dataPath } from "./Resources.ts"
 import { dayPage, pendingPage, spaHome } from "./Pages.tsx"
-import { audioSource, attributionResource, dayIndexResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { audioSource, recordingObjectSource, attributionResource, dayIndexResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { forwardGeocode, listPlaces, movementCachedForDay, movementResource, placeCandidates, Places, replacePlaces } from "./Movement.ts"
 import { staysDay, staysSource } from "./Stays.ts"
 
@@ -73,11 +77,17 @@ const Routes = HttpRouter.use((router) =>
       "/events",
       Effect.succeed(
         HttpServerResponse.stream(
-          Stream.fromPubSub(DayEvents.dayHub).pipe(
-            Stream.map((day) =>
-              new TextEncoder().encode(`data: ${JSON.stringify({ day })}\n\n`)
-            )
-          ),
+          Stream.merge(
+            Stream.map(Stream.fromPubSub(DayEvents.dayHub), (day) => ({
+              at: new Date().toISOString(),
+              type: "day",
+              message: `Journal updated for ${day}`,
+              day
+            })),
+            Stream.fromPubSub(RuntimeEvents.eventHub)
+          ).pipe(Stream.map((event) =>
+            new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)
+          )),
           {
             contentType: "text/event-stream",
             headers: { "cache-control": "no-store" }
@@ -319,16 +329,80 @@ const Routes = HttpRouter.use((router) =>
   })
 )
 
-type LifelogEnv = Drive.Drive | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine
+type LifelogEnv = Drive.Drive | Bucket.Bucket | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine
 
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
-    const folderId = yield* Config.string("GDRIVE_FOLDER_ID")
+    const enabled = new Set(
+      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket")
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean)
+    )
+    const folderId = process.env.GDRIVE_FOLDER_ID?.trim()
+    const tokenUrl = process.env.GOOGLE_TOKEN_URL?.trim()
     const latest = yield* Config.int("SOURCE_LATEST").pipe(Config.withDefault(25))
-    const notesRepo = yield* Config.string("NOTES_REPO_DIR")
+    const notesDir = process.env.NOTES_REPO_DIR?.trim()
+    const notesUrl = process.env.NOTES_REPO_URL?.trim()
+    const notesRef = process.env.NOTES_REPO_REF?.trim() || "HEAD"
+    const git = yield* Git.Git
+    const bucket = yield* Bucket.Bucket
+    const bucketEndpoint = process.env.BUCKET_ENDPOINT?.trim()
+    const bucketName = process.env.BUCKET_NAME?.trim()
+    const bucketAccessKey = process.env.BUCKET_ACCESS_KEY_ID?.trim()
+    const bucketSecretKey = process.env.BUCKET_SECRET_ACCESS_KEY?.trim()
+    const bucketPrefix = process.env.BUCKET_PREFIX ?? ""
+    const bucketLimit = Number(process.env.BUCKET_LIMIT ?? "25")
+
+    const managedNotes: Source<LifelogEnv> | undefined = notesUrl
+      ? {
+          name: "notes",
+          ingest: Effect.flatMap(
+            git.ensureCheckout(notesUrl, notesRef, DATA_DIR),
+            (checkout) => notesSource(checkout).ingest
+          )
+        }
+      : notesDir
+        ? notesSource(notesDir)
+        : undefined
+
+    const sources: ReadonlyArray<PipelineSource<LifelogEnv>> = [
+      {
+        name: "audio-drive",
+        source: enabled.has("audio") && folderId && tokenUrl ? audioSource(folderId, latest) : undefined,
+        disabledReason: enabled.has("audio") ? "GDRIVE_FOLDER_ID and GOOGLE_TOKEN_URL are required" : "disabled by MEDINA_SOURCES"
+      },
+      {
+        name: "notes-git",
+        source: enabled.has("notes") ? managedNotes : undefined,
+        disabledReason: enabled.has("notes") ? "NOTES_REPO_URL or NOTES_REPO_DIR is required" : "disabled by MEDINA_SOURCES"
+      },
+      {
+        name: "bucket-audio",
+        source: enabled.has("bucket") && bucketEndpoint && bucketName && bucketAccessKey && bucketSecretKey
+          ? recordingObjectSource(
+              "bucket-audio",
+              bucket.list(bucketPrefix, Number.isFinite(bucketLimit) ? bucketLimit : 25).pipe(
+                Effect.map((objects) => objects.map((object) => ({
+                  id: object.key,
+                  name: object.key.split("/").pop() || object.key,
+                  mimeType: "audio/application",
+                  modifiedTime: object.lastModified ?? new Date(0).toISOString(),
+                  ...(object.etag === null ? {} : { checksum: object.etag })
+                })))
+              ),
+              (file) => bucket.download(file.id)
+            )
+          : undefined,
+        disabledReason: enabled.has("bucket")
+          ? "BUCKET_ENDPOINT, BUCKET_NAME, BUCKET_ACCESS_KEY_ID, and BUCKET_SECRET_ACCESS_KEY are required"
+          : "disabled by MEDINA_SOURCES"
+      }
+    ]
     yield* Effect.andThen(
       runPipeline<LifelogEnv>(
-        [audioSource(folderId, latest), notesSource(notesRepo), gpsCompactSource, staysSource],
+        sources,
+        [gpsCompactSource, staysSource],
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement
         // changes), movement enriches journals, and the journal reads both.
@@ -368,8 +442,10 @@ const DaySync = Layer.effectDiscard(
 /** The journal language model: OpenAI Responses API via the exe.dev relay. */
 const LlmLive = Layer.unwrap(
   Effect.gen(function*() {
-    const apiUrl = (yield* Config.string("JOURNAL_LLM_API_URL")).replace(/\/$/, "")
-    const model = yield* Config.string("JOURNAL_LLM_MODEL")
+    const apiUrl = (yield* Config.string("JOURNAL_LLM_API_URL").pipe(
+      Config.withDefault("https://api.openai.com/v1")
+    )).replace(/\/$/, "")
+    const model = yield* Config.string("JOURNAL_LLM_MODEL").pipe(Config.withDefault("gpt-5.5"))
     const apiKey = yield* Config.string("JOURNAL_LLM_API_KEY").pipe(Config.withDefault(""))
     return OpenAiLanguageModel.layer({ model, config: { reasoning: { effort: "low" } } }).pipe(
       Layer.provide(OpenAiClient.layer({ apiUrl, ...(apiKey ? { apiKey: Redacted.make(apiKey) } : {}) }))
@@ -387,6 +463,7 @@ const WorkflowsLive = Layer.mergeAll(
 
 const Services = Layer.mergeAll(
   Drive.layer,
+  Bucket.layer,
   AssemblyAI.layer,
   Git.layer,
   tailscaleLayer,

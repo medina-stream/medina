@@ -18,6 +18,7 @@
  */
 import * as Config from "effect/Config"
 import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as SingleRunner from "effect/unstable/cluster/SingleRunner"
@@ -25,6 +26,7 @@ import * as ClusterWorkflowEngine from "effect/unstable/cluster/ClusterWorkflowE
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient"
 import * as PgClient from "@effect/sql-pg/PgClient"
 import * as ExeWirePg from "../lib/ExeWirePg.ts"
+import { dirname } from "node:path"
 
 /**
  * Mailbox + runner state. Not the record; safe to delete when idle.
@@ -53,7 +55,10 @@ const SqlLive = Layer.unwrap(Effect.gen(function*() {
     const wirePort = Number(process.env.CLUSTER_PG_WIRE_PORT ?? "5432")
     return ExeWirePg.layer({ host: wireHost.value.trim(), port: wirePort })
   }
-  return SqliteClient.layer({ filename: process.env.CLUSTER_DB ?? "data/cluster.db" })
+  const filename = process.env.CLUSTER_DB ?? "data/cluster.db"
+  const fs = yield* FileSystem.FileSystem
+  yield* fs.makeDirectory(dirname(filename), { recursive: true })
+  return SqliteClient.layer({ filename })
 }))
 
 /** Single-process cluster: Sharding + Runners + MessageStorage over the
