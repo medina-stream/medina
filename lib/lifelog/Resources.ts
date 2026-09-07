@@ -16,6 +16,8 @@ export const DATA_DIR = process.env.DATA_DIR ?? "data/artifacts"
 export const dataPath = (key: string) => artifactPath(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
+// v12: start times come from `StartTime.decideStart`, which corroborates
+// the filename stamp against container metadata.
 // v11: turn stamps are absolute local clock times and recordings carry a
 // local span, so no arithmetic is delegated to the model.
 // v10: recording labels carry local clock time, not the raw UTC instant.
@@ -23,13 +25,15 @@ export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
 // afternoon event reported on a morning that had not happened yet.
 // v9: journal derivation consumes notes-v2's diarized evidence. v8 established
 // separately materialized notes as a prerequisite.
-export const JOURNAL_VERSION = "journal-v11"
+export const JOURNAL_VERSION = "journal-v12"
 /** Notes are keyed by the day they are about, not by ingest id: exactly one
  * journal note per day is what the journal reads. The previous
  * `notes-git-v1` (every markdown file in the checkout, keyed by ingest id)
  * is superseded -- its files are inert and can be deleted. */
 export const NOTE_VERSION = "notes-day-v1"
-export const ATTRIBUTION_VERSION = "attribution-v1"
+// v2 weighs container `mvhd` timing alongside the filename stamp, and stops
+// laundering a UTC modified time through local-wall-clock interpretation.
+export const ATTRIBUTION_VERSION = "attribution-v2"
 export const DAY_INDEX_VERSION = "days-v1"
 
 /** The main body-recorder channel. Channels separate simultaneous audio
@@ -130,13 +134,23 @@ export class Triage extends Schema.Class<Triage>("Triage")({
  * filenames carry `...YYYYMMDDThhmmss...`; the Drive modified time is the
  * fallback.
  */
-export const captureTime = (filename: string, modifiedTime: string): string => {
+/**
+ * The naive local wall clock a source filename claims, or null.
+ *
+ * Recorders stamp filenames `...YYYYMMDDThhmmss...` (Medina's own recorder
+ * prefixes a `0`, so the scan is anchored on the date, not the position).
+ * Zone-less by nature: the caller interprets it.
+ *
+ * Returns null rather than a fallback. The previous version substituted the
+ * source's `modifiedTime` with its `Z` stripped, which silently presented a
+ * UTC instant as local wall clock -- a whole-zone-offset error on every
+ * capture without a stamp.
+ */
+export const filenameWallClock = (filename: string): string | null => {
   const stamp = filename.match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/)
-  if (stamp) {
-    const [, year, month, day, hour, minute, second] = stamp
-    return `${year}-${month}-${day}T${hour}:${minute}:${second}`
-  }
-  return modifiedTime.replace(/(\.\d+)?Z$/, "")
+  if (!stamp) return null
+  const [, year, month, day, hour, minute, second] = stamp
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}`
 }
 
 export const ingestId = (sourceName: string, fileId: string, checksum: string) =>
@@ -156,6 +170,27 @@ export const ingestId = (sourceName: string, fileId: string, checksum: string) =
  */
 export const captureDir = (captureId: string) => `capture/${captureId}`
 export const provenanceKey = (captureId: string) => `${captureDir(captureId)}/provenance.json`
+
+/**
+ * Container timing probed from the capture's own bytes, cached beside it.
+ *
+ * Probing is cheap but not free (a few small reads, possibly over the
+ * network), and the bytes are immutable under a content-addressed id, so
+ * the answer is written once and reused. A probe that found nothing is
+ * still recorded -- with `startedAt: null` -- so a file without usable
+ * metadata is not re-probed on every pass.
+ */
+export const mediaTimingKey = (captureId: string) => `${captureDir(captureId)}/media-timing.json`
+
+export class MediaTiming extends Schema.Class<MediaTiming>("MediaTiming")({
+  captureId: Schema.String,
+  probedAt: Schema.String,
+  /** Container creation instant (recording end for known recorders), UTC. */
+  createdAt: Schema.NullOr(Schema.String),
+  durationSeconds: Schema.NullOr(Schema.Number),
+  /** `createdAt - durationSeconds`, UTC: when encoded audio began. */
+  startedAt: Schema.NullOr(Schema.String)
+}) {}
 
 /** The blob keeps its original filename (sanitized), so provenance survives
  * even if every JSON record were lost. */

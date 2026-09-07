@@ -18,7 +18,7 @@ import { makeItemSource } from "../Source.ts"
 import {
   captureBlobName,
   captureDir,
-  captureTime,
+  filenameWallClock,
   dataPath,
   IngestReceipt,
   ingestId,
@@ -73,7 +73,13 @@ const normalize = (file: RecordingObject, id: string, vendor: VendorTranscript):
     version: TRANSCRIPT_VERSION,
     ingestId: id,
     inputKey: `in/${id}`,
-    capturedAt: captureTime(file.name, file.modifiedTime),
+    // Naive local wall clock when the filename carries a stamp, else
+    // absent. Attribution is what decides a capture's start time; this
+    // field is only a hint for legacy captures that predate it, and
+    // substituting a UTC modified time here would misreport it as local.
+    ...(filenameWallClock(file.name) === null
+      ? {}
+      : { capturedAt: filenameWallClock(file.name)! }),
     transcriptId: vendor.id,
     vendorKey: vendorKey(id),
     status: vendor.status === "completed" ? "completed" : "error",

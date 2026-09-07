@@ -14,12 +14,14 @@ import * as Option from "effect/Option"
 import * as Files from "../Files.ts"
 import type { Resource } from "../Resource.ts"
 import { sha256 } from "../Hash.ts"
+import { filenameWallClock } from "./Resources.ts"
+import { mediaTimingFor } from "./MediaProbe.ts"
+import { decideStart } from "./StartTime.ts"
 import { homeTimeZone } from "./Time.ts"
 import {
   Attribution,
   ATTRIBUTION_VERSION,
   attributionKey,
-  captureTime,
   CHANNEL_MAIN,
   Correction,
   correctionKey,
@@ -96,40 +98,69 @@ const attributeCapture = Effect.fn("attributeCapture")(function*(
   const provenance = yield* Files.readJson(Provenance, dataPath(provenanceKey(captureId)))
   const transcript = yield* Files.readJson(Transcript, dataPath(transcriptKey(captureId)))
   const triage = yield* Files.readJson(Triage, dataPath(`triage/${captureId}.json`))
+  // The container's own metadata: an absolute instant, independent of both
+  // the filename and the source's clock. Probed once and cached.
+  const media = yield* mediaTimingFor(captureId)
 
-  let method = "none"
-  let confidence: "high" | "medium" | "low" | "none" = "none"
-  let wallClock: string | null = null // naive local time, interpreted in `zone`
-
-  const fromFilename = (filename: string, fallback: string) => {
-    const stamped = captureTime(filename, fallback)
-    return stamped
-  }
+  let filenameWall: string | null = null
+  let modifiedWall: string | null = null
+  let legacyWall: string | null = null
 
   if (Option.isSome(provenance) && provenance.value.records.length > 0) {
     const record = provenance.value.records[0]!
-    wallClock = fromFilename(record.filename, record.modifiedTime)
-    method = /\d{8}T\d{6}/.test(record.filename) ? "provenance-filename-stamp" : "provenance-modified-time"
-    confidence = method === "provenance-filename-stamp" ? "high" : "low"
+    filenameWall = filenameWallClock(record.filename)
+    // `modifiedTime` is a UTC instant (upload time on this corpus, often
+    // hours after the fact). Converted here, never reinterpreted as local:
+    // stripping its `Z` and treating it as wall clock shifted every such
+    // capture by the zone offset.
+    modifiedWall = null
   } else if (Option.isSome(transcript) && transcript.value.capturedAt) {
-    wallClock = transcript.value.capturedAt
-    method = "legacy-transcript-capturedAt"
-    confidence = "medium"
+    legacyWall = transcript.value.capturedAt
   } else if (Option.isSome(triage)) {
-    wallClock = captureTime(triage.value.filename, triage.value.receivedAt)
-    method = "legacy-triage-filename"
-    confidence = "medium"
+    filenameWall = filenameWallClock(triage.value.filename)
+    legacyWall = filenameWall === null ? null : legacyWall
   }
 
-  // Wall clock in the believed zone -> UTC instant. The zone belief is the
-  // home zone until better evidence (GPS) exists.
-  let startUtc: string | null = null
+  const modifiedUtc = Option.isSome(provenance) && provenance.value.records.length > 0
+    ? provenance.value.records[0]!.modifiedTime
+    : Option.isSome(triage)
+    ? triage.value.receivedAt
+    : null
+
+  /** Wall clock in `zone` -> UTC instant, or null if unusable. */
+  const wallToUtc = (wallClock: string, timeZone: string) => {
+    const zoned = DateTime.makeZoned(wallClock, { timeZone, adjustForTimeZone: true })
+    return Option.isSome(zoned) ? DateTime.formatIso(DateTime.toUtc(zoned.value)) : null
+  }
+
+  const decision = decideStart({
+    // A legacy `capturedAt` is a naive local clock like a filename stamp,
+    // so it enters the decision the same way.
+    filenameWallClock: filenameWall ?? legacyWall,
+    containerStartUtc: media.startedAt,
+    modifiedWallClock: null,
+    zone,
+    toUtc: wallToUtc
+  })
+
+  let startUtc: string | null = decision.startUtc
+  // Nothing better: the source's modified time is a UTC instant already, so
+  // it is used directly rather than run through the zone.
+  let method = decision.method as string
+  let confidence: "high" | "medium" | "low" | "none" = decision.confidence
+  if (startUtc === null && modifiedUtc !== null && !Number.isNaN(Date.parse(modifiedUtc))) {
+    startUtc = new Date(modifiedUtc).toISOString()
+    method = "modified-time"
+    confidence = "low"
+  }
+
   let day: string | null = null
   let timeZone: string | null = null
-  if (wallClock) {
-    const zoned = DateTime.makeZoned(wallClock, { timeZone: zone, adjustForTimeZone: true })
+  if (startUtc !== null) {
+    // The zone belief is the home zone until better evidence (GPS) exists;
+    // it decides which civil day the instant belongs to.
+    const zoned = DateTime.makeZoned(startUtc, { timeZone: zone })
     if (Option.isSome(zoned)) {
-      startUtc = DateTime.formatIso(DateTime.toUtc(zoned.value))
       day = DateTime.formatIsoDate(zoned.value)
       timeZone = zone
     }
