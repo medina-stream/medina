@@ -36,7 +36,9 @@ export class JournalEntry extends Schema.Class<JournalEntry>("JournalEntry")({
 export class DayRow extends Schema.Class<DayRow>("DayRow")({
   day: Schema.String,
   stale: Schema.Boolean,
-  preview: Schema.String
+  preview: Schema.String,
+  /** Seconds of recorded audio behind this day's journal. */
+  audioSeconds: Schema.Number
 }) {}
 
 /** Every RPC in this group fails the same way: a human-readable message. */

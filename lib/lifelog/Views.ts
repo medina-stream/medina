@@ -16,7 +16,7 @@ import { pipelineRuntime, RUN_REPORT_KEY, RunReport } from "../Pipeline.ts"
 import { currentDayIndex } from "./DayIndex.ts"
 import { journalResource } from "./Journal.ts"
 import { DayRow, ListDays } from "./JournalApi.ts"
-import { dataPath, Journal, JOURNAL_VERSION } from "./Resources.ts"
+import { dataPath, Journal, JOURNAL_VERSION, Transcript } from "./Resources.ts"
 
 const JOURNAL_PREFIX = `journal/${JOURNAL_VERSION}`
 
@@ -93,12 +93,28 @@ export const previewText = (report: string): string => {
   return flat.length > PREVIEW_CHARS ? `${flat.slice(0, PREVIEW_CHARS - 1).trimEnd()}…` : flat
 }
 
-/** One virtual-table row: the day, its freshness, and its preview. */
+/** One virtual-table row: the day, its freshness, its preview, and how
+ * much audio the day has. */
 export interface DayPreview {
   readonly day: string
   readonly stale: boolean
   readonly preview: string
+  readonly audioSeconds: number
 }
+
+/**
+ * Recorded audio for a day, in seconds.
+ *
+ * Summed per transcript from the last utterance's end, which is the only
+ * duration the normalized transcript carries. Overlapping captures are not
+ * de-duplicated: they are separate recordings, and the number is offered as
+ * "how much audio exists for this day", not wall-clock coverage.
+ */
+const audioSecondsFor = (transcripts: ReadonlyArray<Transcript>) =>
+  transcripts.reduce((total, transcript) => {
+    const endMs = transcript.utterances.reduce((max, utterance) => Math.max(max, utterance.endMs), 0)
+    return total + endMs / 1000
+  }, 0)
 
 /**
  * The days to render, newest first, with previews. Selection reuses
@@ -106,11 +122,24 @@ export interface DayPreview {
  */
 const currentDayPreviews = Effect.gen(function*() {
   const views: ReadonlyArray<JournalView> = yield* currentJournals
-  return views.map((view): DayPreview => ({
-    day: view.journal.day,
-    stale: view.stale,
-    preview: previewText(view.journal.report)
-  }))
+  // Transcript reads are concurrent and happen inside the previews memo, so
+  // this costs one pass per refresh rather than one per request.
+  return yield* Effect.forEach(views, (view) =>
+    Effect.gen(function*() {
+      const transcripts = yield* Effect.forEach(
+        view.journal.transcriptKeys,
+        (key) => Files.readJson(Transcript, dataPath(key)),
+        { concurrency: 8 }
+      )
+      return {
+        day: view.journal.day,
+        stale: view.stale,
+        preview: previewText(view.journal.report),
+        audioSeconds: Math.round(audioSecondsFor(
+          transcripts.flatMap((transcript) => Option.isSome(transcript) ? [transcript.value] : [])
+        ))
+      } satisfies DayPreview
+    }), { concurrency: 4 })
 }).pipe(Effect.withSpan("views.dayPreviews"))
 
 /**
@@ -130,8 +159,12 @@ const previewsMemo: PreviewsMemo = { value: null, expiresAt: 0, refreshing: fals
 
 /** On-disk backstop so a cold boot serves the last refresh instantly
  * instead of deriving over the mount. Same contract as the RPC payload,
- * so the snapshot can never drift from what ListDays serves. */
-const PREVIEWS_SNAPSHOT = dataPath("views/days-v2.json")
+ * so the snapshot can never drift from what ListDays serves.
+ *
+ * Versioned in the name: the file is schema-decoded, so adding a field
+ * makes older snapshots fail to decode and recompute. Bumping the name
+ * keeps that from looking like a read error and leaves the old file inert. */
+const PREVIEWS_SNAPSHOT = dataPath("views/days-v3.json")
 
 const storePreviews = (value: ReadonlyArray<DayPreview>, now: number) => {
   previewsMemo.value = value
@@ -169,7 +202,12 @@ const readSnapshot: Effect.Effect<ReadonlyArray<DayPreview> | null, never, FileS
         Effect.succeed(
           rows === null
             ? null
-            : rows.map((row): DayPreview => ({ day: row.day, stale: row.stale, preview: row.preview }))
+            : rows.map((row): DayPreview => ({
+              day: row.day,
+              stale: row.stale,
+              preview: row.preview,
+              audioSeconds: row.audioSeconds
+            }))
         )
     }
   )

@@ -159,6 +159,30 @@ const Routes = HttpRouter.use((router) =>
         })
       }).pipe(Effect.orDie)
     )
+    /**
+     * Inter, self-hosted from the installed package.
+     *
+     * Served rather than pulled from a CDN so the UI has one typeface with
+     * no third-party request: this runs behind a tailnet or an authenticating
+     * proxy, where a CDN fetch is both a privacy leak and a thing that can
+     * fail. Immutable for a year -- the file name is version-pinned by the
+     * dependency, so it can never mean something different.
+     */
+    yield* router.add(
+      "GET",
+      "/inter.woff2",
+      Effect.gen(function*() {
+        const fs = yield* FileSystem.FileSystem
+        const path = "node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2"
+        if (!(yield* fs.exists(path))) {
+          return HttpServerResponse.text("font missing: run bun install", { status: 503 })
+        }
+        return HttpServerResponse.uint8Array(yield* fs.readFile(path), {
+          contentType: "font/woff2",
+          headers: { "cache-control": "public, max-age=31536000, immutable" }
+        })
+      }).pipe(Effect.orDie)
+    )
     // Live progress as SSE, for curl and anything that is not the SPA. The
     // browser uses the `StreamEvents` RPC instead; both read `liveEvents`,
     // so the two feeds cannot diverge.

@@ -28,6 +28,7 @@ import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient"
 import * as RpcClient from "effect/unstable/rpc/RpcClient"
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
 import { RuntimeEvent } from "../RuntimeEvents.ts"
+import { audioLabel, compactDay, relativeDay } from "./DayLabels.ts"
 import { JournalsGroup } from "./JournalApi.ts"
 import { Place } from "./Places.ts"
 import { MAP_COVER, MAP_ZOOM, mapTiles, nudgeLatLon, TILE_SIZE } from "./Maps.ts"
@@ -71,6 +72,14 @@ const renderDay = (journal: Journal | null) =>
     : journal.report
     ? renderReport(journal.report)
     : `<p class="empty">Nothing recorded.</p>`
+
+/** Today as a civil day in the viewer's zone. Read per paint rather than
+ * cached: a page left open overnight should relabel itself. */
+const todayDay = () => {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, "0")
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
 
 const mount = document.getElementById("app")!
 
@@ -434,7 +443,7 @@ const program = Effect.gen(function*() {
         `</div></div>`
       }).join("")
     mount.innerHTML =
-      `<p><a href="#/">All days</a></p><h2>Places</h2>` +
+      `<h2>Places</h2>` +
       `<p class="empty">A stay keeps the place name when it falls inside its radius. ` +
       `Name candidates below to grow the list; saving replaces the whole list.</p>` +
       `<div id="place-list">${placeRows || `<p class="empty">No places yet.</p>`}</div>` +
@@ -522,20 +531,26 @@ const program = Effect.gen(function*() {
     cancelPage()
     table = null
     spacer = null
-    mount.innerHTML = `<p><a href="#/">All days</a></p><h2>Places</h2><p class="empty">Loading…</p>`
+    mount.innerHTML = `<h2>Places</h2><p class="empty">Loading…</p>`
     return Effect.catchCause(refreshPlaces(""), (cause) =>
       Effect.sync(() => {
-        mount.innerHTML = `<p><a href="#/">All days</a></p><h2>Places</h2>` +
+        mount.innerHTML = `<h2>Places</h2>` +
           `<p class="empty">Could not load places: ${escapeHtml(failureMessage(Cause.squash(cause)))}</p>`
       }))
   })
 
-  const rowHtml = (row: DayRow): string =>
-    `<span class="vrow-title">${escapeHtml(row.day)}` +
-    (row.stale ? `<span class="stale">rewriting</span>` : "") + `</span>` +
-    (row.preview
-      ? `<p class="preview">${escapeHtml(row.preview)}</p>`
-      : `<p class="empty">Nothing recorded.</p>`)
+  const rowHtml = (row: DayRow): string => {
+    const audio = audioLabel(row.audioSeconds)
+    return `<span class="vrow-title">` +
+      `<span class="vrow-day">${escapeHtml(compactDay(row.day))}</span>` +
+      `<span class="vrow-rel">${escapeHtml(relativeDay(row.day, todayDay()))}</span>` +
+      (row.stale ? `<span class="stale">rewriting</span>` : "") +
+      (audio ? `<span class="vrow-audio" title="Recorded audio">${escapeHtml(audio)}</span>` : "") +
+      `</span>` +
+      (row.preview
+        ? `<p class="preview">${escapeHtml(row.preview)}</p>`
+        : `<p class="empty">Nothing recorded.</p>`)
+  }
 
   /** The spacer height follows the loaded rows. */
   const refreshChrome = () => {

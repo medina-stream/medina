@@ -8,9 +8,22 @@ import type { Journal } from "./Resources.ts"
 import type { JournalView } from "./Views.ts"
 
 const STYLE = `
+  /* Inter, self-hosted (see the /inter.woff2 route). One typeface for the
+     whole UI: no serif stack, no second family for controls. */
+  @font-face {
+    font-family: "Inter";
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: url("/inter.woff2") format("woff2");
+  }
   :root {
     color-scheme: light dark;
-    font-family: ui-serif, Georgia, serif;
+    --ui: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    font-family: var(--ui);
+    /* Inter's optical sizing and tabular figures: dates line up in a column
+       when the digits are all the same width. */
+    font-optical-sizing: auto;
     --ink: #1a1a1a;
     --muted: #6b6b6b;
     --rule: #d8d4cc;
@@ -20,7 +33,6 @@ const STYLE = `
     --accent: #2f6f4f;
     --bad: #b93f3f;
     --warn: #b07d1a;
-    --ui: ui-sans-serif, system-ui, -apple-system, sans-serif;
     /* Tap targets: 44px is the accessibility floor on touch. */
     --tap: 2.75rem;
   }
@@ -32,30 +44,36 @@ const STYLE = `
   }
   * { box-sizing: border-box; }
   body {
+    font-family: var(--ui);
     max-width: 46rem;
     margin: 0 auto;
-    padding: 2rem 1.25rem 5rem;
-    line-height: 1.6;
+    padding: 1.25rem 1.25rem 4rem;
+    line-height: 1.55;
     color: var(--ink);
     background: var(--bg);
     /* Keep long place names and URLs from forcing a sideways scroll. */
     overflow-wrap: break-word;
   }
-  @media (max-width: 34rem) { body { padding: 1.25rem 1rem 4rem; } }
-  h1 { font-size: clamp(1.75rem, 6vw, 2.25rem); margin: 0; line-height: 1.15; }
+  @media (max-width: 34rem) { body { padding: .75rem 1rem 3rem; } }
+  h1 { font-size: 1.5rem; margin: 0; line-height: 1.2; letter-spacing: -.01em; }
+  h2 { font-size: 1.15rem; margin: 0 0 1rem; line-height: 1.3; letter-spacing: -.01em; }
+  h3 { font-size: 1rem; margin: 1.5rem 0 .25rem; }
   header p, .empty { color: var(--muted); }
   section { border-top: 1px solid var(--rule); margin-top: 2.5rem; padding-top: 1.5rem; }
-  h2 { font-size: 1.25rem; margin: 0 0 1rem; line-height: 1.25; }
   h2 a { color: inherit; text-decoration: none; }
   h2 a:hover { text-decoration: underline; }
-  h3 { font-size: 1.05rem; margin: 1.5rem 0 .25rem; }
-  p { margin: .75rem 0; }
+  p { margin: .7rem 0; }
   a { color: var(--accent); }
-  .stale { font-size: .75rem; font-weight: normal; color: var(--muted); margin-left: .5rem; }
+  .stale { font-size: .7rem; font-weight: 500; color: var(--muted); }
+
+  /* Room for the floating account button above whatever the view puts
+     first -- a day row's badge or the Places heading. Set on the mount
+     rather than inside the table, so the virtual scroll math keeps its
+     one-to-one mapping from scrollTop to row index. */
+  #app { padding-top: 3.25rem; }
 
   /* Controls: one look, and never smaller than a comfortable tap. */
   input, button, select {
-    font: inherit;
     font-family: var(--ui);
     font-size: 1rem; /* iOS zooms the page on focus below 16px. */
     color: inherit;
@@ -76,10 +94,12 @@ const STYLE = `
   button.danger { color: var(--bad); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  /* Top bar: title left, actions right, on one line at every width. */
-  .topbar { display: flex; align-items: center; gap: .75rem; }
-  .topbar h1 { flex: 1 1 auto; min-width: 0; }
-  .topbar-actions { display: flex; align-items: center; gap: .5rem; flex: none; }
+  /* The account button floats over the list's top-right corner. The list
+     gets matching top padding so the first row's badge never sits under it. */
+  .accountbutton {
+    position: fixed; top: .6rem; right: max(.6rem, calc((100vw - 46rem) / 2));
+    z-index: 2; background: var(--bg); border-color: var(--rule-soft);
+  }
   .iconbutton {
     display: inline-flex; align-items: center; justify-content: center; gap: .35rem;
     min-width: var(--tap); min-height: var(--tap);
@@ -88,9 +108,12 @@ const STYLE = `
   }
   .iconbutton:hover { background: var(--surface); border-color: var(--rule); color: var(--ink); }
   #account-dot { margin: 0; }
+  .accountnav { display: flex; gap: 1rem; padding-bottom: .9rem; margin-bottom: .3rem; border-bottom: 1px solid var(--rule-soft); }
+  .accountnav a { font-weight: 550; text-decoration: none; }
+  .accountnav a:hover { text-decoration: underline; }
 
   /* Status and live feed (inside the account modal) */
-  .status { font-family: var(--ui); font-size: .875rem; }
+  .status { font-size: .875rem; }
   .status-line { margin: 0 0 .5rem; font-weight: 600; }
   .status-dot {
     display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
@@ -102,7 +125,7 @@ const STYLE = `
   .status ul { margin: .5rem 0 1rem; padding-left: 1.25rem; }
   .status li { margin: .15rem 0; }
   .live-list {
-    font-family: var(--ui); font-size: .8rem;
+    font-size: .8rem;
     max-height: 40vh; overflow-y: auto; margin: .5rem 0 0; padding-left: 1.5rem;
   }
   .live-list li { margin: .2rem 0; }
@@ -136,23 +159,35 @@ const STYLE = `
     .modal-body { max-height: calc(92vh - 4rem); }
   }
 
-  /* Days table. No toolbar any more: the list is the whole view, so it gets
-     the height the tools used to share. */
-  .vtable { overflow-y: auto; height: min(78vh, 52rem); border-top: 1px solid var(--rule); margin-top: 1rem; position: relative; -webkit-overflow-scrolling: touch; }
+  /* Days table. No page header any more, so the list starts at the top. */
+  .vtable { overflow-y: auto; height: min(84vh, 58rem); position: relative; -webkit-overflow-scrolling: touch; }
   .vspacer { position: relative; width: 100%; }
   .vrow { position: absolute; left: 0; right: 0; height: 100px; }
   /* The whole row is the target, so it is a button, not a link inside text. */
   .vrow-inner {
     display: block; width: 100%; height: 100px; text-align: left;
-    padding: 12px .5rem; margin: 0; overflow: hidden;
+    padding: 14px .5rem; margin: 0; overflow: hidden;
     background: none; border: 0; border-bottom: 1px solid var(--rule-soft);
-    border-radius: 0; cursor: pointer; font: inherit; color: inherit;
+    border-radius: 0; cursor: pointer; color: inherit;
   }
   .vrow-inner:hover { background: var(--surface); }
   .vrow-inner:active { transform: none; }
-  .vrow-title { display: flex; align-items: baseline; gap: .5rem; font-size: 1.05rem; font-weight: 700; margin-bottom: .25rem; }
-  .vrow-inner p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .vrow-inner p.preview { color: var(--ink); font-family: inherit; }
+  .vrow-title { display: flex; align-items: baseline; gap: .55rem; margin-bottom: .3rem; }
+  /* Tabular figures keep the compact dates in a true column. */
+  .vrow-day {
+    font-size: 1rem; font-weight: 620; letter-spacing: -.01em;
+    font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1;
+  }
+  .vrow-rel { font-size: .8rem; color: var(--muted); }
+  .vrow-audio {
+    margin-left: auto; flex: none;
+    font-size: .7rem; font-variant-numeric: tabular-nums;
+    color: var(--muted); background: var(--surface);
+    border: 1px solid var(--rule-soft); border-radius: 999px;
+    padding: .1rem .45rem;
+  }
+  .vrow-inner p { margin: 0; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vrow-inner p.preview { color: var(--ink); }
 
   /* Places editor. The row is a wrapping grid: wide screens get one line,
      narrow screens stack into labelled fields instead of a jumble. */
@@ -161,7 +196,7 @@ const STYLE = `
   .pfield { display: flex; flex-direction: column; gap: .15rem; flex: 1 1 7rem; min-width: 0; }
   .pfield-name { flex: 2 1 11rem; }
   .pfield-narrow { flex: 0 1 6rem; }
-  .pfield span { font-family: var(--ui); font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .pfield span { font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .pfield input { width: 100%; }
   .prow button { align-self: end; }
   @media (max-width: 34rem) {
@@ -169,9 +204,9 @@ const STYLE = `
     .prow button { width: 100%; }
   }
   .pcand-head { display: flex; flex-wrap: wrap; gap: .25rem .5rem; align-items: baseline; }
-  .pcand-meta { font-family: var(--ui); font-size: .8rem; color: var(--muted); }
+  .pcand-meta { font-size: .8rem; color: var(--muted); }
   .psave { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: 1rem 0; }
-  #place-status { font-family: var(--ui); font-size: .85rem; color: var(--muted); }
+  #place-status { font-size: .85rem; color: var(--muted); }
   .paddr { display: flex; gap: .5rem; margin: .5rem 0; }
   .paddr input { flex: 1 1 auto; min-width: 0; }
 
@@ -198,7 +233,7 @@ const STYLE = `
   }
   .pattrib {
     position: absolute; right: 0; bottom: 0; z-index: 1;
-    font-family: var(--ui); font-size: .65rem; color: var(--ink);
+    font-size: .65rem; color: var(--ink);
     background: rgb(255 255 255 / .75); padding: .1rem .3rem; border-top-left-radius: .3rem;
   }
   @media (prefers-color-scheme: dark) { .pattrib { background: rgb(0 0 0 / .6); } }
@@ -284,33 +319,30 @@ export const journalPage = (views: ReadonlyArray<JournalView>) =>
 export const spaHome = () =>
   "<!doctype html>" + render(
     <Layout title="Medina" scriptSrc="/app.js">
-      <header class="topbar">
-        <h1>Journal</h1>
-        <div class="topbar-actions">
-          <a class="placeslink" href="#/places">Places</a>
-          {/* Status lives behind this rather than on the page: it matters
-              when something is wrong, and the dot says when that is. */}
-          <button type="button" id="account-open" class="iconbutton" aria-label="Account and status" aria-haspopup="dialog">
-            <span class="status-dot" id="account-dot"></span>
-            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
-              <circle cx="12" cy="8" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7" />
-              <path d="M4.5 20c0-4.1 3.4-6.4 7.5-6.4s7.5 2.3 7.5 6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
-            </svg>
-          </button>
-        </div>
-      </header>
+      {/* No page title: the list is the page. The account button floats over
+          it so nothing competes with the days for vertical space. */}
+      <button type="button" id="account-open" class="iconbutton accountbutton" aria-label="Account and status" aria-haspopup="dialog">
+        <span class="status-dot" id="account-dot"></span>
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="8" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7" />
+          <path d="M4.5 20c0-4.1 3.4-6.4 7.5-6.4s7.5 2.3 7.5 6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+        </svg>
+      </button>
       <main id="app">
         <p class="empty">Loading…</p>
       </main>
       <noscript><p class="empty">The journal loads over a typed RPC and needs JavaScript.</p></noscript>
 
-      {/* Account: pipeline health and the live feed. */}
+      {/* Account: navigation, pipeline health, and the live feed. */}
       <dialog id="account-modal" class="modal" aria-labelledby="account-title">
         <div class="modal-head">
-          <h2 id="account-title">Status</h2>
+          <h2 id="account-title">Account</h2>
           <button type="button" class="iconbutton" data-close-modal aria-label="Close">✕</button>
         </div>
         <div class="modal-body">
+          <nav class="accountnav">
+            <a href="#/places" data-close-modal>Places</a>
+          </nav>
           <div class="status" id="pipeline-status">
             <p id="status-summary" class="status-line">Checking data flow…</p>
             <div id="status-details"></div>
