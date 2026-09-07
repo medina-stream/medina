@@ -10,10 +10,11 @@ import * as Files from "../Files.ts"
 import type { Resource } from "../Resource.ts"
 import { sha256 } from "../Hash.ts"
 import { type Corrections, correctionFor, currentAttribution, readCorrections, transcribedCaptures } from "./Attribution.ts"
+import { StartTimeRulesService } from "./StartTimeRules.ts"
 import { homeTimeZone } from "./Time.ts"
 import { dataPath, DayEntry, DayIndex, DAY_INDEX_VERSION, dayIndexKey, Transcript, transcriptKey } from "./Resources.ts"
 
-type AttributionEnv = FileSystem.FileSystem
+type AttributionEnv = FileSystem.FileSystem | StartTimeRulesService
 
 /**
  * One file mapping day -> usable captures, so serving reads one file instead
@@ -89,7 +90,7 @@ export const dayIndexResource: Resource<AttributionEnv> = {
  * request handling in steady state does no corpus work at all. Concurrent
  * misses share one build: the in-flight Effect is what's cached, so two
  * requests arriving together can't both materialize. */
-let dayIndexMemo: { inputHash: string; index: Effect.Effect<DayIndex, Error, FileSystem.FileSystem> } | null = null
+let dayIndexMemo: { inputHash: string; index: Effect.Effect<DayIndex, Error, AttributionEnv> } | null = null
 
 export const currentDayIndex = Effect.gen(function*() {
   const { pairs, inputHash, corrections, zone } = yield* dayIndexBasis

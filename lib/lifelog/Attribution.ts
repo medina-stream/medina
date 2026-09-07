@@ -14,9 +14,9 @@ import * as Option from "effect/Option"
 import * as Files from "../Files.ts"
 import type { Resource } from "../Resource.ts"
 import { sha256 } from "../Hash.ts"
-import { filenameWallClock } from "./Resources.ts"
 import { mediaTimingFor } from "./MediaProbe.ts"
-import { decideStart } from "./StartTime.ts"
+import { decideStart, startTimeRulesDigest, type StartTimeRules } from "./StartTime.ts"
+import { StartTimeRulesService } from "./StartTimeRules.ts"
 import { homeTimeZone } from "./Time.ts"
 import {
   Attribution,
@@ -82,19 +82,24 @@ export const correctionFor = (corrections: Corrections, captureId: string) =>
  * every capture whose zone belief came from the default). Evidence
  * (transcript/triage/provenance) is immutable per capture id, so it does
  * not participate. */
-const attributionBasisHash = (correctionHash: string | null, homeZone: string) =>
-  sha256(`${ATTRIBUTION_VERSION}\n${homeZone}\n${correctionHash ?? ""}`)
+const attributionBasisHash = (
+  correctionHash: string | null,
+  homeZone: string,
+  rulesDigest: string
+) => sha256(`${ATTRIBUTION_VERSION}\n${homeZone}\n${correctionHash ?? ""}\n${rulesDigest}`)
 
 /** Best-evidence guess (or correction) for one capture. The correction is
  * passed in: callers already hold the listing they derived the basis from. */
 const attributeCapture = Effect.fn("attributeCapture")(function*(
   captureId: string,
   basisHash: string,
-  correction: Option.Option<Correction>
+  correction: Option.Option<Correction>,
+  rules: StartTimeRules
 ) {
   const zone = yield* homeTimeZone
 
-  // Evidence, in descending order of directness.
+  // Evidence, as the sources recorded it. Interpretation belongs to
+  // `decideStart`, under the application's rules.
   const provenance = yield* Files.readJson(Provenance, dataPath(provenanceKey(captureId)))
   const transcript = yield* Files.readJson(Transcript, dataPath(transcriptKey(captureId)))
   const triage = yield* Files.readJson(Triage, dataPath(`triage/${captureId}.json`))
@@ -102,29 +107,8 @@ const attributeCapture = Effect.fn("attributeCapture")(function*(
   // the filename and the source's clock. Probed once and cached.
   const media = yield* mediaTimingFor(captureId)
 
-  let filenameWall: string | null = null
-  let modifiedWall: string | null = null
-  let legacyWall: string | null = null
-
-  if (Option.isSome(provenance) && provenance.value.records.length > 0) {
-    const record = provenance.value.records[0]!
-    filenameWall = filenameWallClock(record.filename)
-    // `modifiedTime` is a UTC instant (upload time on this corpus, often
-    // hours after the fact). Converted here, never reinterpreted as local:
-    // stripping its `Z` and treating it as wall clock shifted every such
-    // capture by the zone offset.
-    modifiedWall = null
-  } else if (Option.isSome(transcript) && transcript.value.capturedAt) {
-    legacyWall = transcript.value.capturedAt
-  } else if (Option.isSome(triage)) {
-    filenameWall = filenameWallClock(triage.value.filename)
-    legacyWall = filenameWall === null ? null : legacyWall
-  }
-
-  const modifiedUtc = Option.isSome(provenance) && provenance.value.records.length > 0
-    ? provenance.value.records[0]!.modifiedTime
-    : Option.isSome(triage)
-    ? triage.value.receivedAt
+  const record = Option.isSome(provenance) && provenance.value.records.length > 0
+    ? provenance.value.records[0]!
     : null
 
   /** Wall clock in `zone` -> UTC instant, or null if unusable. */
@@ -134,35 +118,33 @@ const attributeCapture = Effect.fn("attributeCapture")(function*(
   }
 
   const decision = decideStart({
-    // A legacy `capturedAt` is a naive local clock like a filename stamp,
-    // so it enters the decision the same way.
-    filenameWallClock: filenameWall ?? legacyWall,
-    containerStartUtc: media.startedAt,
-    modifiedWallClock: null,
+    source: record?.source ?? null,
+    filename: record?.filename ?? (Option.isSome(triage) ? triage.value.filename : null),
+    containerCreatedAt: media.createdAt,
+    containerDurationSeconds: media.durationSeconds,
+    // A legacy `capturedAt` is a naive local clock, like a filename stamp,
+    // and is only consulted when no filename stamp matched.
+    legacyWallClock: Option.isSome(transcript) ? transcript.value.capturedAt ?? null : null,
+    // A UTC instant, used as one: never reinterpreted as local wall clock.
+    modifiedAt: record?.modifiedTime ?? (Option.isSome(triage) ? triage.value.receivedAt : null),
     zone,
     toUtc: wallToUtc
-  })
+  }, rules)
 
+  // A correction can replace any of these below, so they stay mutable.
   let startUtc: string | null = decision.startUtc
-  // Nothing better: the source's modified time is a UTC instant already, so
-  // it is used directly rather than run through the zone.
-  let method = decision.method as string
-  let confidence: "high" | "medium" | "low" | "none" = decision.confidence
-  if (startUtc === null && modifiedUtc !== null && !Number.isNaN(Date.parse(modifiedUtc))) {
-    startUtc = new Date(modifiedUtc).toISOString()
-    method = "modified-time"
-    confidence = "low"
-  }
+  let method: string = decision.method
+  const confidence = decision.confidence
 
   let day: string | null = null
   let timeZone: string | null = null
   if (startUtc !== null) {
-    // The zone belief is the home zone until better evidence (GPS) exists;
-    // it decides which civil day the instant belongs to.
-    const zoned = DateTime.makeZoned(startUtc, { timeZone: zone })
+    // The decision's zone (rules may override the believed one) decides
+    // which civil day the instant belongs to.
+    const zoned = DateTime.makeZoned(startUtc, { timeZone: decision.zone })
     if (Option.isSome(zoned)) {
       day = DateTime.formatIsoDate(zoned.value)
-      timeZone = zone
+      timeZone = decision.zone
     }
   }
 
@@ -195,7 +177,7 @@ const attributeCapture = Effect.fn("attributeCapture")(function*(
   )
 })
 
-type AttributionEnv = FileSystem.FileSystem
+type AttributionEnv = FileSystem.FileSystem | StartTimeRulesService
 
 /** Eager per-capture instances; the basis hash in the key means dropping in
  * a correction stales exactly that capture's attribution. */
@@ -205,14 +187,16 @@ export const attributionResource: Resource<AttributionEnv> = {
     const captureIds = yield* transcribedCaptures
     const zone = yield* homeTimeZone
     const corrections = yield* readCorrections
+    const rules = yield* StartTimeRulesService
+    const rulesDigest = startTimeRulesDigest(rules)
     return captureIds.map((captureId) => {
       const { correction, hash } = correctionFor(corrections, captureId)
-      const basisHash = attributionBasisHash(hash, zone)
+      const basisHash = attributionBasisHash(hash, zone, rulesDigest)
       return {
         key: attributionKey(captureId, basisHash),
         label: captureId,
         dependencies: [transcriptKey(captureId), correctionKey(captureId)],
-        materialize: attributeCapture(captureId, basisHash, correction)
+        materialize: attributeCapture(captureId, basisHash, correction, rules)
       }
     })
   })
@@ -226,12 +210,13 @@ export const currentAttribution = Effect.fn("currentAttribution")(function*(
   corrections: Corrections,
   zone: string
 ) {
+  const rules = yield* StartTimeRulesService
   const { correction, hash } = correctionFor(corrections, captureId)
-  const basisHash = attributionBasisHash(hash, zone)
+  const basisHash = attributionBasisHash(hash, zone, startTimeRulesDigest(rules))
   const key = attributionKey(captureId, basisHash)
   const existing = yield* Files.readJson(Attribution, dataPath(key))
   if (Option.isSome(existing)) return { attribution: existing.value, correctionHash: hash }
-  yield* attributeCapture(captureId, basisHash, correction)
+  yield* attributeCapture(captureId, basisHash, correction, rules)
   return {
     attribution: Option.getOrThrow(yield* Files.readJson(Attribution, dataPath(key))),
     correctionHash: hash

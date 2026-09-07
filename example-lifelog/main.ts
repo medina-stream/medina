@@ -25,6 +25,8 @@ import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
 import * as RpcServer from "effect/unstable/rpc/RpcServer"
 import { JournalsGroup } from "../lib/lifelog/JournalApi.ts"
 import { parseDayId } from "../lib/lifelog/DayLabels.ts"
+import { StartTimeRulesService } from "../lib/lifelog/StartTimeRules.ts"
+import { StartTimeHintsLive } from "./StartTimeHints.ts"
 import { liveEvents, makeJournalsHandlers } from "../lib/lifelog/JournalRpc.ts"
 import * as DayEvents from "../lib/lifelog/DayEvents.ts"
 import { TelemetryLive } from "../lib/runtime/Telemetry.ts"
@@ -371,7 +373,7 @@ const Routes = HttpRouter.use((router) =>
   })
 )
 
-type LifelogEnv = Drive.Drive | Bucket.Bucket | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine
+type LifelogEnv = Drive.Drive | Bucket.Bucket | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine | StartTimeRulesService
 
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
@@ -509,6 +511,10 @@ const Services = Layer.mergeAll(
   AssemblyAI.layer,
   Git.layer,
   tailscaleLayer,
+  // This archive's start-time rules, layered over Medina's defaults. Edit
+  // `StartTimeHints.ts` to teach it about a new recorder or a bad clock;
+  // the rules hash into the attribution basis, so saving re-derives.
+  StartTimeHintsLive,
   LlmLive,
   WorkflowsLive,
   TelemetryLive
@@ -534,6 +540,8 @@ const Main = Layer.mergeAll(
   DaySync
 ).pipe(
   Layer.provide(Services),
+  // Routes and handlers both read attribution, which needs the rules.
+  Layer.provide(StartTimeHintsLive),
   // Cold caches over the network mount can push the first / render past
   // Bun's default 10s request timeout; give handlers more room.
   // Bind loopback by default. Reads (journals, GPS, transcripts) are
