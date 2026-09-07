@@ -51,6 +51,14 @@ export const localDay = (iso: string, zone: string): string => {
   }
 }
 
+/** `HH:MM` in `zone` for an instant `offsetMs` into a recording that began
+ * at `startIso`. Absolute, so nothing downstream has to add anything. */
+export const utteranceClock = (startIso: string, zone: string, offsetMs: number): string => {
+  const start = new Date(startIso)
+  if (Number.isNaN(start.getTime())) return ""
+  return localTime(new Date(start.getTime() + Math.max(0, offsetMs)).toISOString(), zone)
+}
+
 /**
  * How a recording is labelled in the evidence given to the model: the local
  * clock time, with the zone named so the model is not left inferring it.

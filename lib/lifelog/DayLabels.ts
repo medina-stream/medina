@@ -21,9 +21,31 @@ const WEEKDAYS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const dayMs = (day: string): number =>
   /^\d{4}-\d{2}-\d{2}$/.test(day) ? Date.parse(`${day}T00:00:00Z`) : Number.NaN
 
-/** `2026-09-01` as `20260901`. Non-days pass through untouched. */
-export const compactDay = (day: string): string =>
-  /^\d{4}-\d{2}-\d{2}$/.test(day) ? day.replaceAll("-", "") : day
+/**
+ * The app's day id: a `0` prefix and the compact date, e.g. `020260901`.
+ *
+ * This matches the recorder's own filename convention
+ * (`sco-lifelog-020260907T110112.m4a`), so what the UI shows and what the
+ * URL carries line up with the source files. Civil `YYYY-MM-DD` stays the
+ * canonical form everywhere inside Medina -- this is a display and routing
+ * skin over it, and `parseDayId` is its inverse.
+ */
+export const DAY_ID_PREFIX = "0"
+
+export const dayId = (day: string): string =>
+  /^\d{4}-\d{2}-\d{2}$/.test(day) ? `${DAY_ID_PREFIX}${day.replaceAll("-", "")}` : day
+
+/**
+ * A day id back to a civil day, or `null` if it is not one.
+ *
+ * Plain `YYYY-MM-DD` and an unprefixed `YYYYMMDD` are both accepted, so
+ * older links and hand-typed URLs keep working.
+ */
+export const parseDayId = (id: string): string | null => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(id)) return id
+  const match = id.match(/^0?(\d{4})(\d{2})(\d{2})$/)
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : null
+}
 
 /**
  * A short human bearing on a day, relative to `today`:

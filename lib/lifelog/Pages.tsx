@@ -4,6 +4,7 @@
  * is LLM output derived from untrusted transcripts — cannot inject markup.
  */
 import { raw, render, type Child } from "../Html.ts"
+import { dayId } from "./DayLabels.ts"
 import type { Journal } from "./Resources.ts"
 import type { JournalView } from "./Views.ts"
 
@@ -365,9 +366,9 @@ export const spaHome = () =>
 
 export const dayPage = (journal: Journal) =>
   "<!doctype html>" + render(
-    <Layout title={`Medina — ${journal.day}`}>
+    <Layout title={`Medina — ${dayId(journal.day)}`}>
       <header>
-        <h1>{journal.day}</h1>
+        <h1>{dayId(journal.day)}</h1>
         <p><a href="/">All days</a></p>
       </header>
       <main>
@@ -380,9 +381,9 @@ export const dayPage = (journal: Journal) =>
  * pipeline pass materializes it; the request path never does. */
 export const pendingPage = (day: string) =>
   "<!doctype html>" + render(
-    <Layout title={`Medina — ${day}`}>
+    <Layout title={`Medina — ${dayId(day)}`}>
       <header>
-        <h1>{day}</h1>
+        <h1>{dayId(day)}</h1>
         <p><a href="/">All days</a></p>
       </header>
       <main>

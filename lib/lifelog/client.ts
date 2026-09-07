@@ -28,7 +28,7 @@ import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient"
 import * as RpcClient from "effect/unstable/rpc/RpcClient"
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
 import { RuntimeEvent } from "../RuntimeEvents.ts"
-import { audioLabel, compactDay, relativeDay } from "./DayLabels.ts"
+import { audioLabel, dayId, parseDayId, relativeDay } from "./DayLabels.ts"
 import { JournalsGroup } from "./JournalApi.ts"
 import { Place } from "./Places.ts"
 import { MAP_COVER, MAP_ZOOM, mapTiles, nudgeLatLon, TILE_SIZE } from "./Maps.ts"
@@ -80,6 +80,16 @@ const todayDay = () => {
   const pad = (value: number) => String(value).padStart(2, "0")
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
 }
+
+/**
+ * Hash routes carry the day id (`#/day/020260907`), so a shared link reads
+ * the same as the row it came from. `parseDayId` still accepts a civil day,
+ * so links made before this change keep resolving.
+ */
+const dayRoute = (day: string) => `#/day/${dayId(day)}`
+
+const routeDay = (hash: string): string | null =>
+  hash.startsWith("#/day/") ? parseDayId(hash.slice("#/day/".length)) : null
 
 const mount = document.getElementById("app")!
 
@@ -542,7 +552,7 @@ const program = Effect.gen(function*() {
   const rowHtml = (row: DayRow): string => {
     const audio = audioLabel(row.audioSeconds)
     return `<span class="vrow-title">` +
-      `<span class="vrow-day">${escapeHtml(compactDay(row.day))}</span>` +
+      `<span class="vrow-day">${escapeHtml(dayId(row.day))}</span>` +
       `<span class="vrow-rel">${escapeHtml(relativeDay(row.day, todayDay()))}</span>` +
       (row.stale ? `<span class="stale">rewriting</span>` : "") +
       (audio ? `<span class="vrow-audio" title="Recorded audio">${escapeHtml(audio)}</span>` : "") +
@@ -649,7 +659,7 @@ const program = Effect.gen(function*() {
 
   const handleDayEvent = (day: string) => {
     const hash = location.hash
-    const viewing = hash.startsWith("#/day/") ? hash.slice("#/day/".length) : null
+    const viewing = routeDay(hash)
     if (viewing !== null) {
       if (viewing === day) Effect.runFork(loadRoute())
       return
@@ -732,7 +742,7 @@ const program = Effect.gen(function*() {
     spacer.addEventListener("click", (event) => {
       const target = (event.target as HTMLElement | null)?.closest("[data-open-day]")
       const day = target?.getAttribute("data-open-day")
-      if (day) location.hash = `#/day/${day}`
+      if (day) location.hash = dayRoute(day)
     })
     table.addEventListener("scroll", onScroll, { passive: true })
     loadPage()
@@ -752,18 +762,18 @@ const program = Effect.gen(function*() {
       const title = document.getElementById("day-title")
       const body = document.getElementById("day-body")
       if (!dialog || !title || !body) return
-      title.textContent = day
+      title.textContent = dayId(day)
       body.innerHTML = `<p class="empty">Loading…</p>`
       if (!dialog.dataset.wired) {
         dialog.dataset.wired = "1"
         dialog.addEventListener("close", () => {
-          if (location.hash.startsWith("#/day/")) location.hash = "#/"
+          if (routeDay(location.hash) !== null) location.hash = "#/"
         })
       }
       const journal = yield* client.GetJournal({ day })
       // A late response for a day the user already navigated away from
       // must not overwrite what they are looking at now.
-      if (location.hash !== `#/day/${day}`) return
+      if (routeDay(location.hash) !== day) return
       body.innerHTML = renderDay(journal)
       if (journal === null) {
         const route = location.hash
@@ -782,7 +792,7 @@ const program = Effect.gen(function*() {
         yield* showPlaces
         return
       }
-      const day = hash.startsWith("#/day/") ? hash.slice("#/day/".length) : null
+      const day = routeDay(hash)
       if (day === null) {
         closeModal("day-modal")
         if (table === null) showTable()
@@ -801,12 +811,16 @@ const program = Effect.gen(function*() {
     Effect.runFork(refreshStatus)
   })
 
-  yield* loadRoute()
-  yield* refreshStatus
-  window.setInterval(() => Effect.runFork(refreshStatus), 30_000)
+  // Registered before the first route load, which awaits an RPC: a row
+  // tapped during that window sets the hash, and if nothing were listening
+  // yet the modal would only appear on a later reload.
   window.addEventListener("hashchange", () => {
     Effect.runFork(loadRoute())
   })
+
+  yield* loadRoute()
+  yield* refreshStatus
+  window.setInterval(() => Effect.runFork(refreshStatus), 30_000)
   yield* subscribeLive
   // Keep this scope — and the RPC client living in it — open for the life of
   // the page. Route loads fork into it; closing it would strand them.

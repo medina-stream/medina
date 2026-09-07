@@ -24,6 +24,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
 import * as RpcServer from "effect/unstable/rpc/RpcServer"
 import { JournalsGroup } from "../lib/lifelog/JournalApi.ts"
+import { parseDayId } from "../lib/lifelog/DayLabels.ts"
 import { liveEvents, makeJournalsHandlers } from "../lib/lifelog/JournalRpc.ts"
 import * as DayEvents from "../lib/lifelog/DayEvents.ts"
 import { TelemetryLive } from "../lib/runtime/Telemetry.ts"
@@ -206,9 +207,9 @@ const Routes = HttpRouter.use((router) =>
       "GET",
       "/journal/:day",
       Effect.gen(function*() {
-        const { day } = yield* HttpRouter.params
-        if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-          return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
+        const day = parseDayId((yield* HttpRouter.params).day ?? "")
+        if (day === null) {
+          return HttpServerResponse.text("not a day: use 020260907 or 2026-09-07", { status: 400 })
         }
         // Same resource, two representations: browsers get the page, tools
         // get the record.
@@ -248,9 +249,9 @@ const Routes = HttpRouter.use((router) =>
       "GET",
       "/movement/:day",
       Effect.gen(function*() {
-        const { day } = yield* HttpRouter.params
-        if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-          return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
+        const day = parseDayId((yield* HttpRouter.params).day ?? "")
+        if (day === null) {
+          return HttpServerResponse.text("not a day: use 020260907 or 2026-09-07", { status: 400 })
         }
         // Read-only: never materialize here. A stale or missing movement is
         // a 202 placeholder; the hourly pipeline pass converges it.
@@ -293,9 +294,9 @@ const Routes = HttpRouter.use((router) =>
       "GET",
       "/gps/:day",
       Effect.gen(function*() {
-        const { day } = yield* HttpRouter.params
-        if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-          return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
+        const day = parseDayId((yield* HttpRouter.params).day ?? "")
+        if (day === null) {
+          return HttpServerResponse.text("not a day: use 020260907 or 2026-09-07", { status: 400 })
         }
         const points = yield* Effect.orDie(gpsDay(day))
         const today = yield* todayDay
@@ -309,9 +310,9 @@ const Routes = HttpRouter.use((router) =>
       "GET",
       "/stays/:day",
       Effect.gen(function*() {
-        const { day } = yield* HttpRouter.params
-        if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-          return HttpServerResponse.text("not a day: use YYYY-MM-DD", { status: 400 })
+        const day = parseDayId((yield* HttpRouter.params).day ?? "")
+        if (day === null) {
+          return HttpServerResponse.text("not a day: use 020260907 or 2026-09-07", { status: 400 })
         }
         const stays = yield* Effect.orDie(staysDay(day))
         const today = yield* todayDay

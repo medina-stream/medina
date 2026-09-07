@@ -1,15 +1,35 @@
 import { describe, expect, test } from "bun:test"
-import { audioLabel, compactDay, relativeDay } from "./DayLabels.ts"
+import { audioLabel, dayId, parseDayId, relativeDay } from "./DayLabels.ts"
 
-describe("compactDay", () => {
-  test("drops the separators", () => {
-    expect(compactDay("2026-09-01")).toBe("20260901")
-    expect(compactDay("2026-12-31")).toBe("20261231")
+describe("dayId", () => {
+  test("matches the recorder's filename convention", () => {
+    expect(dayId("2026-09-01")).toBe("020260901")
+    expect(dayId("2026-12-31")).toBe("020261231")
   })
 
   test("leaves anything that is not a day alone", () => {
-    expect(compactDay("")).toBe("")
-    expect(compactDay("not-a-day")).toBe("not-a-day")
+    expect(dayId("")).toBe("")
+    expect(dayId("not-a-day")).toBe("not-a-day")
+  })
+
+  test("round-trips through parseDayId", () => {
+    for (const day of ["2026-09-01", "2026-12-31", "2025-01-09"]) {
+      expect(parseDayId(dayId(day))).toBe(day)
+    }
+  })
+})
+
+describe("parseDayId", () => {
+  test("accepts the prefixed id, the bare compact form, and a civil day", () => {
+    expect(parseDayId("020260901")).toBe("2026-09-01")
+    expect(parseDayId("20260901")).toBe("2026-09-01")
+    expect(parseDayId("2026-09-01")).toBe("2026-09-01")
+  })
+
+  test("anything else is null, so a bad URL cannot become a request", () => {
+    for (const bad of ["", "nope", "0202609", "0202609011", "2026-9-1"]) {
+      expect(parseDayId(bad)).toBeNull()
+    }
   })
 })
 
