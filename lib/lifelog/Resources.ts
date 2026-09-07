@@ -16,9 +16,12 @@ export const DATA_DIR = process.env.DATA_DIR ?? "data/artifacts"
 export const dataPath = (key: string) => artifactPath(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
+// v10: recording labels carry local clock time, not the raw UTC instant.
+// Handing the model UTC made a 10:47 PDT recording read as "17:50" -- an
+// afternoon event reported on a morning that had not happened yet.
 // v9: journal derivation consumes notes-v2's diarized evidence. v8 established
 // separately materialized notes as a prerequisite.
-export const JOURNAL_VERSION = "journal-v9"
+export const JOURNAL_VERSION = "journal-v10"
 /** Notes are keyed by the day they are about, not by ingest id: exactly one
  * journal note per day is what the journal reads. The previous
  * `notes-git-v1` (every markdown file in the checkout, keyed by ingest id)
@@ -57,9 +60,12 @@ export const journalKey = (day: string, inputHash: string) => `journal/${JOURNAL
  * Movement and the day's written note are NOT part of the key — notes are
  * extraction from audio only, and re-running them when movement changes is
  * the waste this resource eliminates. */
+// v3 labels each recording with its local clock time; v2's labels were raw
+// UTC instants, so notes extracted under it carry times shifted by the
+// zone offset and must not be reused.
 // v2 feeds timestamped diarized turns to extraction instead of flattening all
 // speakers into one undifferentiated block.
-export const NOTES_LLM_VERSION = "notes-llm-v2"
+export const NOTES_LLM_VERSION = "notes-llm-v3"
 export const notesLlmKey = (day: string, inputHash: string) => `notes/${NOTES_LLM_VERSION}/${day}/${inputHash}.json`
 
 /** LLM-derived notes from a day's audio transcripts. Stable across movement

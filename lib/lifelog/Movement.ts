@@ -92,6 +92,7 @@ export const composeMovement = (stays: ReadonlyArray<StayRow>, input: ReadonlyAr
 // Place shapes live in `Places.ts` so the browser can import them without
 // this module's DuckDB and filesystem dependencies. Re-exported here because
 // server callers have always found them at this path.
+import { localDay as localDayIso, localTime } from "./LocalTime.ts"
 import { GeocodeResult, Place, PlaceCandidate, Places } from "./Places.ts"
 export { GeocodeResult, Place, PlaceCandidate, Places } from "./Places.ts"
 
@@ -136,18 +137,14 @@ export class Movement extends Schema.Class<Movement>("Movement")({
   suggestions: Schema.Array(PlaceSuggestion)
 }) {}
 
+/** Zone rendering lives in `LocalTime.ts`; `localDay` here takes a `Date`
+ * because the callers below already have one. */
+const localDay = (instant: Date, zone: string) => localDayIso(instant.toISOString(), zone)
+
 const localParts = (instant: Date, zone: string) => Object.fromEntries(
   new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })
     .formatToParts(instant).filter((part) => part.type !== "literal").map((part) => [part.type, part.value])
 )
-const localDay = (instant: Date, zone: string) => {
-  const p = localParts(instant, zone)
-  return `${p.year}-${p.month}-${p.day}`
-}
-const localTime = (iso: string, zone: string) => {
-  const p = localParts(new Date(iso), zone)
-  return `${p.hour}:${p.minute}`
-}
 /** Interpret local midnight in an IANA zone. Two passes resolve normal DST offsets. */
 const localMidnightUtc = (day: string, zone: string) => {
   const [year, month, date] = day.split("-").map(Number) as [number, number, number]
