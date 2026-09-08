@@ -589,6 +589,21 @@ const program = Effect.gen(function*() {
       }))
   })
 
+  const searchHeader = (query: string) =>
+    `<header class="home-header">` +
+    `<form id="transcript-search" class="search-form">` +
+    `<input id="transcript-query" type="search" value="${escapeHtml(query)}" placeholder="Search words; quote a phrase" aria-label="Search transcripts">` +
+    `<button type="submit">Search</button></form></header>`
+
+  const wireSearchForm = () => {
+    const form = document.getElementById("transcript-search") as HTMLFormElement | null
+    form?.addEventListener("submit", (event) => {
+      event.preventDefault()
+      const next = (document.getElementById("transcript-query") as HTMLInputElement | null)?.value.trim() ?? ""
+      location.hash = next ? searchRoute(next) : "#/"
+    })
+  }
+
   const renderSearchHit = (hit: TranscriptSearchHit) => {
     const clock = utteranceClock(hit.startTime, hit.timeZone, hit.startMs)
     const speaker = hit.speaker ? `${hit.speaker} · ` : ""
@@ -605,17 +620,9 @@ const program = Effect.gen(function*() {
       table = null
       spacer = null
       mount.innerHTML =
-        `<h2>Transcript search</h2>` +
-        `<form id="transcript-search" class="search-form">` +
-        `<input id="transcript-query" type="search" value="${escapeHtml(query)}" placeholder="Search words; quote a phrase" aria-label="Search transcripts" autofocus>` +
-        `<button type="submit">Search</button></form>` +
-        `<div id="search-results">${query.trim() ? `<p class="empty">Searching…</p>` : `<p class="empty">Search recorded speech by word or phrase.</p>`}</div>`
-      const form = document.getElementById("transcript-search") as HTMLFormElement
-      form.addEventListener("submit", (event) => {
-        event.preventDefault()
-        const next = (document.getElementById("transcript-query") as HTMLInputElement).value.trim()
-        location.hash = searchRoute(next)
-      })
+        searchHeader(query) +
+        `<section id="search-results">${query.trim() ? `<p class="empty">Searching…</p>` : `<p class="empty">Search recorded speech by word or phrase.</p>`}</section>`
+      wireSearchForm()
       if (!query.trim()) return
       const hits = yield* client.SearchTranscripts({ query, limit: 30 })
       if (routeSearch(location.hash) !== query) return
@@ -814,10 +821,12 @@ const program = Effect.gen(function*() {
     rows = []
     exhausted = false
     mount.innerHTML =
+      searchHeader("") +
       `<div class="vtable" id="vtable" tabindex="0">` +
       `<div class="vspacer" id="vspacer"></div>` +
       `</div>` +
       `<noscript><p class="empty">The journal loads over a typed RPC and needs JavaScript.</p></noscript>`
+    wireSearchForm()
     table = document.getElementById("vtable")!
     spacer = document.getElementById("vspacer")!
     // Delegated: rows are recycled on every scroll paint, so per-row
