@@ -41,6 +41,19 @@ export class DayRow extends Schema.Class<DayRow>("DayRow")({
   audioSeconds: Schema.Number
 }) {}
 
+/** One matching transcript passage. Times are offsets into the recording;
+ * `startTime` and `timeZone` let clients display them as a local clock. */
+export class TranscriptSearchHit extends Schema.Class<TranscriptSearchHit>("TranscriptSearchHit")({
+  day: Schema.String,
+  captureId: Schema.String,
+  startTime: Schema.String,
+  timeZone: Schema.String,
+  speaker: Schema.NullOr(Schema.String),
+  startMs: Schema.Number,
+  endMs: Schema.Number,
+  excerpt: Schema.String
+}) {}
+
 /** Every RPC in this group fails the same way: a human-readable message. */
 export class ApiError extends Schema.Class<ApiError>("ApiError")({
   message: Schema.String
@@ -72,6 +85,17 @@ export const ListDays = Rpc.make("ListDays", {
     offset: Schema.optional(Schema.Number)
   },
   success: Schema.Array(DayRow),
+  error: ApiError
+})
+
+/** Local full-text search over normalized transcript passages. The index is
+ * built by the pipeline; this read never invokes a vendor or an LLM. */
+export const SearchTranscripts = Rpc.make("SearchTranscripts", {
+  payload: {
+    query: Schema.String,
+    limit: Schema.optional(Schema.Number)
+  },
+  success: Schema.Array(TranscriptSearchHit),
   error: ApiError
 })
 
@@ -205,6 +229,7 @@ export const JournalsGroup = RpcGroup.make(
   ListJournals,
   GetJournal,
   ListDays,
+  SearchTranscripts,
   GetStatus,
   ListPlaces,
   ListPlaceCandidates,

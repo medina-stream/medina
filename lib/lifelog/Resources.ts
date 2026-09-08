@@ -16,6 +16,7 @@ export const DATA_DIR = process.env.DATA_DIR ?? "data/artifacts"
 export const dataPath = (key: string) => artifactPath(DATA_DIR, key)
 
 export const TRANSCRIPT_VERSION = "assemblyai-u35p-v1"
+export const TRANSCRIPT_SEARCH_VERSION = "transcript-search-v1"
 // v12: start times come from `StartTime.decideStart`, which corroborates
 // the filename stamp against container metadata.
 // v11: turn stamps are absolute local clock times and recordings carry a
@@ -58,6 +59,11 @@ export class Note extends Schema.Class<Note>("Note")({
 
 export const transcriptKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.json`
 export const vendorKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.assemblyai.json`
+export const transcriptSearchKey = (inputHash: string) => `search/${TRANSCRIPT_SEARCH_VERSION}/${inputHash}.sqlite`
+/** Completion marker for the resource; the SQLite file itself is published
+ * first so a partial build is never considered current by the pipeline. */
+export const transcriptSearchIndexKey = (inputHash: string) => `search/${TRANSCRIPT_SEARCH_VERSION}/${inputHash}.json`
+export const transcriptSearchLatestKey = `search/${TRANSCRIPT_SEARCH_VERSION}/latest.json`
 export const journalKey = (day: string, inputHash: string) => `journal/${JOURNAL_VERSION}/${day}/${inputHash}.json`
 
 /** LLM-derived notes from a day's transcripts. Keyed by a hash of the

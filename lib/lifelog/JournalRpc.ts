@@ -27,9 +27,11 @@ import {
   PipelineTiming,
   SourceStatus,
   StageStatus,
-  StatusTotals
+  StatusTotals,
+  TranscriptSearchHit
 } from "./JournalApi.ts"
 import { forwardGeocode, listPlaces, placeCandidates, replacePlaces } from "./Movement.ts"
+import { searchTranscripts } from "./TranscriptSearch.ts"
 import { PlaceCandidate } from "./Places.ts"
 import { currentJournals, dayPreviews, pipelineStatus } from "./Views.ts"
 
@@ -101,6 +103,11 @@ export const makeJournalsHandlers = <R>({ canWrite }: JournalHandlerOptions<R>) 
       ).pipe(
         Effect.mapError(toApiError),
         Effect.withSpan("rpc.ListDays", { attributes: { limit: limit ?? -1, offset: offset ?? 0 } })
+      ),
+    SearchTranscripts: ({ query, limit }) =>
+      Effect.map(searchTranscripts(query, limit), (hits) => hits.map((hit) => new TranscriptSearchHit(hit))).pipe(
+        Effect.mapError(toApiError),
+        Effect.withSpan("rpc.SearchTranscripts", { attributes: { limit: limit ?? 20 } })
       ),
     GetStatus: () =>
       Effect.map(pipelineStatus, (status) =>

@@ -10,6 +10,7 @@ import {
   LastRun,
   ListDays,
   ListJournals,
+  SearchTranscripts,
   ListPlaceCandidates,
   ListPlaces,
   PipelineFailure,
@@ -18,7 +19,8 @@ import {
   SavePlaces,
   SourceStatus,
   StageStatus,
-  StatusTotals
+  StatusTotals,
+  TranscriptSearchHit
 } from "./JournalApi.ts"
 import { Place, PlaceCandidate } from "./Places.ts"
 import { Journal } from "./Resources.ts"
@@ -54,6 +56,16 @@ describe("journals RPC contract", () => {
     expect(Schema.decodeUnknownSync(ListDays.payloadSchema)({} as const)).toEqual({})
   })
 
+  test("transcript hits survive a JSON round-trip", () => {
+    const hits = [new TranscriptSearchHit({
+      day: "2026-09-02", captureId: "capture-1", startTime: "2026-09-02T16:30:00Z",
+      timeZone: "America/Los_Angeles", speaker: "A", startMs: 12_000, endMs: 17_000,
+      excerpt: "Talked about the <plan>."
+    })]
+    const json = JSON.parse(JSON.stringify(Schema.encodeSync(SearchTranscripts.successSchema)(hits)))
+    expect(Schema.decodeUnknownSync(SearchTranscripts.successSchema)(json)).toEqual(hits)
+    expect(Schema.decodeUnknownSync(SearchTranscripts.payloadSchema)({ query: "plan", limit: 10 })).toEqual({ query: "plan", limit: 10 })
+  })
   test("failures carry a message", () => {
     const error = new ApiError({ message: "no inputs for 2026-09-01" })
     const json = JSON.parse(JSON.stringify(Schema.encodeSync(ListJournals.errorSchema)(error)))

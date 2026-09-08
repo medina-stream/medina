@@ -190,6 +190,14 @@ const STYLE = `
   .vrow-inner p { margin: 0; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .vrow-inner p.preview { color: var(--ink); }
 
+  /* Transcript search: results are whole buttons so the day target is
+     generous on touch without a nested-link focus trap. */
+  .search-form { display: flex; gap: .5rem; margin: 0 0 1rem; }
+  .search-form input { flex: 1 1 auto; min-width: 0; }
+  .search-hit { display: flex; flex-direction: column; gap: .2rem; width: 100%; text-align: left; white-space: normal; border: 0; border-bottom: 1px solid var(--rule-soft); border-radius: 0; padding: .85rem 0; background: transparent; }
+  .search-hit:hover { background: var(--surface); }
+  .search-hit-meta { color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
+
   /* Places editor. The row is a wrapping grid: wide screens get one line,
      narrow screens stack into labelled fields instead of a jumble. */
   .pplace, .pcand { border-bottom: 1px solid var(--rule-soft); padding: 1rem 0; }
@@ -342,6 +350,7 @@ export const spaHome = () =>
         </div>
         <div class="modal-body">
           <nav class="accountnav">
+            <a href="#/search" data-close-modal>Search</a>
             <a href="#/places" data-close-modal>Places</a>
           </nav>
           <div class="status" id="pipeline-status">

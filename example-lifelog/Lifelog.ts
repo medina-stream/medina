@@ -11,6 +11,7 @@ export { notesSource, noteForDay, NOTE_RECHECK_DAYS, NOTE_WINDOW_DAYS } from "./
 export { httpIngest } from "../lib/capture/index.ts"
 export { attributionResource, currentAttribution, readCorrections, transcribedCaptures } from "../lib/lifelog/Attribution.ts"
 export { currentDayIndex, dayIndexResource, dayTranscripts } from "../lib/lifelog/DayIndex.ts"
+export { transcriptSearchResource, searchTranscripts } from "../lib/lifelog/TranscriptSearch.ts"
 export {
   hasJournalInputs,
   journalCachedForDay,

@@ -29,10 +29,11 @@ import * as RpcClient from "effect/unstable/rpc/RpcClient"
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
 import { RuntimeEvent } from "../RuntimeEvents.ts"
 import { audioLabel, dayId, parseDayId, relativeDay } from "./DayLabels.ts"
+import { utteranceClock } from "./LocalTime.ts"
 import { JournalsGroup } from "./JournalApi.ts"
 import { Place } from "./Places.ts"
 import { MAP_COVER, MAP_ZOOM, mapTiles, nudgeLatLon, TILE_SIZE } from "./Maps.ts"
-import type { DayRow, PipelineStatus, SourceStatus, StageStatus } from "./JournalApi.ts"
+import type { DayRow, PipelineStatus, SourceStatus, StageStatus, TranscriptSearchHit } from "./JournalApi.ts"
 import type { ApiError } from "./JournalApi.ts"
 import type { PlaceCandidate } from "./Places.ts"
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError"
@@ -90,6 +91,13 @@ const dayRoute = (day: string) => `#/day/${dayId(day)}`
 
 const routeDay = (hash: string): string | null =>
   hash.startsWith("#/day/") ? parseDayId(hash.slice("#/day/".length)) : null
+
+const searchRoute = (query: string) => `#/search?q=${encodeURIComponent(query)}`
+
+const routeSearch = (hash: string): string | null => {
+  if (!hash.startsWith("#/search")) return null
+  return new URLSearchParams(hash.slice("#/search".length).replace(/^\?/, "")).get("q") ?? ""
+}
 
 const mount = document.getElementById("app")!
 
@@ -549,6 +557,49 @@ const program = Effect.gen(function*() {
       }))
   })
 
+  const renderSearchHit = (hit: TranscriptSearchHit) => {
+    const clock = utteranceClock(hit.startTime, hit.timeZone, hit.startMs)
+    const speaker = hit.speaker ? `${hit.speaker} · ` : ""
+    return `<button type="button" class="search-hit" data-open-day="${escapeHtml(hit.day)}">` +
+      `<span class="search-hit-meta">${escapeHtml(dayId(hit.day))}${clock ? ` · ${escapeHtml(clock)}` : ""} · ${escapeHtml(speaker)}recording ${escapeHtml(hit.captureId.slice(0, 12))}</span>` +
+      `<span>${escapeHtml(hit.excerpt)}</span></button>`
+  }
+
+  /** Transcript search is a distinct route, so its query is shareable and
+   * browser Back returns to the prior result set. */
+  const showSearch = (query: string): Effect.Effect<void, ApiError | RpcClientError> =>
+    Effect.gen(function*() {
+      cancelPage()
+      table = null
+      spacer = null
+      mount.innerHTML =
+        `<h2>Transcript search</h2>` +
+        `<form id="transcript-search" class="search-form">` +
+        `<input id="transcript-query" type="search" value="${escapeHtml(query)}" placeholder="Search words; quote a phrase" aria-label="Search transcripts" autofocus>` +
+        `<button type="submit">Search</button></form>` +
+        `<div id="search-results">${query.trim() ? `<p class="empty">Searching…</p>` : `<p class="empty">Search recorded speech by word or phrase.</p>`}</div>`
+      const form = document.getElementById("transcript-search") as HTMLFormElement
+      form.addEventListener("submit", (event) => {
+        event.preventDefault()
+        const next = (document.getElementById("transcript-query") as HTMLInputElement).value.trim()
+        location.hash = searchRoute(next)
+      })
+      if (!query.trim()) return
+      const hits = yield* client.SearchTranscripts({ query, limit: 30 })
+      if (routeSearch(location.hash) !== query) return
+      const results = document.getElementById("search-results")
+      if (!results) return
+      results.innerHTML = hits.length > 0
+        ? hits.map(renderSearchHit).join("")
+        : `<p class="empty">No matching transcript passages.</p>`
+      for (const element of Array.from(results.querySelectorAll("[data-open-day]"))) {
+        element.addEventListener("click", () => {
+          const day = element.getAttribute("data-open-day")
+          if (day) location.hash = dayRoute(day)
+        })
+      }
+    })
+
   const rowHtml = (row: DayRow): string => {
     const audio = audioLabel(row.audioSeconds)
     return `<span class="vrow-title">` +
@@ -790,6 +841,12 @@ const program = Effect.gen(function*() {
       if (hash === "#/places") {
         closeModal("day-modal")
         yield* showPlaces
+        return
+      }
+      const search = routeSearch(hash)
+      if (search !== null) {
+        closeModal("day-modal")
+        yield* showSearch(search)
         return
       }
       const day = routeDay(hash)

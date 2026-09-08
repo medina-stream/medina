@@ -42,7 +42,7 @@ import type { PipelineSource } from "../lib/Pipeline.ts"
 import type { Source } from "../lib/Resource.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
-import { audioSource, recordingObjectSource, attributionResource, dayIndexResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { audioSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 
@@ -450,7 +450,7 @@ const Ingest = Layer.effectDiscard(
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement
         // changes), movement enriches journals, and the journal reads both.
-        [attributionResource, dayIndexResource, movementResource, notesResource, journalResource],
+        [attributionResource, dayIndexResource, transcriptSearchResource, movementResource, notesResource, journalResource],
         dataPath
       ).pipe(
         Effect.catchCause((cause) => Effect.logError("pipeline run failed", cause))
