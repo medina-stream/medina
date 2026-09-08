@@ -42,7 +42,7 @@ import type { PipelineSource } from "../lib/Pipeline.ts"
 import type { Source } from "../lib/Resource.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
-import { archiveSweepSource, audioSource, driveAllowlistSource, driveInventorySource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { archiveSweepSource, audioSource, driveAllowlistSource, driveInventorySource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 
@@ -463,9 +463,12 @@ const Ingest = Layer.effectDiscard(
     yield* Effect.andThen(
       runPipeline<LifelogEnv>(
         sources,
-        // The archive sweep runs first among stages: every capture the pass
-        // just ingested reaches the bucket before derivation work begins.
-        [archiveSweepSource, gpsCompactSource, staysSource],
+        // Stage order: the archive sweep runs first -- every capture the
+        // pass just ingested reaches the bucket before any derivation work.
+        // Then normalize (probe + transcode to canonical chunks; after this
+        // original blobs are never read again) and transcribe (chunks ->
+        // one merged transcript per capture), then GPS derivations.
+        [archiveSweepSource, mediaNormalizeSource, mediaTranscribeSource, gpsCompactSource, staysSource],
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement
         // changes), movement enriches journals, and the journal reads both.

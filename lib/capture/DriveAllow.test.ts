@@ -4,7 +4,6 @@ import { BunFileSystem } from "@effect/platform-bun"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Stream from "effect/Stream"
-import { AssemblyAI } from "../AssemblyAI.ts"
 import { Drive, DriveItem } from "../Drive.ts"
 import * as Files from "../Files.ts"
 import { DATA_DIR, dataPath } from "../lifelog/Resources.ts"
@@ -73,13 +72,8 @@ describe("driveAllowlistSource", () => {
         })
     })
 
-  // Non-audio test files never reach transcription; the layer satisfies the
-  // type and fails loudly if that ever changes.
-  const assemblyStub = Layer.succeed(AssemblyAI)({
-    transcribe: () => Effect.fail(new Error("test files must not be transcribed"))
-  })
   const layersOf = (items: ReadonlyArray<DriveItem>, downloads: Array<string>) =>
-    Layer.mergeAll(driveOf(items, downloads), assemblyStub, BunFileSystem.layer)
+    Layer.mergeAll(driveOf(items, downloads), BunFileSystem.layer)
 
   test("an empty allowlist downloads nothing", async () => {
     const downloads: Array<string> = []

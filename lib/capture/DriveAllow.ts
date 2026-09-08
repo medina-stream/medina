@@ -25,7 +25,6 @@ import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import type * as Stream from "effect/Stream"
-import type { AssemblyAI } from "../AssemblyAI.ts"
 import { Drive, type DriveItem } from "../Drive.ts"
 import * as Files from "../Files.ts"
 import type { Source } from "../Resource.ts"
@@ -227,7 +226,7 @@ const ingestBlobFile = (
  * no longer shows is reported as a failure, not silently dropped) -- an
  * empty allowlist discovers nothing and the source reads as `empty`.
  */
-export const driveAllowlistSource: Source<Drive | AssemblyAI | FileSystem.FileSystem> = makeItemSource({
+export const driveAllowlistSource: Source<Drive | FileSystem.FileSystem> = makeItemSource({
   name: DRIVE_ALLOW_SOURCE,
   discover: Effect.gen(function*() {
     const allowlist = yield* readAllowlist

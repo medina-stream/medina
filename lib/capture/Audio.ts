@@ -3,7 +3,10 @@
  *
  * Ingest stores the bytes under their sha256 (content identity) and records
  * everything Drive knew as provenance beside the blob. It never interprets
- * that metadata -- deciding when a capture happened is attribution's job.
+ * that metadata -- deciding when a capture happened is attribution's job --
+ * and it never reads the audio: probing, transcoding and transcription are
+ * pipeline stages over captures (see `Media.ts`). Ingest's whole contract
+ * is "the bytes are safe and their story is recorded".
  */
 import { createHash } from "node:crypto"
 import * as Effect from "effect/Effect"
@@ -11,24 +14,19 @@ import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Stream from "effect/Stream"
 import * as Files from "../Files.ts"
-import { AssemblyAI, type VendorTranscript } from "../AssemblyAI.ts"
 import { Drive, type DriveFile } from "../Drive.ts"
 import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
 import {
   captureBlobName,
   captureDir,
-  filenameWallClock,
   dataPath,
   IngestReceipt,
   ingestId,
   ingestReceiptKey,
   Provenance,
   provenanceKey,
-  Transcript,
-  TRANSCRIPT_VERSION,
-  transcriptKey,
-  vendorKey
+  transcriptKey
 } from "../lifelog/Resources.ts"
 
 const AUDIO_SOURCE_NAME = "audio-drive"
@@ -67,41 +65,14 @@ export const hashStreamToFile = (
     return hash.digest("hex")
   })
 
-const normalize = (file: RecordingObject, id: string, vendor: VendorTranscript): Transcript =>
-  new Transcript({
-    provider: "assemblyai",
-    version: TRANSCRIPT_VERSION,
-    ingestId: id,
-    inputKey: `in/${id}`,
-    // Naive local wall clock when the filename carries a stamp, else
-    // absent. Attribution is what decides a capture's start time; this
-    // field is only a hint for legacy captures that predate it, and
-    // substituting a UTC modified time here would misreport it as local.
-    ...(filenameWallClock(file.name) === null
-      ? {}
-      : { capturedAt: filenameWallClock(file.name)! }),
-    transcriptId: vendor.id,
-    vendorKey: vendorKey(id),
-    status: vendor.status === "completed" ? "completed" : "error",
-    completedAt: new Date().toISOString(),
-    text: vendor.text ?? null,
-    utterances: (vendor.utterances ?? []).map((utterance) => ({
-      speaker: utterance.speaker ?? null,
-      startMs: utterance.start,
-      endMs: utterance.end,
-      text: utterance.text,
-      confidence: utterance.confidence ?? null
-    })),
-    error: vendor.error ?? null
-  })
-
 /**
- * Ingest one Drive file: store the bytes as a capture named by their sha256,
- * preserve everything Drive knew about them as provenance beside the blob
- * (the filename is often the only clue to when a capture was recorded — it
- * must survive anything short of losing the data dir), and transcribe. The
- * receipt makes the next pass a single existence check, since the capture id
- * is not derivable without downloading the bytes.
+ * Ingest one Drive file: store the bytes as a capture named by their sha256
+ * and preserve everything Drive knew about them as provenance beside the
+ * blob (the filename is often the only clue to when a capture was recorded
+ * — it must survive anything short of losing the data dir). The receipt
+ * makes the next pass a single existence check, since the capture id is not
+ * derivable without downloading the bytes. Probing and transcription happen
+ * downstream, as stages over the capture.
  */
 export const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
   sourceName: string,
@@ -176,17 +147,6 @@ export const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
     )
   }
 
-  if (!(yield* fs.exists(dataPath(transcriptKey(captureId))))) {
-    yield* Effect.log(`transcribing ${file.name}`)
-    const assemblyai = yield* AssemblyAI
-    const audio = fs.stream(dataPath(blobKey)).pipe(Stream.mapError((cause) => new Error(String(cause))))
-    const result = yield* assemblyai.transcribe(audio)
-    // Keep the provider response losslessly for future features and audits;
-    // the normalized transcript remains Medina's stable internal contract.
-    yield* Files.writeJson(dataPath(vendorKey(captureId)), result.raw)
-    yield* Files.writeJson(dataPath(transcriptKey(captureId)), normalize(file, captureId, result.transcript))
-  }
-
   yield* Files.writeJson(
     dataPath(receiptKey),
     new IngestReceipt({ captureId, ingestedAt: new Date().toISOString() })
@@ -197,7 +157,7 @@ export const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
 export const audioSource = (
   folderId: string,
   latest: number
-): Source<Drive | AssemblyAI | FileSystem.FileSystem> => makeItemSource({
+): Source<Drive | FileSystem.FileSystem> => makeItemSource({
   name: AUDIO_SOURCE_NAME,
   discover: Effect.gen(function*() {
     const drive = yield* Drive
@@ -224,7 +184,7 @@ export const recordingObjectSource = <R>(
   name: string,
   list: Effect.Effect<ReadonlyArray<RecordingObject>, Error, R>,
   download: (file: RecordingObject) => Effect.Effect<Stream.Stream<Uint8Array, Error>, Error, R>
-): Source<R | AssemblyAI | FileSystem.FileSystem> => makeItemSource({
+): Source<R | FileSystem.FileSystem> => makeItemSource({
   name,
   discover: list,
   ingest: (file) => Effect.flatMap(download(file), (stream) => ingestAudioFile(name, file, Effect.succeed(stream))),
