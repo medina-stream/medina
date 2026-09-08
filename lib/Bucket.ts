@@ -14,13 +14,17 @@
  * sweep stage fails visibly in pipeline status until the bucket exists.
  */
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
-  S3Client
+  S3Client,
+  UploadPartCommand
 } from "@aws-sdk/client-s3"
-import { createReadStream } from "node:fs"
+import { open } from "node:fs/promises"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -178,15 +182,69 @@ export const layer: Layer.Layer<Bucket, Config.ConfigError> = Layer.effect(Bucke
 
       putFile: (key, path, contentType) => Effect.tryPromise({
         try: async () => {
+          // The SDK's node-stream body handling stalls under Bun (and web
+          // streams trip its hashing), so files are read with positional
+          // reads and sent as buffers: one plain put when small, multipart
+          // in fixed parts when large. Bounded memory either way, and
+          // multipart keeps each HTTP body a signed, sized buffer -- which
+          // also suits edge-signing proxies that re-sign whole requests.
+          const PART = 8 * 1024 * 1024
           const size = (await Bun.file(path).stat()).size
-          const response = await client.send(new PutObjectCommand({
+          if (size <= PART) {
+            const bytes = new Uint8Array(await Bun.file(path).arrayBuffer())
+            const response = await client.send(new PutObjectCommand({
+              Bucket: bucket,
+              Key: key,
+              Body: bytes,
+              ContentLength: bytes.length,
+              ...(contentType === undefined ? {} : { ContentType: contentType })
+            }))
+            return response.ETag?.replace(/^"|"$/g, "") ?? null
+          }
+          const created = await client.send(new CreateMultipartUploadCommand({
             Bucket: bucket,
             Key: key,
-            Body: createReadStream(path),
-            ContentLength: size,
             ...(contentType === undefined ? {} : { ContentType: contentType })
           }))
-          return response.ETag?.replace(/^"|"$/g, "") ?? null
+          try {
+            const handle = await open(path, "r")
+            const parts: Array<{ ETag: string; PartNumber: number }> = []
+            try {
+              let offset = 0
+              while (offset < size) {
+                const length = Math.min(PART, size - offset)
+                const buffer = Buffer.alloc(length)
+                await handle.read(buffer, 0, length, offset)
+                const part = await client.send(new UploadPartCommand({
+                  Bucket: bucket,
+                  Key: key,
+                  UploadId: created.UploadId,
+                  PartNumber: parts.length + 1,
+                  Body: buffer,
+                  ContentLength: length
+                }))
+                if (part.ETag === undefined) throw new Error(`part ${parts.length + 1} returned no etag`)
+                parts.push({ ETag: part.ETag, PartNumber: parts.length + 1 })
+                offset += length
+              }
+            } finally {
+              await handle.close()
+            }
+            const completed = await client.send(new CompleteMultipartUploadCommand({
+              Bucket: bucket,
+              Key: key,
+              UploadId: created.UploadId,
+              MultipartUpload: { Parts: parts }
+            }))
+            return completed.ETag?.replace(/^"|"$/g, "") ?? null
+          } catch (cause) {
+            await client.send(new AbortMultipartUploadCommand({
+              Bucket: bucket,
+              Key: key,
+              UploadId: created.UploadId
+            })).catch(() => undefined)
+            throw cause
+          }
         },
         catch: asError
       })
