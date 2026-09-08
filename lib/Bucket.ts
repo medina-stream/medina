@@ -1,9 +1,31 @@
-/** Read-only access to one S3-compatible object bucket. */
-import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
+/**
+ * One S3-compatible object bucket: the durable home for capture bytes.
+ *
+ * The filesystem doctrine (see README) is amended, not reversed: the local
+ * data dir remains the working set and derivation cache, but born evidence
+ * -- audio blobs and their provenance -- must also live in the bucket,
+ * because a VM disk is not an archive. Keys in the bucket mirror artifact
+ * keys exactly (`capture/<sha256>/<blob>`), so the bucket is readable with
+ * nothing but this repo and `aws s3 ls`.
+ *
+ * An unconfigured bucket still builds (so tests and read-only work run
+ * without credentials), but `configured` is false and every operation fails
+ * with instructions. Callers that archive best-effort log and move on; the
+ * sweep stage fails visibly in pipeline status until the bucket exists.
+ */
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client
+} from "@aws-sdk/client-s3"
+import { createReadStream } from "node:fs"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import * as Stream from "effect/Stream"
 
 export interface BucketObject {
@@ -13,21 +35,54 @@ export interface BucketObject {
   readonly lastModified: string | null
 }
 
-export class Bucket extends Context.Service<Bucket, {
+export interface BucketApi {
+  /** False when credentials are absent; operations then fail with setup help. */
+  readonly configured: boolean
   readonly list: (prefix: string, limit: number) => Effect.Effect<ReadonlyArray<BucketObject>, Error>
   readonly download: (key: string) => Effect.Effect<Stream.Stream<Uint8Array, Error>, Error>
-}>()("medina/Bucket") {}
+  /** The object's metadata, or null when absent. */
+  readonly head: (key: string) => Effect.Effect<BucketObject | null, Error>
+  /** Resolves to the stored object's etag when the store reports one. */
+  readonly put: (key: string, bytes: Uint8Array, contentType?: string) => Effect.Effect<string | null, Error>
+  /** Streamed from disk: capture blobs can be hundreds of MB. */
+  readonly putFile: (key: string, path: string, contentType?: string) => Effect.Effect<string | null, Error>
+}
+
+export class Bucket extends Context.Service<Bucket, BucketApi>()("medina/Bucket") {}
+
+const NOT_CONFIGURED = "bucket is not configured: set BUCKET_NAME, BUCKET_ACCESS_KEY_ID and "
+  + "BUCKET_SECRET_ACCESS_KEY (and BUCKET_ENDPOINT for non-AWS stores)"
+
+const asError = (cause: unknown) => cause instanceof Error ? cause : new Error(String(cause))
+
+const unconfigured: BucketApi = {
+  configured: false,
+  list: () => Effect.fail(new Error(NOT_CONFIGURED)),
+  download: () => Effect.fail(new Error(NOT_CONFIGURED)),
+  head: () => Effect.fail(new Error(NOT_CONFIGURED)),
+  put: () => Effect.fail(new Error(NOT_CONFIGURED)),
+  putFile: () => Effect.fail(new Error(NOT_CONFIGURED))
+}
 
 export const layer: Layer.Layer<Bucket, Config.ConfigError> = Layer.effect(Bucket)(
   Effect.gen(function*() {
-    const endpoint = yield* Config.string("BUCKET_ENDPOINT").pipe(Config.withDefault("http://127.0.0.1"))
-    const bucket = yield* Config.string("BUCKET_NAME").pipe(Config.withDefault("disabled"))
-    const region = yield* Config.string("BUCKET_REGION").pipe(Config.withDefault("us-east-1"))
-    const accessKeyId = yield* Config.string("BUCKET_ACCESS_KEY_ID").pipe(Config.withDefault("disabled"))
-    const secretAccessKey = yield* Config.string("BUCKET_SECRET_ACCESS_KEY").pipe(Config.withDefault("disabled"))
+    const optional = (name: string) =>
+      Effect.map(
+        Config.option(Config.string(name)),
+        (value) => Option.getOrNull(value)?.trim() || null
+      )
+    const bucket = yield* optional("BUCKET_NAME")
+    const accessKeyId = yield* optional("BUCKET_ACCESS_KEY_ID")
+    const secretAccessKey = yield* optional("BUCKET_SECRET_ACCESS_KEY")
+    // "disabled" grandfathers earlier configs that used it as an explicit off.
+    if (!bucket || bucket === "disabled" || !accessKeyId || !secretAccessKey) {
+      return unconfigured
+    }
+    const endpoint = yield* optional("BUCKET_ENDPOINT")
+    const region = (yield* optional("BUCKET_REGION")) ?? "us-east-1"
     const forcePathStyle = yield* Config.boolean("BUCKET_FORCE_PATH_STYLE").pipe(Config.withDefault(true))
     const client = new S3Client({
-      endpoint,
+      ...(endpoint === null ? {} : { endpoint }),
       region,
       forcePathStyle,
       credentials: {
@@ -35,9 +90,10 @@ export const layer: Layer.Layer<Bucket, Config.ConfigError> = Layer.effect(Bucke
         secretAccessKey
       }
     })
-    const asError = (cause: unknown) => cause instanceof Error ? cause : new Error(String(cause))
 
     return {
+      configured: true,
+
       list: (prefix, limit) => Effect.tryPromise({
         try: async () => {
           if (limit <= 0) return []
@@ -77,7 +133,116 @@ export const layer: Layer.Layer<Bucket, Config.ConfigError> = Layer.effect(Bucke
           body as AsyncIterable<Uint8Array>,
           asError
         ))
-      }))
+      })),
+
+      head: (key) => Effect.tryPromise({
+        try: async () => {
+          try {
+            const response = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+            return {
+              key,
+              size: response.ContentLength ?? null,
+              etag: response.ETag?.replace(/^"|"$/g, "") ?? null,
+              lastModified: response.LastModified?.toISOString() ?? null
+            }
+          } catch (cause) {
+            const status = (cause as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
+            const name = (cause as { name?: string }).name
+            if (status === 404 || name === "NotFound" || name === "NoSuchKey") return null
+            throw cause
+          }
+        },
+        catch: asError
+      }),
+
+      put: (key, bytes, contentType) => Effect.tryPromise({
+        try: async () => {
+          const response = await client.send(new PutObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            Body: bytes,
+            ContentLength: bytes.length,
+            ...(contentType === undefined ? {} : { ContentType: contentType })
+          }))
+          return response.ETag?.replace(/^"|"$/g, "") ?? null
+        },
+        catch: asError
+      }),
+
+      putFile: (key, path, contentType) => Effect.tryPromise({
+        try: async () => {
+          const size = (await Bun.file(path).stat()).size
+          const response = await client.send(new PutObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            Body: createReadStream(path),
+            ContentLength: size,
+            ...(contentType === undefined ? {} : { ContentType: contentType })
+          }))
+          return response.ETag?.replace(/^"|"$/g, "") ?? null
+        },
+        catch: asError
+      })
     }
   })
 )
+
+/**
+ * An in-memory bucket for tests: the same contract with a Map behind it.
+ * The etag is the md5 hex of the bytes, matching a non-multipart S3 put,
+ * because the archive sweep compares etags to skip unchanged uploads.
+ */
+export const layerMemory = (
+  store: Map<string, { bytes: Uint8Array; contentType?: string }> = new Map()
+): Layer.Layer<Bucket> =>
+  Layer.succeed(Bucket)({
+    configured: true,
+    list: (prefix, limit) =>
+      Effect.sync(() =>
+        [...store.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .slice(0, Math.max(0, limit))
+          .map(([key, value]) => ({
+            key,
+            size: value.bytes.length,
+            etag: md5Hex(value.bytes),
+            lastModified: null
+          }))
+      ),
+    download: (key) => {
+      const entry = store.get(key)
+      return entry === undefined
+        ? Effect.fail(new Error(`no such key: ${key}`))
+        : Effect.succeed(Stream.make(entry.bytes))
+    },
+    head: (key) =>
+      Effect.sync(() => {
+        const entry = store.get(key)
+        return entry === undefined ? null : {
+          key,
+          size: entry.bytes.length,
+          etag: md5Hex(entry.bytes),
+          lastModified: null
+        }
+      }),
+    put: (key, bytes, contentType) =>
+      Effect.sync(() => {
+        store.set(key, { bytes: bytes.slice(), ...(contentType === undefined ? {} : { contentType }) })
+        return md5Hex(bytes)
+      }),
+    putFile: (key, path, contentType) =>
+      Effect.tryPromise({
+        try: async () => {
+          const bytes = new Uint8Array(await Bun.file(path).arrayBuffer())
+          store.set(key, { bytes, ...(contentType === undefined ? {} : { contentType }) })
+          return md5Hex(bytes)
+        },
+        catch: asError
+      })
+  })
+
+const md5Hex = (bytes: Uint8Array) => {
+  const hasher = new Bun.CryptoHasher("md5")
+  hasher.update(bytes)
+  return hasher.digest("hex")
+}

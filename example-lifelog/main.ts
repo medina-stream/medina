@@ -42,7 +42,7 @@ import type { PipelineSource } from "../lib/Pipeline.ts"
 import type { Source } from "../lib/Resource.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
-import { audioSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { archiveSweepSource, audioSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 
@@ -391,10 +391,6 @@ const Ingest = Layer.effectDiscard(
     const notesRef = process.env.NOTES_REPO_REF?.trim() || "HEAD"
     const git = yield* Git.Git
     const bucket = yield* Bucket.Bucket
-    const bucketEndpoint = process.env.BUCKET_ENDPOINT?.trim()
-    const bucketName = process.env.BUCKET_NAME?.trim()
-    const bucketAccessKey = process.env.BUCKET_ACCESS_KEY_ID?.trim()
-    const bucketSecretKey = process.env.BUCKET_SECRET_ACCESS_KEY?.trim()
     const bucketPrefix = process.env.BUCKET_PREFIX ?? ""
     const bucketLimit = Number(process.env.BUCKET_LIMIT ?? "25")
 
@@ -423,30 +419,39 @@ const Ingest = Layer.effectDiscard(
       },
       {
         name: "bucket-audio",
-        source: enabled.has("bucket") && bucketEndpoint && bucketName && bucketAccessKey && bucketSecretKey
+        source: enabled.has("bucket") && bucket.configured
           ? recordingObjectSource(
               "bucket-audio",
               bucket.list(bucketPrefix, Number.isFinite(bucketLimit) ? bucketLimit : 25).pipe(
-                Effect.map((objects) => objects.map((object) => ({
-                  id: object.key,
-                  name: object.key.split("/").pop() || object.key,
-                  mimeType: "audio/application",
-                  modifiedTime: object.lastModified ?? new Date(0).toISOString(),
-                  ...(object.etag === null ? {} : { checksum: object.etag })
-                })))
+                Effect.map((objects) =>
+                  objects
+                    // The archive sweep writes back to this same bucket under
+                    // `capture/` (and receipts under `archive/`); never
+                    // re-discover our own archive as new recordings.
+                    .filter((object) => !object.key.startsWith("capture/") && !object.key.startsWith("archive/"))
+                    .map((object) => ({
+                      id: object.key,
+                      name: object.key.split("/").pop() || object.key,
+                      mimeType: "audio/application",
+                      modifiedTime: object.lastModified ?? new Date(0).toISOString(),
+                      ...(object.etag === null ? {} : { checksum: object.etag })
+                    }))
+                )
               ),
               (file) => bucket.download(file.id)
             )
           : undefined,
         disabledReason: enabled.has("bucket")
-          ? "BUCKET_ENDPOINT, BUCKET_NAME, BUCKET_ACCESS_KEY_ID, and BUCKET_SECRET_ACCESS_KEY are required"
+          ? "BUCKET_NAME, BUCKET_ACCESS_KEY_ID, and BUCKET_SECRET_ACCESS_KEY are required"
           : "disabled by MEDINA_SOURCES"
       }
     ]
     yield* Effect.andThen(
       runPipeline<LifelogEnv>(
         sources,
-        [gpsCompactSource, staysSource],
+        // The archive sweep runs first among stages: every capture the pass
+        // just ingested reaches the bucket before derivation work begins.
+        [archiveSweepSource, gpsCompactSource, staysSource],
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement
         // changes), movement enriches journals, and the journal reads both.

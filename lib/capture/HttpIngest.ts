@@ -4,9 +4,11 @@
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
+import type { Bucket } from "../Bucket.ts"
 import * as Files from "../Files.ts"
 import { sha256 } from "../Hash.ts"
 import { captureBlobName, captureDir, dataPath, Provenance, provenanceKey } from "../lifelog/Resources.ts"
+import { archiveCapture } from "./Archive.ts"
 
 /**
  * Ingest one HTTP-posted body (e.g. a GPS app posting location batches) as a
@@ -15,6 +17,13 @@ import { captureBlobName, captureDir, dataPath, Provenance, provenanceKey } from
  *
  * The blob keeps a synthesized name carrying the only born metadata an HTTP
  * push has: the source name and receipt time.
+ *
+ * Unlike a Drive or bucket source, the pushing client keeps no copy — the
+ * moment the response is sent, this host holds the only bytes. So the
+ * capture is archived to the bucket before returning, best-effort: an
+ * archive failure is logged, not surfaced, because the periodic sweep
+ * (`archiveSweepSource`) retries every pass and refusing the ingest would
+ * lose the bytes for sure rather than probably not.
  */
 export const httpIngest = Effect.fn("httpIngest")(function*(
   source: string,
@@ -59,6 +68,13 @@ export const httpIngest = Effect.fn("httpIngest")(function*(
         fetchedAt: receivedAt
       }]
     })
+  )
+
+  // Provenance changed even for duplicates, so reconcile either way.
+  yield* archiveCapture(captureId).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning(`archive deferred for capture ${captureId.slice(0, 12)} (sweep will retry)`, cause)
+    )
   )
 
   return { captureId, bytes: bytes.length, duplicate }

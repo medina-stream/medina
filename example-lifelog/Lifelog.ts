@@ -6,6 +6,7 @@
  * The implementations are Medina library capabilities. This compatibility
  * surface adds only Scott's notes-repository policy.
  */
+export { archiveCapture, archiveSweepSource } from "../lib/capture/index.ts"
 export { audioSource, recordingObjectSource } from "../lib/capture/index.ts"
 export { notesSource, noteForDay, NOTE_RECHECK_DAYS, NOTE_WINDOW_DAYS } from "./Notes.ts"
 export { httpIngest } from "../lib/capture/index.ts"
