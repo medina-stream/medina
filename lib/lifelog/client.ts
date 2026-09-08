@@ -266,9 +266,17 @@ const program = Effect.gen(function*() {
   })
 
   // --- virtual days table -----------------------------------------------
-  // `rows` grows in ListDays pages appended near the bottom, so the table
-  // scrolls endlessly. Appends only (never prepends), so absolute offsets
-  // of rendered rows stay valid as the list grows.
+  // The server window grows in ListDays pages; its separately-derived display
+  // rows always begin with the viewer's current civil day. Keeping the two
+  // arrays separate preserves stable server offsets while allowing midnight
+  // to insert a fresh local day at the top.
+  // `sourceRows` is the unmodified server window. `rows` is the client-side
+  // presentation of it: the viewer's civil today is always first, even before
+  // the pipeline has written a journal for it. Keeping the source window lets
+  // a row that is ahead of the viewer's clock become today's real row at
+  // midnight rather than being discarded.
+  let sourceRows: Array<DayRow> = []
+  let sourceOffset = 0
   let rows: Array<DayRow> = []
   let exhausted = false
   let generation = 0
@@ -649,6 +657,52 @@ const program = Effect.gen(function*() {
       }
     })
 
+  /** The list is anchored to the viewer's local civil day, not the latest
+   * date the server happened to derive. A pipeline operating in another time
+   * zone can briefly have tomorrow's journal; it stays out of the list until
+   * that date is actually today for this browser. */
+  const reconcileRows = () => {
+    const today = todayDay()
+    const byDay = new Map<string, DayRow>()
+    for (const row of sourceRows) {
+      if (row.day <= today) byDay.set(row.day, row)
+    }
+    const current = byDay.get(today) ?? { day: today, stale: false, preview: "", audioSeconds: 0 }
+    rows = [current, ...Array.from(byDay.values())
+      .filter((row) => row.day < today)
+      .sort((left, right) => right.day.localeCompare(left.day))]
+  }
+
+  /** The spacer height follows the displayed rows. */
+  const refreshChrome = () => {
+    if (spacer !== null) spacer.style.height = `${rows.length * ROW_H}px`
+  }
+
+  /** Reconcile on the local midnight boundary. Browsers may throttle timers
+   * in a background tab, so focus/visibility also run the same inexpensive
+   * check when the user returns. */
+  const refreshToday = () => {
+    const before = rows[0]?.day
+    reconcileRows()
+    if (before !== rows[0]?.day) refreshChrome()
+    paintWindow()
+  }
+
+  const scheduleMidnight = () => {
+    const now = new Date()
+    const midnight = new Date(now)
+    midnight.setHours(24, 0, 0, 0)
+    window.setTimeout(() => {
+      refreshToday()
+      scheduleMidnight()
+    }, Math.max(1, midnight.getTime() - now.getTime()))
+  }
+
+  /**
+   * The first row is always a local “today” placeholder, even with no
+   * journal yet. It becomes the server's row automatically as soon as a
+   * ListDays response includes it.
+   */
   const rowHtml = (row: DayRow): string => {
     const audio = audioLabel(row.audioSeconds)
     return `<span class="vrow-title">` +
@@ -662,17 +716,12 @@ const program = Effect.gen(function*() {
         : `<p class="empty">Nothing recorded.</p>`)
   }
 
-  /** The spacer height follows the loaded rows. */
-  const refreshChrome = () => {
-    if (spacer !== null) spacer.style.height = `${rows.length * ROW_H}px`
-  }
-
-  /** Append the next page, unless one is already in flight. Failures clear
+  /** Append the next server page, unless one is already in flight. Failures
    * the in-flight flag without touching rows, so the next paint retries. */
   const loadPage = () => {
     if (pageFiber !== null || exhausted) return
     const gen = generation
-    const offset = rows.length
+    const offset = sourceOffset
     const page = Effect.matchCauseEffect(client.ListDays({ limit: PAGE_SIZE, offset }), {
       onFailure: () => Effect.succeed(null),
       onSuccess: (days) => Effect.succeed(days)
@@ -685,14 +734,10 @@ const program = Effect.gen(function*() {
             if (rows.length === 0) showError(new Error("Could not load the journal."))
             return
           }
-          rows.push(...days)
+          sourceRows.push(...days)
+          sourceOffset += days.length
           if (days.length < PAGE_SIZE) exhausted = true
-          if (rows.length === 0) {
-            mount.innerHTML = `<p class="empty">No journal days yet.</p>`
-            table = null
-            spacer = null
-            return
-          }
+          reconcileRows()
           refreshChrome()
           paintWindow()
         })
@@ -736,18 +781,23 @@ const program = Effect.gen(function*() {
   // data still arrives through the RPC. A table event re-fetches just the
   // affected page; a detail event reloads the day (turning "writing…"
   // into content the moment it materializes).
-  const refetchPage = (index: number) => {
+  /** Refresh the loaded server window after a live day update. The displayed
+   * list includes a synthetic today row, so its indexes intentionally do not
+   * map back to server offsets. */
+  const refreshLoadedRows = () => {
+    if (sourceOffset === 0) return
     const gen = generation
-    const offset = Math.floor(index / PAGE_SIZE) * PAGE_SIZE
-    const refetch = Effect.matchCauseEffect(client.ListDays({ limit: PAGE_SIZE, offset }), {
+    const refetch = Effect.matchCauseEffect(client.ListDays({ limit: sourceOffset, offset: 0 }), {
       onFailure: () => Effect.succeed(null),
       onSuccess: (days) => Effect.succeed(days)
     }).pipe(
       Effect.flatMap((days) =>
         Effect.sync(() => {
           if (gen !== generation || days === null) return
-          rows.splice(offset, days.length, ...days)
+          sourceRows = [...days]
+          sourceOffset = days.length
           if (days.length < PAGE_SIZE) exhausted = true
+          reconcileRows()
           refreshChrome()
           paintWindow()
         })
@@ -767,8 +817,7 @@ const program = Effect.gen(function*() {
     // Untouched while a scroll or seek owns the wire; the next paint or
     // event covers the row.
     if (table === null || pageFiber !== null) return
-    const index = rows.findIndex((row) => row.day === day)
-    if (index !== -1) refetchPage(index)
+    if (rows.some((row) => row.day === day) || day <= todayDay()) refreshLoadedRows()
   }
 
   let liveSeenError = false
@@ -828,6 +877,8 @@ const program = Effect.gen(function*() {
 
   const showTable = () => {
     cancelPage()
+    sourceRows = []
+    sourceOffset = 0
     rows = []
     exhausted = false
     mount.innerHTML =
@@ -1026,6 +1077,12 @@ const program = Effect.gen(function*() {
   window.addEventListener("hashchange", () => {
     Effect.runFork(loadRoute())
   })
+
+  window.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshToday()
+  })
+  window.addEventListener("focus", refreshToday)
+  scheduleMidnight()
 
   yield* loadRoute()
   yield* refreshStatus
