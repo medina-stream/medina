@@ -22,11 +22,32 @@ export class DriveFile extends Schema.Class<DriveFile>("DriveFile")({
   size: Schema.optional(Schema.String)
 }) {}
 
+/** One item from a full-drive metadata crawl: `DriveFile` plus placement. */
+export class DriveItem extends Schema.Class<DriveItem>("DriveItem")({
+  id: Schema.String,
+  name: Schema.String,
+  mimeType: Schema.String,
+  modifiedTime: Schema.String,
+  md5Checksum: Schema.optional(Schema.String),
+  size: Schema.optional(Schema.String),
+  parents: Schema.optional(Schema.Array(Schema.String))
+}) {}
+
 const FileList = Schema.Struct({ files: Schema.Array(DriveFile) })
+const ItemPage = Schema.Struct({
+  nextPageToken: Schema.optional(Schema.String),
+  files: Schema.Array(DriveItem)
+})
 const Token = Schema.Struct({ access_token: Schema.String })
 
 export class Drive extends Context.Service<Drive, {
   readonly list: (folderId: string, pageSize: number) => Effect.Effect<ReadonlyArray<DriveFile>, Error>
+  /**
+   * Every non-trashed item visible to the credential, metadata only — the
+   * inspection surface. Nothing here can read content: inventorying a
+   * whole Drive must be structurally unable to ingest it.
+   */
+  readonly listAll: Effect.Effect<ReadonlyArray<DriveItem>, Error>
   readonly download: (fileId: string) => Effect.Effect<Stream.Stream<Uint8Array, Error>, Error>
 }>()("medina/Drive") {}
 
@@ -68,6 +89,27 @@ export const layer: Layer.Layer<Drive, Config.ConfigError, HttpClient.HttpClient
           Effect.map((body) => body.files.filter((file) => !file.mimeType.startsWith("application/vnd.google-apps."))),
           Effect.mapError(asError)
         ),
+
+      listAll: Effect.gen(function*() {
+        const items: Array<DriveItem> = []
+        let pageToken: string | undefined
+        do {
+          const request = (yield* authorized("https://www.googleapis.com/drive/v3/files")).pipe(
+            HttpClientRequest.setUrlParams({
+              q: "trashed = false",
+              pageSize: "1000",
+              fields: "nextPageToken,files(id,name,mimeType,modifiedTime,md5Checksum,size,parents)",
+              ...(pageToken === undefined ? {} : { pageToken })
+            })
+          )
+          const page = yield* client.execute(request).pipe(
+            Effect.flatMap(HttpClientResponse.schemaBodyJson(ItemPage))
+          )
+          items.push(...page.files)
+          pageToken = page.nextPageToken
+        } while (pageToken !== undefined)
+        return items as ReadonlyArray<DriveItem>
+      }).pipe(Effect.mapError(asError)),
 
       download: (fileId) =>
         authorized(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`).pipe(

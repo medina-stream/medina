@@ -42,7 +42,7 @@ import type { PipelineSource } from "../lib/Pipeline.ts"
 import type { Source } from "../lib/Resource.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
-import { archiveSweepSource, audioSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { archiveSweepSource, audioSource, driveAllowlistSource, driveInventorySource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 
@@ -378,7 +378,7 @@ type LifelogEnv = Drive.Drive | Bucket.Bucket | AssemblyAI.AssemblyAI | Git.Git 
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const enabled = new Set(
-      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket")
+      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow")
         .split(",")
         .map((name) => name.trim())
         .filter(Boolean)
@@ -411,6 +411,20 @@ const Ingest = Layer.effectDiscard(
         name: "audio-drive",
         source: enabled.has("audio") && folderId && tokenUrl ? audioSource(folderId, latest) : undefined,
         disabledReason: enabled.has("audio") ? "GDRIVE_FOLDER_ID and GOOGLE_TOKEN_URL are required" : "disabled by MEDINA_SOURCES"
+      },
+      {
+        // Metadata-only crawl of everything the Drive credential can see.
+        // Inspection is not ingestion: this source reads no file content.
+        name: "drive-inventory",
+        source: enabled.has("inventory") && tokenUrl ? driveInventorySource : undefined,
+        disabledReason: enabled.has("inventory") ? "GOOGLE_TOKEN_URL is required" : "disabled by MEDINA_SOURCES"
+      },
+      {
+        // Ingestion of individually allowlisted Drive files (allow/drive.json
+        // in the data dir). An empty allowlist ingests nothing.
+        name: "drive-allow",
+        source: enabled.has("allow") && tokenUrl ? driveAllowlistSource : undefined,
+        disabledReason: enabled.has("allow") ? "GOOGLE_TOKEN_URL is required" : "disabled by MEDINA_SOURCES"
       },
       {
         name: "notes-git",

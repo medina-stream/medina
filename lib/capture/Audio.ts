@@ -103,7 +103,7 @@ const normalize = (file: RecordingObject, id: string, vendor: VendorTranscript):
  * receipt makes the next pass a single existence check, since the capture id
  * is not derivable without downloading the bytes.
  */
-const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
+export const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
   sourceName: string,
   file: RecordingObject,
   download: Effect.Effect<Stream.Stream<Uint8Array, Error>, Error>
