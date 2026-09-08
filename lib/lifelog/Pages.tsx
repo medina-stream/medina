@@ -149,6 +149,12 @@ const STYLE = `
     position: sticky; top: 0; background: var(--bg);
   }
   .modal-head h2 { flex: 1 1 auto; margin: 0; font-size: 1.15rem; }
+  .day-search { display: flex; align-items: center; gap: .25rem; flex: 1 1 16rem; min-width: 0; }
+  .day-search input { width: 100%; min-width: 0; min-height: 2.2rem; padding: .3rem .45rem; }
+  .day-search button { min-width: 2.2rem; min-height: 2.2rem; padding: .25rem; }
+  #day-search-count { min-width: 2.8rem; color: var(--muted); font-size: .75rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  mark.day-match { background: color-mix(in srgb, var(--warn) 35%, transparent); color: inherit; border-radius: .15rem; }
+  mark.day-match.current { outline: 2px solid var(--accent); outline-offset: 1px; }
   .modal-body { padding: 1rem 1.1rem 1.5rem; overflow-y: auto; max-height: calc(85vh - 4rem); }
   .modal-body h3 { margin-top: 1.25rem; }
   @media (max-width: 34rem) {
@@ -157,6 +163,9 @@ const STYLE = `
       width: 100vw; max-width: 100vw; max-height: 92vh;
       margin: auto auto 0; border-radius: .9rem .9rem 0 0; border-bottom: 0;
     }
+    .modal-head { flex-wrap: wrap; }
+    .modal-head h2 { flex: 1 1 auto; }
+    .day-search { order: 3; flex-basis: 100%; }
     .modal-body { max-height: calc(92vh - 4rem); }
   }
 
@@ -377,6 +386,12 @@ export const spaHome = () =>
       <dialog id="day-modal" class="modal" aria-labelledby="day-title">
         <div class="modal-head">
           <h2 id="day-title"></h2>
+          <form id="day-search" class="day-search" role="search">
+            <input id="day-search-query" type="search" placeholder="Search this day" aria-label="Search this day" />
+            <button type="button" id="day-search-prev" aria-label="Previous match">↑</button>
+            <button type="button" id="day-search-next" aria-label="Next match">↓</button>
+            <span id="day-search-count" role="status"></span>
+          </form>
           <button type="button" class="iconbutton" data-close-modal aria-label="Close">✕</button>
         </div>
         <div class="modal-body" id="day-body"></div>

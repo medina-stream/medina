@@ -119,10 +119,19 @@ const todayDay = () => {
  * the same as the row it came from. `parseDayId` still accepts a civil day,
  * so links made before this change keep resolving.
  */
-const dayRoute = (day: string) => `#/day/${dayId(day)}`
+const dayRoute = (day: string, query = "") =>
+  `#/day/${dayId(day)}${query ? `?q=${encodeURIComponent(query)}` : ""}`
 
-const routeDay = (hash: string): string | null =>
-  hash.startsWith("#/day/") ? parseDayId(hash.slice("#/day/".length)) : null
+const routeDay = (hash: string): string | null => {
+  if (!hash.startsWith("#/day/")) return null
+  return parseDayId(hash.slice("#/day/".length).split("?", 1)[0] ?? "")
+}
+
+const daySearchQuery = (hash: string) => {
+  if (!hash.startsWith("#/day/")) return ""
+  const query = hash.slice("#/day/".length).split("?", 2)[1]
+  return query ? new URLSearchParams(query).get("q") ?? "" : ""
+}
 
 const searchRoute = (query: string) => `#/search?q=${encodeURIComponent(query)}`
 
@@ -634,7 +643,8 @@ const program = Effect.gen(function*() {
       for (const element of Array.from(results.querySelectorAll("[data-open-day]"))) {
         element.addEventListener("click", () => {
           const day = element.getAttribute("data-open-day")
-          if (day) location.hash = dayRoute(day)
+          const query = routeSearch(location.hash) ?? ""
+          if (day) location.hash = dayRoute(day, query)
         })
       }
     })
@@ -854,6 +864,88 @@ const program = Effect.gen(function*() {
     }
   }
 
+  const localSearchTerms = (query: string) =>
+    [...new Set((query.match(/"[^"\r\n]+"|[\p{L}\p{N}][\p{L}\p{N}'_-]*/gu) ?? [])
+      .map((part) => part.startsWith('"') ? part.slice(1, -1) : part)
+      .filter(Boolean))].sort((a, b) => b.length - a.length)
+
+  const wireDaySearch = (body: HTMLElement, initialQuery: string) => {
+    const form = document.getElementById("day-search") as HTMLFormElement | null
+    const input = document.getElementById("day-search-query") as HTMLInputElement | null
+    const previous = document.getElementById("day-search-prev") as HTMLButtonElement | null
+    const next = document.getElementById("day-search-next") as HTMLButtonElement | null
+    const count = document.getElementById("day-search-count")
+    if (!form || !input || !previous || !next || !count) return
+    let matches: Array<HTMLElement> = []
+    let selected = 0
+
+    const clear = () => {
+      for (const mark of Array.from(body.querySelectorAll<HTMLElement>("mark.day-match"))) {
+        const parent = mark.parentNode
+        mark.replaceWith(document.createTextNode(mark.textContent ?? ""))
+        parent?.normalize()
+      }
+    }
+    const refresh = (query: string) => {
+      clear()
+      matches = []
+      selected = 0
+      const terms = localSearchTerms(query)
+      if (terms.length > 0) {
+        const pattern = new RegExp(`(${terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "giu")
+        const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+          acceptNode: (node) => {
+            if (!node.nodeValue?.trim()) return NodeFilter.FILTER_REJECT
+            return node.parentElement?.closest("button, script, style")
+              ? NodeFilter.FILTER_REJECT
+              : NodeFilter.FILTER_ACCEPT
+          }
+        })
+        const nodes: Array<Text> = []
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node as Text)
+        for (const node of nodes) {
+          const text = node.nodeValue ?? ""
+          pattern.lastIndex = 0
+          if (!pattern.test(text)) continue
+          pattern.lastIndex = 0
+          const fragment = document.createDocumentFragment()
+          let offset = 0
+          for (const match of text.matchAll(pattern)) {
+            const start = match.index ?? 0
+            fragment.append(text.slice(offset, start))
+            const mark = document.createElement("mark")
+            mark.className = "day-match"
+            mark.tabIndex = -1
+            mark.textContent = match[0]
+            fragment.append(mark)
+            matches.push(mark)
+            offset = start + match[0].length
+          }
+          fragment.append(text.slice(offset))
+          node.replaceWith(fragment)
+        }
+      }
+      count.textContent = matches.length > 0 ? `${matches.length} match${matches.length === 1 ? "" : "es"}` : query.trim() ? "No matches" : ""
+      previous.disabled = matches.length === 0
+      next.disabled = matches.length === 0
+    }
+    const jump = (change: number) => {
+      if (matches.length === 0) return
+      matches[selected]?.classList.remove("current")
+      selected = (selected + change + matches.length) % matches.length
+      const target = matches[selected]!
+      target.classList.add("current")
+      target.scrollIntoView({ behavior: "smooth", block: "center" })
+      target.focus({ preventScroll: true })
+    }
+    input.value = initialQuery
+    form.onsubmit = (event) => { event.preventDefault(); refresh(input.value) }
+    input.oninput = () => refresh(input.value)
+    previous.onclick = () => jump(-1)
+    next.onclick = () => jump(1)
+    refresh(initialQuery)
+  }
+
   /**
    * Show a day in the modal, over whatever is behind it.
    *
@@ -885,6 +977,7 @@ const program = Effect.gen(function*() {
       if (routeDay(location.hash) !== day) return
       body.innerHTML = renderDay(journal, transcripts)
       wireTranscriptJumps(body)
+      wireDaySearch(body, daySearchQuery(location.hash))
       if (journal === null) {
         const route = location.hash
         yield* Effect.sleep("10 seconds").pipe(
