@@ -17,9 +17,12 @@ import type * as Headers from "effect/unstable/http/Headers"
 import { dayEvent, eventHub } from "../RuntimeEvents.ts"
 import { dayHub, publishDay } from "./DayEvents.ts"
 import { journalCachedForDay } from "./Journal.ts"
+import { dayTranscriptDetail } from "./DayIndex.ts"
 import {
   ApiError,
   DayRow,
+  DayTranscript,
+  TranscriptTurn,
   JournalEntry,
   JournalsGroup,
   LastRun,
@@ -91,6 +94,15 @@ export const makeJournalsHandlers = <R>({ canWrite }: JournalHandlerOptions<R>) 
       Effect.map(journalCachedForDay(day), Option.getOrNull).pipe(
         Effect.mapError(toApiError),
         Effect.withSpan("rpc.GetJournal", { attributes: { day } })
+      ),
+    GetDayTranscripts: ({ day }) =>
+      Effect.map(dayTranscriptDetail(day), (recordings) =>
+        recordings.map((recording) => new DayTranscript({
+          ...recording,
+          turns: recording.turns.map((turn) => new TranscriptTurn(turn))
+        }))).pipe(
+        Effect.mapError(toApiError),
+        Effect.withSpan("rpc.GetDayTranscripts", { attributes: { day } })
       ),
     ListDays: ({ limit, offset }) =>
       Effect.map(

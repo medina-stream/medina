@@ -198,6 +198,17 @@ const STYLE = `
   .search-hit:hover { background: var(--surface); }
   .search-hit-meta { color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
 
+  /* Day detail keeps the generated summary first, followed by the source
+     turns. Chunk headings behave as links to their nearest transcript time. */
+  .transcripts { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+  .transcript-jump { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-weight: inherit; text-align: left; }
+  .transcript-jump:hover { color: var(--accent); text-decoration: underline; }
+  .transcript-recording { margin: 1rem 0 1.35rem; }
+  .transcript-recording h4 { margin: 0 0 .45rem; color: var(--muted); font-size: .8rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .transcript-turn { margin: 0; padding: .42rem 0 .42rem 4.4rem; position: relative; scroll-margin-block: 5rem; }
+  .transcript-time { position: absolute; left: 0; width: 3.6rem; color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
+  .transcript-speaker { font-weight: 650; margin-right: .45rem; }
+
   /* Places editor. The row is a wrapping grid: wide screens get one line,
      narrow screens stack into labelled fields instead of a jumble. */
   .pplace, .pcand { border-bottom: 1px solid var(--rule-soft); padding: 1rem 0; }

@@ -41,6 +41,21 @@ export class DayRow extends Schema.Class<DayRow>("DayRow")({
   audioSeconds: Schema.Number
 }) {}
 
+/** One normalized utterance in a day-detail transcript. */
+export class TranscriptTurn extends Schema.Class<TranscriptTurn>("TranscriptTurn")({
+  speaker: Schema.NullOr(Schema.String),
+  startMs: Schema.Number,
+  endMs: Schema.Number,
+  text: Schema.String
+}) {}
+
+/** One recording and its transcript, retained in chronological day order. */
+export class DayTranscript extends Schema.Class<DayTranscript>("DayTranscript")({
+  captureId: Schema.String,
+  startTime: Schema.String,
+  timeZone: Schema.String,
+  turns: Schema.Array(TranscriptTurn)
+}) {}
 /** One matching transcript passage. Times are offsets into the recording;
  * `startTime` and `timeZone` let clients display them as a local clock. */
 export class TranscriptSearchHit extends Schema.Class<TranscriptSearchHit>("TranscriptSearchHit")({
@@ -70,6 +85,14 @@ export const GetJournal = Rpc.make("GetJournal", {
   // Nullable, not Optional: `null` is plain JSON, while `Option` does not
   // survive a JSON round-trip.
   success: Schema.NullOr(Journal),
+  error: ApiError
+})
+
+/** Transcript evidence behind the day detail. Read-only and normalized: this
+ * does not expose provider-specific JSON or trigger transcription. */
+export const GetDayTranscripts = Rpc.make("GetDayTranscripts", {
+  payload: { day: Schema.String },
+  success: Schema.Array(DayTranscript),
   error: ApiError
 })
 
@@ -228,6 +251,7 @@ export const StreamEvents = Rpc.make("StreamEvents", {
 export const JournalsGroup = RpcGroup.make(
   ListJournals,
   GetJournal,
+  GetDayTranscripts,
   ListDays,
   SearchTranscripts,
   GetStatus,

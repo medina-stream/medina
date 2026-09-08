@@ -4,6 +4,8 @@ import { dayEvent, RuntimeEvent } from "../RuntimeEvents.ts"
 import {
   ApiError,
   DayRow,
+  DayTranscript,
+  GetDayTranscripts,
   GetJournal,
   GetStatus,
   JournalEntry,
@@ -20,7 +22,8 @@ import {
   SourceStatus,
   StageStatus,
   StatusTotals,
-  TranscriptSearchHit
+  TranscriptSearchHit,
+  TranscriptTurn
 } from "./JournalApi.ts"
 import { Place, PlaceCandidate } from "./Places.ts"
 import { Journal } from "./Resources.ts"
@@ -43,6 +46,15 @@ describe("journals RPC contract", () => {
       const json = JSON.parse(JSON.stringify(Schema.encodeSync(GetJournal.successSchema)(value)))
       expect(Schema.decodeUnknownSync(GetJournal.successSchema)(json)).toEqual(value)
     }
+  })
+
+  test("day transcripts preserve recording and turn timing", () => {
+    const transcripts = [new DayTranscript({
+      captureId: "capture-1", startTime: "2026-09-02T16:30:00Z", timeZone: "America/Los_Angeles",
+      turns: [new TranscriptTurn({ speaker: "A", startMs: 12_000, endMs: 17_000, text: "A plan." })]
+    })]
+    const json = JSON.parse(JSON.stringify(Schema.encodeSync(GetDayTranscripts.successSchema)(transcripts)))
+    expect(Schema.decodeUnknownSync(GetDayTranscripts.successSchema)(json)).toEqual(transcripts)
   })
 
   test("ListDays rows survive a JSON round-trip, limit/offset intact", () => {

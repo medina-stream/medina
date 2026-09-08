@@ -121,3 +121,21 @@ export const dayTranscripts = (index: DayIndex, day: string) =>
           Option.isSome(transcript) ? [{ entry, transcript: transcript.value }] : [])
       )
     )
+
+/** The normalized transcript evidence for one day, in recording and turn
+ * order. This uses the same attributed timing as journals and search. */
+export const dayTranscriptDetail = (day: string) =>
+  Effect.gen(function*() {
+    const index = yield* currentDayIndex
+    const inputs = yield* dayTranscripts(index, day)
+    return inputs.map(({ entry, transcript }) => ({
+      captureId: entry.captureId,
+      startTime: entry.startTime,
+      timeZone: entry.timeZone,
+      turns: transcript.utterances.length > 0
+        ? transcript.utterances.map(({ speaker, startMs, endMs, text }) => ({ speaker, startMs, endMs, text }))
+        : transcript.text?.trim()
+          ? [{ speaker: null, startMs: 0, endMs: 0, text: transcript.text }]
+          : []
+    }))
+  })

@@ -33,7 +33,7 @@ import { utteranceClock } from "./LocalTime.ts"
 import { JournalsGroup } from "./JournalApi.ts"
 import { Place } from "./Places.ts"
 import { MAP_COVER, MAP_ZOOM, mapTiles, nudgeLatLon, TILE_SIZE } from "./Maps.ts"
-import type { DayRow, PipelineStatus, SourceStatus, StageStatus, TranscriptSearchHit } from "./JournalApi.ts"
+import type { DayRow, DayTranscript, PipelineStatus, SourceStatus, StageStatus, TranscriptSearchHit } from "./JournalApi.ts"
 import type { ApiError } from "./JournalApi.ts"
 import type { PlaceCandidate } from "./Places.ts"
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError"
@@ -55,24 +55,56 @@ const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!)
 
-/** Summary line plus `##` time-chunk headers: blank lines separate blocks, single newlines break. */
+/** Summary line plus `##` time-chunk headers. Times in a chunk heading can
+ * jump to the first corresponding transcript turn below the summary. */
+const headingStart = (heading: string) => /^##\s+(\d{1,2}:\d{2})\s*[–-]/.exec(heading.trim())?.[1] ?? null
+
 const renderReport = (text: string) =>
   text.split(/\n\s*\n/).filter(Boolean).map((block) => {
     const [first, ...rest] = block.split("\n")
     if (first!.trim().startsWith("## ")) {
-      const heading = `<h3>${escapeHtml(first!.trim().replace(/^##\s+/, ""))}</h3>`
+      const title = first!.trim().replace(/^##\s+/, "")
+      const start = headingStart(first!)
+      const heading = start
+        ? `<h3><button type="button" class="transcript-jump" data-jump-clock="${escapeHtml(start)}" title="Jump to transcript at ${escapeHtml(start)}">${escapeHtml(title)}</button></h3>`
+        : `<h3>${escapeHtml(title)}</h3>`
       return heading + (rest.length > 0 ? `<p>${rest.map((line) => escapeHtml(line)).join("<br>")}</p>` : "")
     }
     return `<p>${block.split("\n").map((line) => escapeHtml(line)).join("<br>")}</p>`
   }).join("")
 
-/** A day's report, for the day modal. The heading lives in the modal head. */
-const renderDay = (journal: Journal | null) =>
-  journal === null
+const minuteOf = (clock: string) => {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(clock)
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null
+}
+
+const renderTranscripts = (recordings: ReadonlyArray<DayTranscript>) =>
+  recordings.length === 0
+    ? `<section class="transcripts"><h3>Transcript</h3><p class="empty">No transcript passages for this day.</p></section>`
+    : `<section class="transcripts" aria-label="Transcript"><h3>Transcript</h3>${recordings.map((recording) => {
+      const start = utteranceClock(recording.startTime, recording.timeZone, 0)
+      return `<article class="transcript-recording"><h4>${escapeHtml(start || recording.startTime)} · recording ${escapeHtml(recording.captureId.slice(0, 12))}</h4>` +
+        recording.turns.map((turn) => {
+          const clock = utteranceClock(recording.startTime, recording.timeZone, turn.startMs)
+          const minute = clock ? minuteOf(clock) : null
+          return `<p class="transcript-turn"${minute === null ? "" : ` data-transcript-minute="${minute}"`} tabindex="-1">` +
+            `<span class="transcript-time">${escapeHtml(clock || "+0:00")}</span>` +
+            (turn.speaker ? `<span class="transcript-speaker">${escapeHtml(turn.speaker)}</span>` : "") +
+            `${escapeHtml(turn.text)}</p>`
+        }).join("") + `</article>`
+    }).join("")}</section>`
+
+/** A day's summary stays first; normalized transcript evidence follows it. */
+const renderDay = (journal: Journal | null, recordings: ReadonlyArray<DayTranscript> | null = null) => {
+  const summary = journal === null
     ? `<p class="empty">writing…</p>`
     : journal.report
-    ? renderReport(journal.report)
-    : `<p class="empty">Nothing recorded.</p>`
+      ? renderReport(journal.report)
+      : `<p class="empty">Nothing recorded.</p>`
+  return summary + (recordings === null
+    ? `<section class="transcripts"><h3>Transcript</h3><p class="empty">Loading transcript…</p></section>`
+    : renderTranscripts(recordings))
+}
 
 /** Today as a civil day in the viewer's zone. Read per paint rather than
  * cached: a page left open overnight should relabel itself. */
@@ -799,6 +831,20 @@ const program = Effect.gen(function*() {
     loadPage()
   }
 
+  const wireTranscriptJumps = (body: HTMLElement) => {
+    for (const button of Array.from(body.querySelectorAll("button[data-jump-clock]"))) {
+      button.addEventListener("click", () => {
+        const requested = minuteOf(button.getAttribute("data-jump-clock") ?? "")
+        if (requested === null) return
+        const turns = Array.from(body.querySelectorAll<HTMLElement>("[data-transcript-minute]"))
+        if (turns.length === 0) return
+        const target = turns.find((turn) => Number(turn.dataset.transcriptMinute) >= requested) ?? turns[turns.length - 1]!
+        target.scrollIntoView({ behavior: "smooth", block: "center" })
+        target.focus({ preventScroll: true })
+      })
+    }
+  }
+
   /**
    * Show a day in the modal, over whatever is behind it.
    *
@@ -826,6 +872,10 @@ const program = Effect.gen(function*() {
       // must not overwrite what they are looking at now.
       if (routeDay(location.hash) !== day) return
       body.innerHTML = renderDay(journal)
+      const transcripts = yield* client.GetDayTranscripts({ day })
+      if (routeDay(location.hash) !== day) return
+      body.innerHTML = renderDay(journal, transcripts)
+      wireTranscriptJumps(body)
       if (journal === null) {
         const route = location.hash
         yield* Effect.sleep("10 seconds").pipe(
