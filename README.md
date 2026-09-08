@@ -153,6 +153,29 @@ pass starts immediately, then repeats hourly. Source failures are isolated and
 recorded rather than terminating the server; the home page and `GET /status`
 show whether data is flowing, empty, disabled, degraded, or failing.
 
+## Lifelog MCP server
+
+The read-only MCP bridge exposes two tools to an agent: `list_recent_days`
+(the latest 30 civil days, newest first) and `get_day_summary` (the complete
+journal report for an ISO `YYYY-MM-DD` day). It reads Medina's cached
+`/journal/:day` endpoint, so MCP requests never trigger LLM work.
+
+Start Medina, then configure the MCP client to run:
+
+```json
+{
+  "command": "bun",
+  "args": ["run", "mcp:lifelog"],
+  "cwd": "/path/to/medina"
+}
+```
+
+By default it connects to `http://127.0.0.1:$PORT` and uses `HOME_TZ` to
+calculate civil days. Set `LIFELOG_URL` when the lifelog is elsewhere, and
+`LIFELOG_TIME_ZONE` to override that timezone. Keep `LIFELOG_URL` on a
+trusted, authenticated network path: the MCP bridge carries the full private
+journal to its client.
+
 ## Exposure and identity
 
 **Medina does not authenticate reads.** `GET /journal/:day`, `/gps/:day`,
