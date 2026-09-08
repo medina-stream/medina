@@ -153,7 +153,7 @@ export const archiveSweepSource: Source<Bucket | FileSystem.FileSystem> = makeIt
     if (!bucket.configured) {
       return yield* Effect.fail(
         new Error("bucket is not configured; captures have no durable home "
-          + "(set BUCKET_NAME, BUCKET_ACCESS_KEY_ID, BUCKET_SECRET_ACCESS_KEY)")
+          + "(set BUCKET_NAME and BUCKET_ENDPOINT)")
       )
     }
     const entries = yield* Files.listFiles(dataPath("capture"))

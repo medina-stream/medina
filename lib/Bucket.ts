@@ -50,8 +50,9 @@ export interface BucketApi {
 
 export class Bucket extends Context.Service<Bucket, BucketApi>()("medina/Bucket") {}
 
-const NOT_CONFIGURED = "bucket is not configured: set BUCKET_NAME, BUCKET_ACCESS_KEY_ID and "
-  + "BUCKET_SECRET_ACCESS_KEY (and BUCKET_ENDPOINT for non-AWS stores)"
+const NOT_CONFIGURED = "bucket is not configured: set BUCKET_NAME and BUCKET_ENDPOINT "
+  + "(plus BUCKET_ACCESS_KEY_ID/BUCKET_SECRET_ACCESS_KEY unless the endpoint "
+  + "signs at the network edge, like an exe.dev s3 integration)"
 
 const asError = (cause: unknown) => cause instanceof Error ? cause : new Error(String(cause))
 
@@ -72,13 +73,19 @@ export const layer: Layer.Layer<Bucket, Config.ConfigError> = Layer.effect(Bucke
         (value) => Option.getOrNull(value)?.trim() || null
       )
     const bucket = yield* optional("BUCKET_NAME")
-    const accessKeyId = yield* optional("BUCKET_ACCESS_KEY_ID")
-    const secretAccessKey = yield* optional("BUCKET_SECRET_ACCESS_KEY")
     // "disabled" grandfathers earlier configs that used it as an explicit off.
-    if (!bucket || bucket === "disabled" || !accessKeyId || !secretAccessKey) {
+    if (!bucket || bucket === "disabled") {
       return unconfigured
     }
     const endpoint = yield* optional("BUCKET_ENDPOINT")
+    // Keyless is a real configuration: an edge-signing endpoint (e.g. an
+    // exe.dev s3 integration) injects credentials at the network boundary
+    // and ignores the SDK's signature. The SDK still requires credential
+    // strings to build a request, so placeholders stand in. Against a real
+    // S3 endpoint the placeholders fail per-operation, which the archive
+    // stage surfaces — misconfiguration is visible either way.
+    const accessKeyId = (yield* optional("BUCKET_ACCESS_KEY_ID")) ?? "edge-injected"
+    const secretAccessKey = (yield* optional("BUCKET_SECRET_ACCESS_KEY")) ?? "edge-injected"
     const region = (yield* optional("BUCKET_REGION")) ?? "us-east-1"
     const forcePathStyle = yield* Config.boolean("BUCKET_FORCE_PATH_STYLE").pipe(Config.withDefault(true))
     const client = new S3Client({

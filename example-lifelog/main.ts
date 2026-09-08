@@ -442,7 +442,7 @@ const Ingest = Layer.effectDiscard(
             )
           : undefined,
         disabledReason: enabled.has("bucket")
-          ? "BUCKET_NAME, BUCKET_ACCESS_KEY_ID, and BUCKET_SECRET_ACCESS_KEY are required"
+          ? "BUCKET_NAME and BUCKET_ENDPOINT are required"
           : "disabled by MEDINA_SOURCES"
       }
     ]
