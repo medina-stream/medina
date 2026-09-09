@@ -33,12 +33,12 @@
     "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
     "@opentelemetry/sdk-trace-base": "^2.11.0",
     "effect": "4.0.0-rc.112",
-    "zod": "^4.5.4"
+    "zod": "^4.5.4",
+    "aws4fetch": "^1.0.20"
   },
   "devDependencies": {
     "@types/bun": "^1.4.1",
     "@types/node": "^24",
-    "aws4fetch": "^1.0.20",
     "typescript": "^5.9.0"
   }
 }

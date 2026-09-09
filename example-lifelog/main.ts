@@ -35,6 +35,8 @@ import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
 import { gpsCompactSource, gpsDay, gpsInboxWrite, locationSummary, parseGpsBody } from "../lib/lifelog/Gps.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
 import * as Bucket from "../lib/Bucket.ts"
+import * as R2TempCreds from "../lib/R2TempCreds.ts"
+import * as TransloaditNormalize from "../lib/capture/TransloaditNormalize.ts"
 import * as Drive from "../lib/Drive.ts"
 import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
@@ -373,7 +375,7 @@ const Routes = HttpRouter.use((router) =>
   })
 )
 
-type LifelogEnv = Drive.Drive | Bucket.Bucket | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine | StartTimeRulesService
+type LifelogEnv = Drive.Drive | Bucket.Bucket | R2TempCreds.R2TempCreds | TransloaditNormalize.TransloaditNormalize | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine | StartTimeRulesService
 
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
@@ -442,7 +444,7 @@ const Ingest = Layer.effectDiscard(
                     // The archive sweep writes back to this same bucket under
                     // `capture/` (and receipts under `archive/`); never
                     // re-discover our own archive as new recordings.
-                    .filter((object) => !object.key.startsWith("capture/") && !object.key.startsWith("archive/"))
+                    .filter((object) => !object.key.startsWith("capture/") && !object.key.startsWith("archive/") && !object.key.startsWith("media/") && !object.key.startsWith("normalize/"))
                     .map((object) => ({
                       id: object.key,
                       name: object.key.split("/").pop() || object.key,
@@ -530,6 +532,8 @@ const WorkflowsLive = Layer.mergeAll(
 const Services = Layer.mergeAll(
   Drive.layer,
   Bucket.layer,
+  R2TempCreds.layer,
+  TransloaditNormalize.layer.pipe(Layer.provide(R2TempCreds.layer)),
   AssemblyAI.layer,
   Git.layer,
   tailscaleLayer,

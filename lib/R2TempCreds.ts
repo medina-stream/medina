@@ -14,6 +14,7 @@
  * the parent R2 token the temp credentials derive from; only its key *id*
  * is needed here, never its secret.
  */
+import { AwsClient } from "aws4fetch"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -40,6 +41,8 @@ export class R2TempCreds extends Context.Service<R2TempCreds, {
   readonly endpoint: string
   readonly bucket: string
   readonly mint: (options: MintOptions) => Effect.Effect<TempCredentials, Error>
+  /** Mint a one-object read credential and return a short-lived SigV4 GET URL. */
+  readonly presignGet: (key: string, ttlSeconds: number) => Effect.Effect<string, Error>
 }>()("medina/R2TempCreds") {}
 
 const Response = Schema.Struct({
@@ -65,42 +68,66 @@ export const layer: Layer.Layer<R2TempCreds, Config.ConfigError> = Layer.effect(
     const parentAccessKeyId = yield* optional("R2_PARENT_ACCESS_KEY_ID")
     const bucket = (yield* optional("BUCKET_NAME")) ?? ""
     const configured = accountId !== null && parentAccessKeyId !== null && bucket !== ""
+    const endpoint = accountId === null ? "" : `https://${accountId}.r2.cloudflarestorage.com`
+    const mint = (options: MintOptions): Effect.Effect<TempCredentials, Error> =>
+      !configured
+        ? Effect.fail(new Error(NOT_CONFIGURED))
+        : Effect.tryPromise({
+          try: async () => {
+            const response = await fetch(
+              `${apiUrl}/client/v4/accounts/${accountId}/r2/temp-access-credentials`,
+              {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  bucket,
+                  parentAccessKeyId,
+                  permission: options.permission,
+                  ttlSeconds: options.ttlSeconds,
+                  ...(options.objects === undefined ? {} : { objects: options.objects }),
+                  ...(options.prefixes === undefined ? {} : { prefixes: options.prefixes })
+                })
+              }
+            )
+            const body = Schema.decodeUnknownSync(Response)(await response.json())
+            if (!response.ok || !body.success || body.result === null) {
+              throw new Error(`temp credential mint failed: ${body.errors.map((error) => error.message).join("; ")}`)
+            }
+            const { accessKeyId, secretAccessKey, sessionToken } = body.result
+            if (!accessKeyId || !secretAccessKey || !sessionToken) {
+              throw new Error("temp credential mint returned an incomplete credential")
+            }
+            return new TempCredentials({ accessKeyId, secretAccessKey, sessionToken })
+          },
+          catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause)))
+        })
     return {
       configured,
-      endpoint: accountId === null ? "" : `https://${accountId}.r2.cloudflarestorage.com`,
+      endpoint,
       bucket,
-      mint: (options) =>
-        !configured
-          ? Effect.fail(new Error(NOT_CONFIGURED))
-          : Effect.tryPromise({
-            try: async () => {
-              const response = await fetch(
-                `${apiUrl}/client/v4/accounts/${accountId}/r2/temp-access-credentials`,
-                {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({
-                    bucket,
-                    parentAccessKeyId,
-                    permission: options.permission,
-                    ttlSeconds: options.ttlSeconds,
-                    ...(options.objects === undefined ? {} : { objects: options.objects }),
-                    ...(options.prefixes === undefined ? {} : { prefixes: options.prefixes })
-                  })
-                }
-              )
-              const body = Schema.decodeUnknownSync(Response)(await response.json())
-              if (!body.success || body.result === null) {
-                throw new Error(`temp credential mint failed: ${body.errors.map((error) => error.message).join("; ")}`)
-              }
-              const { accessKeyId, secretAccessKey, sessionToken } = body.result
-              if (!accessKeyId || !secretAccessKey || !sessionToken) {
-                throw new Error("temp credential mint returned an incomplete credential")
-              }
-              return new TempCredentials({ accessKeyId, secretAccessKey, sessionToken })
-            },
-            catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause)))
+      mint,
+      presignGet: (key, ttlSeconds) => {
+        if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 604800) {
+          return Effect.fail(new Error("presign ttlSeconds must be between 1 and 604800"))
+        }
+        return Effect.gen(function*() {
+          const credentials = yield* mint({ permission: "object-read-only", objects: [key], ttlSeconds })
+          const path = key.split("/").map(encodeURIComponent).join("/")
+          const url = new URL(`${endpoint}/${bucket}/${path}`)
+          url.searchParams.set("X-Amz-Expires", String(ttlSeconds))
+          const client = new AwsClient({
+            accessKeyId: credentials.accessKeyId,
+            secretAccessKey: credentials.secretAccessKey,
+            sessionToken: credentials.sessionToken,
+            service: "s3",
+            region: "auto"
           })
+          return (yield* Effect.tryPromise({
+            try: () => client.sign(new Request(url, { method: "GET" }), { aws: { signQuery: true } }),
+            catch: (cause) => cause instanceof Error ? cause : new Error(String(cause))
+          })).url
+        })
+      }
     }
   })
 )

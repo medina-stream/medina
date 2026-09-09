@@ -33,9 +33,11 @@ import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
 import { AssemblyAI } from "../AssemblyAI.ts"
+import { Bucket } from "../Bucket.ts"
 import * as Files from "../Files.ts"
 import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
+import { TransloaditNormalize } from "./TransloaditNormalize.ts"
 import {
   captureDir,
   dataPath,
@@ -58,6 +60,8 @@ export const ffprobeKey = (captureId: string) => `${captureDir(captureId)}/ffpro
 export const mediaManifestKey = (captureId: string) => `media/${MEDIA_VERSION}/${captureId}.json`
 export const mediaChunkKey = (captureId: string, index: number) =>
   `media/${MEDIA_VERSION}/${captureId}/chunk-${String(index).padStart(3, "0")}.ogg`
+export const canonicalMediaKey = (captureId: string) =>
+  `media/${MEDIA_VERSION}/${captureId}/canonical.ogg`
 
 /** The stored probe: ffprobe's own JSON, lossless, plus a tiny envelope.
  * `media` is the one interpreted bit -- whether an audio stream exists --
@@ -179,86 +183,65 @@ export const probeCapture = (captureId: string) =>
  * simply redone. Chunk offsets are measured from the encoded chunks
  * themselves (cheap local probes), not assumed from the segment size.
  */
-export const normalizeCapture = (captureId: string) =>
+export const segmentToChunks = (
+  captureId: string,
+  sourcePath: string,
+  options: { readonly copy?: boolean; readonly sourceDurationSeconds?: number | null } = {}
+) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
-    const blob = yield* blobPathFor(captureId)
-    if (blob === null) return yield* Effect.fail(new Error(`no blob on disk for capture ${captureId}`))
-
     const tmpDir = dataPath(`tmp/media-${captureId.slice(0, 12)}-${Date.now()}`)
     yield* fs.makeDirectory(tmpDir, { recursive: true })
     const cleanup = fs.remove(tmpDir, { recursive: true, force: true }).pipe(Effect.ignore)
-
-    const encode = yield* run([
-      "ffmpeg",
-      "-nostdin",
-      "-v",
-      "error",
-      "-i",
-      blob.path,
-      "-vn", // media is whatever has audio; video streams are dropped here
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-c:a",
-      "libopus",
-      "-b:a",
-      "24k",
-      "-f",
-      "segment",
-      "-segment_time",
-      `${CHUNK_SECONDS}`,
-      "-reset_timestamps",
-      "1",
-      `${tmpDir}/chunk-%03d.ogg`
-    ]).pipe(Effect.onError(() => cleanup))
-    if (!encode.ok) {
+    const command = options.copy
+      ? ["ffmpeg", "-nostdin", "-v", "error", "-i", sourcePath, "-c", "copy", "-f", "segment", "-segment_time", `${CHUNK_SECONDS}`, "-reset_timestamps", "1", `${tmpDir}/chunk-%03d.ogg`]
+      : ["ffmpeg", "-nostdin", "-v", "error", "-i", sourcePath, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libopus", "-b:a", "24k", "-f", "segment", "-segment_time", `${CHUNK_SECONDS}`, "-reset_timestamps", "1", `${tmpDir}/chunk-%03d.ogg`]
+    const encoded = yield* run(command).pipe(Effect.onError(() => cleanup))
+    if (!encoded.ok) {
       yield* cleanup
-      return yield* Effect.fail(new Error(`ffmpeg failed for ${captureId}: ${encode.stderr.slice(0, 500)}`))
+      return yield* Effect.fail(new Error(`ffmpeg failed for ${captureId}: ${encoded.stderr.slice(0, 500)}`))
     }
-
-    const names = (yield* fs.readDirectory(tmpDir).pipe(
-      Effect.mapError((cause) => new Error(String(cause)))
-    )).sort()
+    const names = (yield* fs.readDirectory(tmpDir).pipe(Effect.mapError((cause) => new Error(String(cause)))))
+      .filter((name) => /^chunk-\d+\.ogg$/.test(name)).sort()
     if (names.length === 0) {
       yield* cleanup
       return yield* Effect.fail(new Error(`ffmpeg produced no chunks for ${captureId}`))
     }
-
     const chunks: Array<MediaChunk> = []
     let offset = 0
+    const outputDir = dataPath(`media/${MEDIA_VERSION}/${captureId}`)
+    yield* fs.makeDirectory(outputDir, { recursive: true })
     for (const [index, name] of names.entries()) {
-      const probed = yield* run([
-        "ffprobe",
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_format",
-        `${tmpDir}/${name}`
-      ])
-      const duration = probed.ok ? probeDuration(JSON.parse(probed.stdout)) ?? 0 : 0
+      const probed = yield* run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", `${tmpDir}/${name}`])
+      const duration = probed.ok ? probeDuration(JSON.parse(probed.stdout)) : null
+      if (duration === null) {
+        yield* cleanup
+        return yield* Effect.fail(new Error(`could not determine duration for ${captureId} chunk ${index}`))
+      }
       const key = mediaChunkKey(captureId, index)
-      yield* fs.makeDirectory(dataPath(`media/${MEDIA_VERSION}/${captureId}`), { recursive: true })
-      yield* fs.rename(`${tmpDir}/${name}`, dataPath(key)).pipe(
-        Effect.mapError((cause) => new Error(String(cause)))
-      )
+      yield* fs.rename(`${tmpDir}/${name}`, dataPath(key)).pipe(Effect.mapError((cause) => new Error(String(cause))))
       chunks.push(new MediaChunk({ index, key, startSeconds: offset, durationSeconds: duration }))
       offset += duration
     }
     yield* cleanup
-
-    const probe = yield* probeCapture(captureId)
     const manifest = new MediaManifest({
       captureId,
       version: MEDIA_VERSION,
       createdAt: new Date().toISOString(),
-      sourceDurationSeconds: probeDuration(probe.ffprobe),
+      sourceDurationSeconds: options.sourceDurationSeconds ?? null,
       chunks
     })
     yield* Files.writeJson(dataPath(mediaManifestKey(captureId)), manifest)
     return manifest
+  })
+
+/** Transcode a local capture to canonical chunks. */
+export const normalizeCapture = (captureId: string) =>
+  Effect.gen(function*() {
+    const blob = yield* blobPathFor(captureId)
+    if (blob === null) return yield* Effect.fail(new Error(`no blob on disk for capture ${captureId}`))
+    const probe = yield* probeCapture(captureId)
+    return yield* segmentToChunks(captureId, blob.path, { sourceDurationSeconds: probeDuration(probe.ffprobe) })
   })
 
 const captureIds = Effect.gen(function*() {
@@ -271,7 +254,7 @@ const captureIds = Effect.gen(function*() {
  * every media capture is transcoded once. Settled captures cost one probe
  * read and one manifest existence check per pass.
  */
-export const mediaNormalizeSource: Source<FileSystem.FileSystem> = makeItemSource({
+export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNormalize | Bucket> = makeItemSource({
   name: "media-normalize",
   discover: captureIds,
   ingest: (captureId) =>
@@ -280,7 +263,12 @@ export const mediaNormalizeSource: Source<FileSystem.FileSystem> = makeItemSourc
       const probe = yield* probeCapture(captureId)
       if (!probe.media) return "skipped" as const
       if (yield* fs.exists(dataPath(mediaManifestKey(captureId)))) return "cached" as const
-      yield* Effect.log(`normalizing ${captureId.slice(0, 12)} (${probe.blobName})`)
+      const transloadit = yield* TransloaditNormalize
+      if (transloadit.configured) {
+        if (probe.blobName === null) return yield* Effect.fail(new Error(`no blob name for media capture ${captureId}`))
+        const result = yield* transloadit.normalize(captureId, probe.blobName, probeDuration(probe.ffprobe))
+        return result === "pending" ? "skipped" as const : "ingested" as const
+      }
       yield* normalizeCapture(captureId)
       return "ingested" as const
     }),
