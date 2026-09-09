@@ -261,5 +261,8 @@ export const driveAllowlistSource: Source<Drive | FileSystem.FileSystem> = makeI
     })
   },
   label: (allowed) => allowed.missing ? allowed.id : `${allowed.item.name} (${allowed.id})`,
-  concurrency: 2
+  // Drive can expose multi-gigabyte recordings. Keep the allowlist backfill
+  // serial: the HTTP client's stream may buffer a large in-flight response,
+  // and two simultaneous historical WAV downloads exceeded this VM's memory.
+  concurrency: 1
 })
