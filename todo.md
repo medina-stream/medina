@@ -10,6 +10,11 @@ Baseline: `bun test` 57 pass, `bun run typecheck` clean (tests included).
 
 ## Next
 
+- [ ] **Transloadit offload for media-normalize** — see
+  `docs/plan-transloadit-normalize.md` (complete implementation brief; all
+  external integrations probe-verified 2026-09-09). Unblocks the 16-file
+  2021 WAV backfill from `AudioRec Recordings`.
+
 - [ ] **Durable speaker identity** (`lib/lifelog/Resources.ts`, `lib/lifelog/Journal.ts`, UI)
   Store per-capture mappings from AssemblyAI's local diarization labels to a
   person, with human confirmation outranking inference. Seed the three known
