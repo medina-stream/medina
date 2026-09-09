@@ -78,19 +78,36 @@ const minuteOf = (clock: string) => {
   return match ? Number(match[1]) * 60 + Number(match[2]) : null
 }
 
+const knownSpeakers = (captureId: string): Readonly<Record<string, string>> =>
+  captureId === "a35308f03b31bb8191bdfde6243cda921a710425a5d2cc254c2724a0e92b4bcc"
+    ? { A: "David", B: "Scott" }
+    : {}
+
+const speakerName = (captureId: string, speaker: string | null) =>
+  speaker === null ? null : knownSpeakers(captureId)[speaker] ?? speaker
+
+const isOwnSpeaker = (captureId: string, speaker: string | null) =>
+  speakerName(captureId, speaker)?.toLowerCase() === "scott"
+
 const renderTranscripts = (recordings: ReadonlyArray<DayTranscript>) =>
   recordings.length === 0
     ? `<section class="transcripts"><h3>Transcript</h3><p class="empty">No transcript passages for this day.</p></section>`
-    : `<section class="transcripts" aria-label="Transcript"><h3>Transcript</h3>${recordings.map((recording) => {
+    : `<section class="transcripts" aria-label="Transcript"><div class="transcript-heading"><h3>Transcript</h3><span class="transcript-legend"><i aria-hidden="true"></i> Scott</span></div>${recordings.map((recording) => {
       const start = utteranceClock(recording.startTime, recording.timeZone, 0)
+      const mapping = knownSpeakers(recording.captureId)
       return `<article class="transcript-recording"><h4>${escapeHtml(start || recording.startTime)} · recording ${escapeHtml(recording.captureId.slice(0, 12))}</h4>` +
+        (Object.keys(mapping).length > 0
+          ? `<p class="transcript-note">Speaker labels are interpreted for this recording: ${Object.entries(mapping).map(([label, name]) => `${escapeHtml(label)} = ${escapeHtml(name)}`).join(" · ")}</p>`
+          : "") +
         recording.turns.map((turn) => {
           const clock = utteranceClock(recording.startTime, recording.timeZone, turn.startMs)
           const minute = clock ? minuteOf(clock) : null
-          return `<p class="transcript-turn"${minute === null ? "" : ` data-transcript-minute="${minute}"`} tabindex="-1">` +
+          const name = speakerName(recording.captureId, turn.speaker)
+          const own = isOwnSpeaker(recording.captureId, turn.speaker)
+          return `<p class="transcript-turn${own ? " transcript-turn-own" : ""}"${minute === null ? "" : ` data-transcript-minute="${minute}"`} tabindex="-1">` +
             `<span class="transcript-time">${escapeHtml(clock || "+0:00")}</span>` +
-            (turn.speaker ? `<span class="transcript-speaker">${escapeHtml(turn.speaker)}</span>` : "") +
-            `${escapeHtml(turn.text)}</p>`
+            (name ? `<span class="transcript-speaker">${escapeHtml(name)}</span>` : "") +
+            `<span class="transcript-text">${escapeHtml(turn.text)}</span></p>`
         }).join("") + `</article>`
     }).join("")}</section>`
 

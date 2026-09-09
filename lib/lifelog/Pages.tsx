@@ -217,7 +217,15 @@ const STYLE = `
   .transcript-recording h4 { margin: 0 0 .45rem; color: var(--muted); font-size: .8rem; font-weight: 600; font-variant-numeric: tabular-nums; }
   .transcript-turn { margin: 0; padding: .42rem 0 .42rem 4.4rem; position: relative; scroll-margin-block: 5rem; }
   .transcript-time { position: absolute; left: 0; width: 3.6rem; color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
-  .transcript-speaker { font-weight: 650; margin-right: .45rem; }
+  .transcript-speaker { display: block; margin: 0 0 .15rem; font-weight: 650; }
+  .transcript-text { display: block; }
+
+  .transcript-legend { color: var(--bad); font-size: .78rem; font-weight: 650; }
+  .transcript-legend i { display: inline-block; width: .5rem; height: .5rem; margin-right: .25rem; border-radius: 50%; background: var(--bad); }
+  .transcript-note { margin: .25rem 0 .75rem; color: var(--muted); font-size: .76rem; }
+  .transcript-turn-own { color: var(--bad); font-weight: 560; }
+  .transcript-turn-own .transcript-speaker { color: var(--bad); }
+  .transcript-text { display: block; }
 
   /* Places editor. The row is a wrapping grid: wide screens get one line,
      narrow screens stack into labelled fields instead of a jumble. */
