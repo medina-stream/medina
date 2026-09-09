@@ -139,6 +139,7 @@ export type StageHealth = typeof StageHealth["Type"]
 
 /** Per-read counters shared by sources and stages. */
 const counts = {
+  durationMs: Schema.Number,
   discovered: Schema.Number,
   ingested: Schema.Number,
   cached: Schema.Number,
@@ -157,6 +158,14 @@ export class StageStatus extends Schema.Class<StageStatus>("StageStatus")({
   status: StageHealth,
   message: Schema.NullOr(Schema.String),
   ...counts
+}) {}
+
+export class ResourceStatus extends Schema.Class<ResourceStatus>("ResourceStatus")({
+  name: Schema.String,
+  durationMs: Schema.Number,
+  discovered: Schema.Number,
+  materialized: Schema.Number,
+  failed: Schema.Number
 }) {}
 
 export class PipelineFailure extends Schema.Class<PipelineFailure>("PipelineFailure")({
@@ -179,6 +188,7 @@ export class LastRun extends Schema.Class<LastRun>("LastRun")({
   finishedAt: Schema.String,
   sources: Schema.Array(SourceStatus),
   stages: Schema.Array(StageStatus),
+  resources: Schema.Array(ResourceStatus),
   failures: Schema.Array(PipelineFailure)
 }) {}
 

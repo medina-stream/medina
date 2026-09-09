@@ -18,6 +18,7 @@ import {
   PipelineFailure,
   PipelineStatus,
   PipelineTiming,
+  ResourceStatus,
   SavePlaces,
   SourceStatus,
   StageStatus,
@@ -88,11 +89,14 @@ describe("journals RPC contract", () => {
 describe("pipeline status contract", () => {
   const source = new SourceStatus({
     name: "notes", status: "disabled", message: "NOTES_REPO_URL is required",
-    discovered: 0, ingested: 0, cached: 0, skipped: 0
+    durationMs: 0, discovered: 0, ingested: 0, cached: 0, skipped: 0
   })
   const stage = new StageStatus({
     name: "gps-stays", status: "healthy", message: null,
-    discovered: 3, ingested: 1, cached: 2, skipped: 0
+    durationMs: 1234, discovered: 3, ingested: 1, cached: 2, skipped: 0
+  })
+  const resource = new ResourceStatus({
+    name: "journal", durationMs: 5678, discovered: 3, materialized: 1, failed: 0
   })
 
   test("status survives a JSON round-trip", () => {
@@ -103,7 +107,7 @@ describe("pipeline status contract", () => {
       }),
       lastRun: new LastRun({
         startedAt: "2026-09-06T00:00:00Z", finishedAt: "2026-09-06T00:01:00Z",
-        sources: [source], stages: [stage],
+        sources: [source], stages: [stage], resources: [resource],
         failures: [new PipelineFailure({ stage: "ingest:notes", item: "a.md", error: "boom" })]
       }),
       totals: new StatusTotals({ days: 63, transcripts: 68, current: 63, stale: 0 })

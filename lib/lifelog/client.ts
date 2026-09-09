@@ -33,7 +33,7 @@ import { utteranceClock } from "./LocalTime.ts"
 import { JournalsGroup } from "./JournalApi.ts"
 import { Place } from "./Places.ts"
 import { MAP_COVER, MAP_ZOOM, mapTiles, nudgeLatLon, TILE_SIZE } from "./Maps.ts"
-import type { DayRow, DayTranscript, PipelineStatus, SourceStatus, StageStatus, TranscriptSearchHit } from "./JournalApi.ts"
+import type { DayRow, DayTranscript, PipelineStatus, ResourceStatus, SourceStatus, StageStatus, TranscriptSearchHit } from "./JournalApi.ts"
 import type { ApiError } from "./JournalApi.ts"
 import type { PlaceCandidate } from "./Places.ts"
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError"
@@ -214,16 +214,30 @@ const program = Effect.gen(function*() {
   // Sources and stages are rendered from their own types: only a source can
   // be `disabled`, which is why the counts line is suppressed for exactly
   // that case and no other.
+  const formatDuration = (milliseconds: number) => {
+    const seconds = Math.max(0, Math.round(milliseconds / 1000))
+    const minutes = Math.floor(seconds / 60)
+    const hours = Math.floor(minutes / 60)
+    return hours > 0 ? `${hours}h ${minutes % 60}m` : minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`
+  }
+
   const renderStatusRows = (entries: ReadonlyArray<SourceStatus | StageStatus>) =>
     entries.map((entry) => {
       const counts = entry.status === "disabled"
         ? ""
         : ` \u2014 ${entry.ingested} new, ${entry.cached} cached, ${entry.discovered} found`
+      const elapsed = ` (${formatDuration(entry.durationMs)})`
       const message = entry.message ? `: ${entry.message}` : ""
       return `<li><strong>${escapeHtml(entry.name)}</strong>: ${escapeHtml(entry.status)}${
-        escapeHtml(counts + message)
+        escapeHtml(counts + elapsed + message)
       }</li>`
     }).join("")
+
+  const renderResourceRows = (entries: ReadonlyArray<ResourceStatus>) =>
+    entries.map((entry) =>
+      `<li><strong>${escapeHtml(entry.name)}</strong>: ${entry.materialized} materialized, ` +
+      `${entry.discovered} found (${formatDuration(entry.durationMs)})</li>`
+    ).join("")
 
   const paintStatus = (status: PipelineStatus) => {
     const root = document.getElementById("pipeline-status")
@@ -233,6 +247,7 @@ const program = Effect.gen(function*() {
     if (!root || !summary || !details) return
     const sources = status.lastRun?.sources ?? []
     const stages = status.lastRun?.stages ?? []
+    const resources = status.lastRun?.resources ?? []
     const observed: ReadonlyArray<SourceStatus | StageStatus> = [...sources, ...stages]
     const failing = observed.filter((entry) => entry.status === "failing")
     const degraded = observed.filter((entry) => entry.status === "degraded")
@@ -266,7 +281,8 @@ const program = Effect.gen(function*() {
       `${status.totals.current} current, ${status.totals.stale} pending</p>`
     details.innerHTML = totals + finished +
       `<h3>Sources</h3><ul>${renderStatusRows(sources) || "<li>No sources configured.</li>"}</ul>` +
-      `<h3>Processing</h3><ul>${renderStatusRows(stages) || "<li>No processing stages.</li>"}</ul>`
+      `<h3>Processing</h3><ul>${renderStatusRows(stages) || "<li>No processing stages.</li>"}</ul>` +
+      `<h3>Materialization</h3><ul>${renderResourceRows(resources) || "<li>No derived resources.</li>"}</ul>`
   }
 
   const refreshStatus = Effect.matchCause(client.GetStatus({}), {

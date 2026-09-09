@@ -28,6 +28,7 @@ import {
   LastRun,
   PipelineStatus,
   PipelineTiming,
+  ResourceStatus,
   SourceStatus,
   StageStatus,
   StatusTotals,
@@ -130,6 +131,7 @@ export const makeJournalsHandlers = <R>({ canWrite }: JournalHandlerOptions<R>) 
             finishedAt: status.lastRun.finishedAt,
             sources: status.lastRun.sources.map((source) => new SourceStatus(source)),
             stages: status.lastRun.stages.map((stage) => new StageStatus(stage)),
+            resources: status.lastRun.resources.map((resource) => new ResourceStatus(resource)),
             failures: [...status.lastRun.failures]
           }),
           totals: new StatusTotals(status.totals)

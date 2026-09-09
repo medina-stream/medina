@@ -11,6 +11,9 @@ import * as Files from "./Files.ts"
 import { publishEvent } from "./RuntimeEvents.ts"
 import type { Resource, Source, SourceReport } from "./Resource.ts"
 
+const durationMs = Schema.Number.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0)))
+const elapsedMs = (started: number) => Math.max(0, Math.round(performance.now() - started))
+
 export class RunReport extends Schema.Class<RunReport>("RunReport")({
   startedAt: Schema.String,
   finishedAt: Schema.String,
@@ -18,6 +21,7 @@ export class RunReport extends Schema.Class<RunReport>("RunReport")({
     name: Schema.String,
     status: Schema.Literals(["disabled", "healthy", "empty", "degraded", "failing"]),
     message: Schema.NullOr(Schema.String),
+    durationMs,
     discovered: Schema.Number,
     ingested: Schema.Number,
     cached: Schema.Number,
@@ -27,6 +31,7 @@ export class RunReport extends Schema.Class<RunReport>("RunReport")({
     name: Schema.String,
     status: Schema.Literals(["healthy", "empty", "degraded", "failing"]),
     message: Schema.NullOr(Schema.String),
+    durationMs,
     discovered: Schema.Number,
     ingested: Schema.Number,
     cached: Schema.Number,
@@ -34,6 +39,7 @@ export class RunReport extends Schema.Class<RunReport>("RunReport")({
   })),
   resources: Schema.Array(Schema.Struct({
     name: Schema.String,
+    durationMs,
     discovered: Schema.Number,
     materialized: Schema.Number,
     failed: Schema.Number
@@ -49,6 +55,8 @@ export interface PipelineSource<R> {
 }
 
 export const RUN_REPORT_KEY = "runs/latest.json"
+export const runHistoryKey = (startedAt: string) =>
+  `runs/history/${startedAt.replace(/[:.]/g, "-")}.json`
 
 /** Process-local state complements the durable last-run report. */
 export const pipelineRuntime: {
@@ -86,6 +94,7 @@ export const runPipeline = <R>(
       name: string
       status: "disabled" | "healthy" | "empty" | "degraded" | "failing"
       message: string | null
+      durationMs: number
     } & Omit<SourceReport, "failures">> = []
     for (const configured of sources) {
       if (configured.source === undefined) {
@@ -93,6 +102,7 @@ export const runPipeline = <R>(
           name: configured.name,
           status: "disabled",
           message: configured.disabledReason ?? "not configured",
+          durationMs: 0,
           discovered: 0,
           ingested: 0,
           cached: 0,
@@ -107,6 +117,7 @@ export const runPipeline = <R>(
         continue
       }
       const source = configured.source
+      const sourceStarted = performance.now()
       yield* publishEvent({ type: "source", name: source.name, status: "running", message: `Reading ${source.name}` })
       let sourceFailed = false
       let sourceFailureMessage: string | null = null
@@ -134,6 +145,7 @@ export const runPipeline = <R>(
         name: source.name,
         status,
         message: sourceFailed ? sourceFailureMessage : report.failures[0]?.error ?? null,
+        durationMs: elapsedMs(sourceStarted),
         ...counts
       })
       yield* publishEvent({
@@ -152,8 +164,10 @@ export const runPipeline = <R>(
       name: string
       status: "healthy" | "empty" | "degraded" | "failing"
       message: string | null
+      durationMs: number
     } & Omit<SourceReport, "failures">> = []
     for (const stage of stages) {
+      const stageStarted = performance.now()
       yield* publishEvent({ type: "stage", name: stage.name, status: "running", message: `Running ${stage.name}` })
       let stageFailure: string | null = null
       const report = yield* stage.ingest.pipe(
@@ -176,6 +190,7 @@ export const runPipeline = <R>(
               ? "empty"
               : "healthy",
         message: stageFailure ?? report.failures[0]?.error ?? null,
+        durationMs: elapsedMs(stageStarted),
         ...counts
       })
       yield* publishEvent({
@@ -188,8 +203,9 @@ export const runPipeline = <R>(
 
     const fs = yield* FileSystem.FileSystem
     const materialized: Array<{ resource: string; label: string }> = []
-    const resourceReports: Array<{ name: string; discovered: number; materialized: number; failed: number }> = []
+    const resourceReports: Array<{ name: string; durationMs: number; discovered: number; materialized: number; failed: number }> = []
     for (const resource of resources) {
+      const resourceStarted = performance.now()
       let enumerationFailed = false
       const instances = yield* resource.instances.pipe(
         Effect.catchCause((cause) =>
@@ -231,22 +247,21 @@ export const runPipeline = <R>(
           ))
         )
       }
-      resourceReports.push({ name: resource.name, discovered: instances.length, materialized: made, failed })
+      resourceReports.push({ name: resource.name, durationMs: elapsedMs(resourceStarted), discovered: instances.length, materialized: made, failed })
     }
 
     const finishedAt = new Date().toISOString()
-    yield* Files.writeJson(
-      dataPath(RUN_REPORT_KEY),
-      new RunReport({
-        startedAt,
-        finishedAt,
-        sources: sourceReports,
-        stages: stageReports,
-        resources: resourceReports,
-        materialized,
-        failures
-      })
-    )
+    const report = new RunReport({
+      startedAt,
+      finishedAt,
+      sources: sourceReports,
+      stages: stageReports,
+      resources: resourceReports,
+      materialized,
+      failures
+    })
+    yield* Files.writeJson(dataPath(RUN_REPORT_KEY), report)
+    yield* Files.writeJson(dataPath(runHistoryKey(startedAt)), report)
     pipelineRuntime.lastFinishedAt = finishedAt
     pipelineRuntime.nextRunAt = new Date(Date.parse(finishedAt) + 60 * 60 * 1000).toISOString()
     yield* publishEvent({
