@@ -176,30 +176,40 @@ calculate civil days. Set `LIFELOG_URL` when the lifelog is elsewhere, and
 trusted, authenticated network path: the MCP bridge carries the full private
 journal to its client.
 
-## Exposure and identity
+## Exposure, identity, and agent delegation
 
-**Medina does not authenticate reads.** `GET /journal/:day`, `/gps/:day`,
-`/status` and the rest serve whoever connects. That is deliberate — the
-authenticating front door lives outside the process — but it means the bind
-address is a real security decision, not a preference.
+Medina binds to `127.0.0.1` by default. Put an authenticating front door in
+front of it:
 
-The server therefore binds `127.0.0.1` by default. Put something
-authenticating in front of it:
-
-- **exe.dev** (recommended): the proxy authenticates the VM owner before a
-  request reaches the port. Nothing to configure.
-- **Tailscale**: `tailscale serve` terminates TLS for the tailnet and
-  forwards to loopback, injecting a verified `Tailscale-User-Login`.
+- **exe.dev** (recommended for the owner): the proxy authenticates the VM owner
+  before a request reaches the port.
+- **Tailscale**: `tailscale serve` terminates TLS for the tailnet and forwards
+  to loopback, injecting a verified `Tailscale-User-Login`.
 - **Anything else**: a reverse proxy that authenticates and forwards to
   loopback.
 
 Set `HOST=0.0.0.0` only when one of those is in front. On a laptop on shared
 wifi, an unguarded bind publishes a personal lifelog to the local network.
 
-Writes (`POST /in`, `PUT /places`) are gated on `INGEST_OWNER`, matched
-against the Tailscale login behind the request. An unset `INGEST_OWNER` is
-treated as unconfigured, not open: writes are refused with 503 while reads
-continue to work. Identity resolution is in `lib/Tailscale.ts` — tailnet
-peers are identified via `tailscale whois`, and the `Tailscale-User-Login`
-header is trusted only from loopback, where the front door set it.
+### Delegating Medina to an agent
+
+Medina has one delegated scope today: `medina`, which is full access to the
+current API. It is intentionally one permission rather than a premature role
+system. `GET /auth.md` describes the compact approval flow:
+
+1. The agent creates a request at `POST /auth/requests` with its name.
+2. You open the returned approval URL from Tailscale and choose Allow or Deny.
+3. The agent polls `POST /oauth2/token` and receives a one-hour Bearer token.
+4. It sends that token as `Authorization: Bearer …` to REST and `/rpc`.
+
+`AUTH_OWNER` names the Tailscale login allowed to approve a delegation; it
+falls back to `INGEST_OWNER`. Tokens are opaque, stored only as SHA-256 hashes
+in `DATA_DIR/auth/delegations.json`, and can be revoked through
+`POST /oauth2/revoke`. Tailscale remains the network boundary; the token is a
+separately revocable record of delegated trust.
+
+Writes (`POST /in`, `PUT /places`) are otherwise gated on `INGEST_OWNER`,
+matched against the Tailscale login behind the request. An unset
+`INGEST_OWNER` is treated as unconfigured, not open: direct writes are refused
+with 503 while a valid delegated `medina` token remains authorized.
 

@@ -42,23 +42,47 @@ import * as Git from "../lib/Git.ts"
 import { runPipeline } from "../lib/Pipeline.ts"
 import type { PipelineSource } from "../lib/Pipeline.ts"
 import type { Source } from "../lib/Resource.ts"
+import { MedinaAuth, MEDINA_SCOPE } from "../lib/lifelog/Auth.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
 import { archiveSweepSource, audioSource, driveAllowlistSource, driveInventorySource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 
+const auth = new MedinaAuth({ directory: dataPath("auth") })
+
+const bearerToken = (headers: Readonly<Record<string, string | undefined>>) => {
+  const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(headers.authorization ?? "")
+  return match?.[1] ?? null
+}
+
+const isLoopbackAddress = (address: string | null) =>
+  address === "::1" || address?.startsWith("127.") || address === "::ffff:127.0.0.1"
+
+/** The person allowed to approve or deny an agent delegation. */
+const approvalOwner = () => (process.env.AUTH_OWNER ?? process.env.INGEST_OWNER ?? "").trim()
+
 /**
- * Who may write: the single owner named by `INGEST_OWNER`.
- *
- * Returns the login on success, or the response to send instead. Writing is
- * refused unless an owner is configured -- an unset `INGEST_OWNER` is an
- * unconfigured deployment, not an open one, and it must not read as a
- * server bug. `Config.string` would fail the request with an opaque 500.
- *
- * Identity comes from Tailscale (see `lib/Tailscale.ts`). Read paths stay
- * open: this gates writes only.
+ * A bearer is an approved `medina` delegation. Direct owner access remains
+ * useful for the UI and emergency recovery; an exe.dev front door reaches us
+ * from loopback, which is already inside this VM's trust boundary.
  */
+const fullAccess = Effect.gen(function*() {
+  const request = yield* HttpServerRequest.HttpServerRequest
+  const token = bearerToken(request.headers)
+  if (token) {
+    const delegated = auth.authorize(token)
+    if (delegated) return { actor: `delegation:${delegated.clientName}`, delegated: true }
+  }
+  const address = Option.getOrNull(request.remoteAddress)
+  if (isLoopbackAddress(address)) return { actor: "trusted-loopback", delegated: false }
+  const owner = approvalOwner()
+  const tailscale = yield* Tailscale
+  const login = yield* tailscale.identify(address, request.headers)
+  if (owner && login === owner) return { actor: login, delegated: false }
+  return null
+})
+
 /**
  * Who may write: the single owner named by `INGEST_OWNER`.
  *
@@ -71,6 +95,11 @@ import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
  */
 const writeAccess = Effect.gen(function*() {
   const request = yield* HttpServerRequest.HttpServerRequest
+  const delegatedToken = bearerToken(request.headers)
+  if (delegatedToken) {
+    const delegated = auth.authorize(delegatedToken)
+    if (delegated) return { login: `delegation:${delegated.clientName}`, allowed: true, reason: "", status: 200 as const }
+  }
   const owner = (Option.getOrNull(yield* Config.option(Config.string("INGEST_OWNER"))) ?? "").trim()
   if (!owner) {
     return {
@@ -100,6 +129,8 @@ const writeAccess = Effect.gen(function*() {
  */
 const canWrite = (headers: Record<string, string | undefined>) =>
   Effect.gen(function*() {
+    const delegatedToken = bearerToken(headers)
+    if (delegatedToken && auth.authorize(delegatedToken)) return { allowed: true, reason: "" }
     const owner = (Option.getOrNull(yield* Config.option(Config.string("INGEST_OWNER"))) ?? "").trim()
     if (!owner) {
       yield* Effect.log("write refused: INGEST_OWNER is not configured, so no one may write")
@@ -124,6 +155,15 @@ const canWrite = (headers: Record<string, string | undefined>) =>
     return { allowed: true, reason: "" }
   })
 
+const approvalAccess = Effect.gen(function*() {
+  const request = yield* HttpServerRequest.HttpServerRequest
+  const owner = approvalOwner()
+  if (!owner) return null
+  const tailscale = yield* Tailscale
+  const login = yield* tailscale.identify(Option.getOrNull(request.remoteAddress), request.headers)
+  return login === owner ? login : null
+})
+
 const ownerOnly = (what: string) =>
   Effect.gen(function*() {
     const access = yield* writeAccess
@@ -140,8 +180,121 @@ const ownerOnly = (what: string) =>
   })
 
 
+const jsonBody = (request: HttpServerRequest.HttpServerRequest) =>
+  Effect.flatMap(request.arrayBuffer, (body) => Effect.try({
+    try: () => JSON.parse(new TextDecoder().decode(body)) as unknown,
+    catch: () => new Error("expected a JSON body")
+  }))
+
+const requestOrigin = (request: HttpServerRequest.HttpServerRequest) => {
+  const host = request.headers.host
+  // The service is private by default, and Tailscale Serve supplies HTTPS.
+  // Falling back keeps local curl examples legible without trusting forwarded
+  // host headers for any authorization decision.
+  return host ? `https://${host}` : `http://127.0.0.1:${process.env.PORT ?? "8000"}`
+}
+
+const unauthenticated = (request: HttpServerRequest.HttpServerRequest) =>
+  HttpServerResponse.jsonUnsafe({ error: "unauthorized", auth: `${requestOrigin(request)}/auth.md` }, {
+    status: 401,
+    headers: {
+      "www-authenticate": `Bearer realm="medina", resource_metadata="${requestOrigin(request)}/.well-known/oauth-protected-resource"`,
+      "cache-control": "no-store"
+    }
+  })
+
+const publicAuthPath = (url: string) => {
+  const path = url.split("?", 1)[0] ?? ""
+  return path === "/auth.md" || path === "/.well-known/oauth-protected-resource" ||
+    path === "/.well-known/oauth-authorization-server" || path === "/auth/requests" ||
+    path.startsWith("/auth/approve/") || path === "/oauth2/token" || path === "/oauth2/revoke"
+}
+
+/** Apply the same full-access check to REST and the typed RPC endpoint. */
+const AuthGate = HttpRouter.middleware((next) =>
+  Effect.gen(function*() {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    if (publicAuthPath(request.url)) return yield* next
+    if (yield* fullAccess) return yield* next
+    return unauthenticated(request)
+  }),
+  { global: true }
+)
 const Routes = HttpRouter.use((router) =>
   Effect.gen(function*() {
+    // Minimal auth.md-compatible delegation discovery. `medina` is deliberately
+    // the sole scope for now: it represents the complete current API surface.
+    yield* router.add("GET", "/auth.md", Effect.succeed(HttpServerResponse.text(`# Medina agent authorization
+
+Medina supports one delegated scope: \`${MEDINA_SCOPE}\` (full access).
+
+1. \`POST /auth/requests\` with \`{ "client_name": "Muse" }\`.
+2. Show the returned \`approval_url\` to the owner. It must be opened through Tailscale.
+3. Poll \`POST /oauth2/token\` with \`{ "grant_type": "urn:medina:delegation", "request_id": "…" }\`.
+4. Send the resulting bearer token in \`Authorization: Bearer …\`.
+
+Tokens last one hour, are stored only as hashes, and can be revoked at \`POST /oauth2/revoke\`.
+`, { contentType: "text/markdown", headers: { "cache-control": "no-store" } })))
+    yield* router.add("GET", "/.well-known/oauth-protected-resource", Effect.gen(function*() {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const origin = requestOrigin(request)
+      return HttpServerResponse.jsonUnsafe({ resource: origin, authorization_servers: [origin], scopes_supported: [MEDINA_SCOPE], bearer_methods_supported: ["header"] }, { headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("GET", "/.well-known/oauth-authorization-server", Effect.gen(function*() {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const origin = requestOrigin(request)
+      return HttpServerResponse.jsonUnsafe({ issuer: origin, token_endpoint: `${origin}/oauth2/token`, revocation_endpoint: `${origin}/oauth2/revoke`, grant_types_supported: ["urn:medina:delegation"], scopes_supported: [MEDINA_SCOPE] }, { headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("POST", "/auth/requests", Effect.gen(function*() {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
+      const clientName = typeof body === "object" && body !== null && "client_name" in body && typeof body.client_name === "string" ? body.client_name : ""
+      try {
+        const pending = auth.createRequest(clientName)
+        return HttpServerResponse.jsonUnsafe({ request_id: pending.id, scope: MEDINA_SCOPE, expires_at: pending.expiresAt, approval_url: `${requestOrigin(request)}/auth/approve/${pending.id}` }, { status: 201, headers: { "cache-control": "no-store" } })
+      } catch (error) {
+        return HttpServerResponse.jsonUnsafe({ error: error instanceof Error ? error.message : "invalid request" }, { status: 400 })
+      }
+    }))
+    yield* router.add("GET", "/auth/approve/:id", Effect.gen(function*() {
+      const login = yield* approvalAccess
+      if (!login) return HttpServerResponse.text("Approval requires the configured owner over Tailscale.", { status: 403 })
+      const id = (yield* HttpRouter.params).id ?? ""
+      const pending = auth.getRequest(id)
+      if (!pending || pending.status !== "pending" || Date.parse(pending.expiresAt) <= Date.now()) return HttpServerResponse.text("This delegation request is missing or expired.", { status: 404 })
+      const escapedName = pending.clientName.replace(/[&<>'\"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", "\"": "&quot;" })[c]!)
+      return HttpServerResponse.text(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approve Medina access</title><main><h1>Approve Medina access?</h1><p><strong>${escapedName}</strong> is requesting <code>medina</code> — full access to Medina.</p><p>Approving creates a one-hour bearer token. You can revoke it later.</p><form method="post"><button name="decision" value="approve">Allow</button> <button name="decision" value="deny">Deny</button></form><p>Owner: ${login}</p></main>`, { contentType: "text/html", headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("POST", "/auth/approve/:id", Effect.gen(function*() {
+      const login = yield* approvalAccess
+      if (!login) return HttpServerResponse.text("Approval requires the configured owner over Tailscale.", { status: 403 })
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const form = new URLSearchParams(new TextDecoder().decode(yield* Effect.orDie(request.arrayBuffer)))
+      const id = (yield* HttpRouter.params).id ?? ""
+      const result = form.get("decision") === "approve" ? auth.approve(id, login) : auth.deny(id, login)
+      if (!result) return HttpServerResponse.text("This delegation request is missing, expired, or already decided.", { status: 404 })
+      yield* Effect.log(`delegation ${result.status}: ${result.clientName} by ${login}`)
+      return HttpServerResponse.text(`<!doctype html><title>Medina delegation</title><p>${result.status === "approved" ? "Access approved. Muse may now obtain its token." : "Access denied."}</p>`, { contentType: "text/html", headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("POST", "/oauth2/token", Effect.gen(function*() {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
+      const requestId = typeof body === "object" && body !== null && "request_id" in body && typeof body.request_id === "string" ? body.request_id : ""
+      const grant = typeof body === "object" && body !== null && "grant_type" in body && typeof body.grant_type === "string" ? body.grant_type : ""
+      if (grant !== "urn:medina:delegation" || !requestId) return HttpServerResponse.jsonUnsafe({ error: "invalid_request" }, { status: 400 })
+      const redeemed = auth.redeem(requestId)
+      if (typeof redeemed === "object") return HttpServerResponse.jsonUnsafe({ access_token: redeemed.token, token_type: "Bearer", expires_in: Math.round((Date.parse(redeemed.expiresAt) - Date.now()) / 1000), scope: MEDINA_SCOPE }, { headers: { "cache-control": "no-store" } })
+      return HttpServerResponse.jsonUnsafe({ error: redeemed === "pending" ? "authorization_pending" : "invalid_grant" }, { status: redeemed === "pending" ? 428 : 400, headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("POST", "/oauth2/revoke", Effect.gen(function*() {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
+      const token = typeof body === "object" && body !== null && "token" in body && typeof body.token === "string" ? body.token : bearerToken(request.headers)
+      if (!token) return HttpServerResponse.jsonUnsafe({ error: "invalid_request" }, { status: 400 })
+      auth.revoke(token)
+      return HttpServerResponse.empty({ status: 204, headers: { "cache-control": "no-store" } })
+    }))
+
     // The home page is an SPA: a static shell plus the client bundle. All
     // journal data arrives over the typed RPC at POST /rpc.
     yield* router.add(
@@ -560,7 +713,7 @@ const RpcLive = RpcServer.layerHttp({ group: JournalsGroup, path: "/rpc", protoc
 )
 
 const Main = Layer.mergeAll(
-  HttpRouter.serve(Layer.mergeAll(Routes, RpcLive)),
+  HttpRouter.serve(Layer.mergeAll(Routes, RpcLive, AuthGate)),
   Ingest,
   Warmup,
   DaySync
