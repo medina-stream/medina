@@ -37,20 +37,21 @@ const stubClient = (mintHits: Ref.Ref<number>) =>
   )
 
 describe("Drive token caching", () => {
-  test("mints once across repeated list/download calls", async () => {
+  test("mints once across repeated list, import-request, and download calls", async () => {
     const mintHits = await Effect.runPromise(Ref.make(0))
     const TestLive = Layer.provide(layer, Layer.succeed(HttpClient.HttpClient, stubClient(mintHits)))
     // Explicit config record: process.env mutation leaks across test files
     // sharing one process (the default provider snapshots the env), so each
     // test pins its own values here.
     const TestConfig = ConfigProvider.fromEnv({ env: { GOOGLE_TOKEN_URL: TOKEN_URL } })
-    const { first, second } = await Effect.runPromise(
+    const { first, second, remote } = await Effect.runPromise(
       Effect.gen(function*() {
         const drive = yield* Drive
         const first = yield* drive.list("folder-1", 10)
         const second = yield* drive.list("folder-1", 10)
+        const remote = yield* drive.importRequest("file-1")
         yield* drive.download("file-1")
-        return { first, second }
+        return { first, second, remote }
       }).pipe(
         Effect.provide(TestLive),
         Effect.provideService(ConfigProvider.ConfigProvider, TestConfig)
@@ -58,6 +59,8 @@ describe("Drive token caching", () => {
     )
     expect(first.map((file) => file.id)).toEqual(["file-1"])
     expect(second.map((file) => file.id)).toEqual(["file-1"])
+    expect(remote.url).toContain("/drive/v3/files/file-1?alt=media")
+    expect(remote.headers).toEqual(["Authorization: Bearer cached-token"])
     expect(await Effect.runPromise(Ref.get(mintHits))).toBe(1)
   })
 })

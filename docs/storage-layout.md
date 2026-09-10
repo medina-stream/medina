@@ -15,19 +15,21 @@ The bucket has two roles:
   of recordings to ingest. Those externally supplied keys are not rewritten
   until their content becomes a capture.
 
-`<captureId>` below is normally the 64-hex SHA-256 of the original bytes.
-`<hash>` and `<basisHash>` are similarly content/input hashes. Examples are
-illustrative, not observed data.
+`<captureId>` is normally the 64-hex SHA-256 of bytes that entered through a
+local/HTTP/bucket capture path. Remote Drive captures instead use the stable
+Drive file id plus revision because Medina deliberately never reads their bytes.
+`<hash>` and `<basisHash>` are content/input hashes. Examples are illustrative,
+not observed data.
 
 ## At a glance
 
 | Namespace | Example key | Where | Expected scale |
 | --- | --- | --- | --- |
-| Original capture and evidence | `capture/a3…f9/20260909T081500.m4a` | local + bucket | One directory per capture; bytes dominate storage. |
-| Capture metadata | `capture/a3…f9/provenance.json` | local + bucket | Usually 2–4 small files per capture (provenance, probe/timing metadata, plus the blob). |
+| Original capture and evidence | `capture/a3…f9/20260909T081500.m4a` | bucket; local too for local/HTTP inputs | One namespace per capture; remote Drive originals never enter local storage. |
+| Capture metadata | `capture/a3…f9/provenance.json` | local + bucket | Small provenance/probe/timing records; remote Drive capture directories contain metadata only. |
 | Archive reconciliation receipt | `archive/archive-v1/a3…f9.json` | local only | One small file per capture. It caches bucket state. |
-| Normalized audio | `media/media-v1/a3…f9/chunk-000.ogg` | local; canonical file may be in bucket | One manifest plus approximately `ceil(audio duration / 1 hour)` chunks per media capture. |
-| Transcript | `transcript/assemblyai-u35p-v1/a3…f9.json` | local only | Normally two JSON files per transcribed capture: normalized result and raw vendor result. |
+| Normalized audio | `media/media-v1/a3…f9/chunk-0.ogg` | bucket | Approximately `ceil(audio duration / 1 hour)` Opus chunks plus one local manifest. |
+| Transcript | `transcript/assemblyai-u35p-v1/a3…f9.json` | local only | Normalized result, raw vendor result, and a small URL-job receipt. |
 | Per-capture attribution | `attribution/attribution-v2/a3…f9/b7…2c.json` | local only | One or more per capture as correction/rule basis changes. |
 | Daily outputs | `notes/notes-llm-v4/2026-09-09/c1…8e.json` | local only | One or more revisions per affected day. Journal output follows the same pattern. |
 | GPS points | `gps/points-v1/day=2026-09-09/points.parquet` | local only | One overwrite-in-place Parquet partition per UTC day. Rows scale with recorded fixes. |
@@ -53,8 +55,10 @@ capture/a3e1…f9/provenance.json
 capture/a3e1…f9/ffprobe.json
 ```
 
-Every file in that directory is mirrored to the bucket under the exact same
-key:
+For local and HTTP captures, that directory contains the original and is
+mirrored to the bucket under the exact same keys. For remote Drive allowlist
+captures, Transloadit writes the original directly to the corresponding R2 key;
+the local directory contains only provenance (and any later metadata):
 
 ```text
 s3://<bucket>/capture/a3e1…f9/20260909T081500.m4a
@@ -90,14 +94,17 @@ to avoid rediscovering Medina's own output. The configured `BUCKET_LIMIT`
 limits how many candidate objects are ingested per pass; it is not a retention
 policy.
 
-When Transloadit normalization is enabled, it also writes one canonical object
-back to the bucket:
+Transloadit stores the durable one-hour Opus outputs directly in R2:
 
 ```text
-media/media-v1/a3e1…f9/canonical.ogg
+media/media-v1/a3e1…f9/chunk-0.ogg
+media/media-v1/a3e1…f9/chunk-1.ogg
 ```
 
-This is a remote normalization output, distinct from the local chunk set.
+Only `media/media-v1/a3e1…f9.json`, the manifest of those remote keys and
+offsets, is required locally. Legacy `canonical.ogg` objects are still accepted
+as migration inputs, but new workflows do not download them or create local
+chunks. AssemblyAI receives short-lived signed URLs for these R2 objects.
 
 ## Local working-set and derivation namespaces
 
@@ -106,12 +113,14 @@ This is a remote normalization output, distinct from the local chunk set.
 ingest/<source>/<source-file-id-and-revision>.json
 inventory/drive/latest.json
 allow/drive.json
-normalize/transloadit/<captureId>.json     # pending-job receipt; normally removed
+normalize/transloadit/<captureId>.json     # durable Assembly job receipt
+ingest/drive-allow-transloadit/<source-revision>.json  # Drive import/chunk Assemblies
 sources/git/<hash-of-notes-repo-url>/       # managed checkout
 
 # Media and transcription
-media/media-v1/<captureId>.json             # manifest
-media/media-v1/<captureId>/chunk-000.ogg
+media/media-v1/<captureId>.json             # local manifest of remote chunk keys
+media/media-v1/<captureId>/chunk-0.ogg      # R2 only in remote-first flow
+transcript/assemblyai-u35p-v1/<captureId>.jobs.json
 transcript/assemblyai-u35p-v1/<captureId>.json
 transcript/assemblyai-u35p-v1/<captureId>.assemblyai.json
 

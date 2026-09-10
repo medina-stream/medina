@@ -10,35 +10,28 @@
  * in the lake.
  *
  * The allowlist is that decision, recorded: `allow/drive.json` in the data
- * dir, one entry per file id. Only allowlisted files are ever downloaded.
- * An absent or empty allowlist ingests nothing -- the default is
- * inspection without ingestion. Remove an entry and the already-captured
- * bytes remain (captures are evidence; the allowlist gates acquisition,
- * not retention).
+ * dir, one entry per file id. Future allowlisted files are handed to a
+ * signed Transloadit Assembly, which imports from Drive and stores straight
+ * to R2. Medina never downloads those bytes. An absent or empty allowlist
+ * ingests nothing -- the default is inspection without ingestion. Remove an
+ * entry and the already-captured remote evidence remains (the allowlist gates
+ * acquisition, not retention).
  *
- * Audio files go through the usual capture path (blob + provenance +
- * transcription). Everything else lands as a blob capture with provenance
- * and no interpretation, like HTTP push ingest.
+ * Media files are remotely chunked for transcription. Other files are still
+ * archived directly to R2 as uninterpreted original evidence, with only their
+ * provenance and receipts stored locally.
  */
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
-import type * as Stream from "effect/Stream"
+import { Bucket } from "../Bucket.ts"
 import { Drive, type DriveItem } from "../Drive.ts"
 import * as Files from "../Files.ts"
 import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
-import {
-  captureBlobName,
-  captureDir,
-  dataPath,
-  IngestReceipt,
-  ingestReceiptKey,
-  Provenance,
-  provenanceKey
-} from "../lifelog/Resources.ts"
-import { hashStreamToFile, ingestAudioFile, type RecordingObject } from "./Audio.ts"
+import { TransloaditNormalize } from "./TransloaditNormalize.ts"
+import { dataPath } from "../lifelog/Resources.ts"
 
 export const DRIVE_INVENTORY_KEY = "inventory/drive/latest.json"
 export const DRIVE_ALLOWLIST_KEY = "allow/drive.json"
@@ -167,66 +160,13 @@ export const readAllowlist: Effect.Effect<DriveAllowlist, Error, FileSystem.File
 
 const DRIVE_ALLOW_SOURCE = "drive-allow"
 
-/** Ingest one non-audio Drive file as an uninterpreted blob capture. */
-const ingestBlobFile = (
-  file: RecordingObject,
-  download: Effect.Effect<Stream.Stream<Uint8Array, Error>, Error>
-) =>
-  Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
-    const version = file.checksum ?? file.modifiedTime
-    const receiptKey = ingestReceiptKey(DRIVE_ALLOW_SOURCE, file.id, version)
-    if (yield* fs.exists(dataPath(receiptKey))) return "cached" as const
-
-    const tmpPath = dataPath(`tmp/capture-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-    yield* fs.makeDirectory(dataPath("tmp"), { recursive: true })
-    const captureId = yield* hashStreamToFile(yield* download, tmpPath)
-
-    const blobKey = `${captureDir(captureId)}/${captureBlobName(file.name)}`
-    if (yield* fs.exists(dataPath(blobKey))) {
-      yield* fs.remove(tmpPath)
-    } else {
-      yield* fs.makeDirectory(dataPath(captureDir(captureId)), { recursive: true })
-      yield* fs.rename(tmpPath, dataPath(blobKey))
-    }
-
-    const provenance = yield* Files.readJson(Provenance, dataPath(provenanceKey(captureId)))
-    const records = Option.isSome(provenance) ? provenance.value.records : []
-    const seen = records.some((record) =>
-      record.source === DRIVE_ALLOW_SOURCE && record.fileId === file.id && record.filename === file.name
-    )
-    if (!seen) {
-      yield* Files.writeJson(
-        dataPath(provenanceKey(captureId)),
-        new Provenance({
-          captureId,
-          records: [...records, {
-            source: DRIVE_ALLOW_SOURCE,
-            filename: file.name,
-            fileId: file.id,
-            mimeType: file.mimeType,
-            modifiedTime: file.modifiedTime,
-            md5Checksum: file.checksum ?? null,
-            fetchedAt: new Date().toISOString()
-          }]
-        })
-      )
-    }
-
-    yield* Files.writeJson(
-      dataPath(receiptKey),
-      new IngestReceipt({ captureId, ingestedAt: new Date().toISOString() })
-    )
-    return "ingested" as const
-  })
-
 /**
- * The gate: only files on the allowlist are ever downloaded. Discovery
+ * The gate: only files on the allowlist are ever remotely imported. Discovery
  * intersects the allowlist with the live metadata (a listed id that Drive
  * no longer shows is reported as a failure, not silently dropped) -- an
  * empty allowlist discovers nothing and the source reads as `empty`.
  */
-export const driveAllowlistSource: Source<Drive | FileSystem.FileSystem> = makeItemSource({
+export const driveAllowlistSource: Source<Drive | TransloaditNormalize | Bucket | FileSystem.FileSystem> = makeItemSource({
   name: DRIVE_ALLOW_SOURCE,
   discover: Effect.gen(function*() {
     const allowlist = yield* readAllowlist
@@ -245,24 +185,28 @@ export const driveAllowlistSource: Source<Drive | FileSystem.FileSystem> = makeI
       return Effect.fail(new Error(`allowlisted file ${allowed.id} is not visible to the Drive credential`))
     }
     const item = allowed.item
-    const file: RecordingObject = {
-      id: item.id,
-      name: item.name,
-      mimeType: item.mimeType,
-      modifiedTime: item.modifiedTime,
-      ...(item.md5Checksum === undefined ? {} : { checksum: item.md5Checksum })
-    }
     return Effect.gen(function*() {
       const drive = yield* Drive
-      const download = drive.download(item.id)
-      return item.mimeType.startsWith("audio/")
-        ? yield* ingestAudioFile(DRIVE_ALLOW_SOURCE, file, download)
-        : yield* ingestBlobFile(file, download)
+      const transloadit = yield* TransloaditNormalize
+      if (!transloadit.configured) {
+        return yield* Effect.fail(new Error(
+          `allowlisted Drive file ${item.id} requires configured Transloadit remote ingest; refusing to download it to this host`
+        ))
+      }
+      const result = yield* transloadit.ingestDrive(DRIVE_ALLOW_SOURCE, {
+        id: item.id,
+        name: item.name,
+        mimeType: item.mimeType,
+        modifiedTime: item.modifiedTime,
+        ...(item.md5Checksum === undefined ? {} : { checksum: item.md5Checksum })
+      }, drive.importRequest(item.id))
+      return result === "cached" ? "cached" as const
+        : result === "pending" ? "skipped" as const
+        : "ingested" as const
     })
   },
   label: (allowed) => allowed.missing ? allowed.id : `${allowed.item.name} (${allowed.id})`,
-  // Drive can expose multi-gigabyte recordings. Keep the allowlist backfill
-  // serial: the HTTP client's stream may buffer a large in-flight response,
-  // and two simultaneous historical WAV downloads exceeded this VM's memory.
+  // Keep starts/polls serial so an allowlist pass makes bounded, predictable
+  // vendor/API progress regardless of the size of the remote recordings.
   concurrency: 1
 })

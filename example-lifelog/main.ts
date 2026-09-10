@@ -681,11 +681,11 @@ const Ingest = Layer.effectDiscard(
     yield* Effect.andThen(
       runPipeline<LifelogEnv>(
         sources,
-        // Stage order: the archive sweep runs first -- every capture the
-        // pass just ingested reaches the bucket before any derivation work.
-        // Then normalize (probe + transcode to canonical chunks; after this
-        // original blobs are never read again) and transcribe (chunks ->
-        // one merged transcript per capture), then GPS derivations.
+        // Stage order: local/HTTP captures are archived first. Transloadit
+        // then reads originals from R2 and writes one-hour Opus chunks back
+        // to R2; remote Drive allowlist imports arrive pre-normalized. The
+        // transcription stage submits signed R2 URLs and only polls durable
+        // job receipts on later passes, then GPS derivations run.
         [archiveSweepSource, mediaNormalizeSource, mediaTranscribeSource, gpsCompactSource, staysSource],
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement

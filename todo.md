@@ -6,14 +6,14 @@ content-addressed resource model (key bakes in dependency hashes, so file
 existence is the freshness check). What's left is incremental: serving
 behavior, Effect-native consistency, scale headroom, and small hygiene items.
 
-Baseline: `bun test` 57 pass, `bun run typecheck` clean (tests included).
+Baseline (September 10, 2026): `bun test` 147 pass, `bun run typecheck` clean.
 
 ## Next
 
-- [ ] **Transloadit offload for media-normalize** — see
-  `docs/plan-transloadit-normalize.md` (complete implementation brief; all
-  external integrations probe-verified 2026-09-09). Unblocks the 16-file
-  2021 WAV backfill from `AudioRec Recordings`.
+- [x] **Remote-first Transloadit media ingest** — allowlisted Drive files are
+  imported directly by signed SDK Assemblies; originals and one-hour Opus
+  chunks land in R2, while Medina retains receipts/manifests only. AssemblyAI
+  consumes signed R2 URLs and is polled on later pipeline passes.
 
 - [ ] **Durable speaker identity** (`lib/lifelog/Resources.ts`, `lib/lifelog/Journal.ts`, UI)
   Store per-capture mappings from AssemblyAI's local diarization labels to a
@@ -115,12 +115,13 @@ Baseline: `bun test` 57 pass, `bun run typecheck` clean (tests included).
   23 reports.
 - Notes are their own resource (`notes-llm-v1`), keyed by transcript set;
   the journal reads them instead of re-running the notes pass.
-- Drive mint token cached (`cachedWithTTL`, 50 min); audio ingest streams to
-  disk while hashing; AssemblyAI upload/submit retry transport/5xx (1s ×3).
-  Each covered by a colocated test (`lib/Drive.test.ts`,
-  `lib/capture/Audio.test.ts`, `lib/AssemblyAI.test.ts`); tests pin
-  config via `ConfigProvider.fromEnv({ env })` since `process.env` mutation
-  leaks across files in one Bun process.
+- Drive mint token cached (`cachedWithTTL`, 50 min); legacy `audio` ingest
+  streams to disk while hashing. Remote allowlist ingest sends only ephemeral
+  Google headers to Transloadit, and AssemblyAI receives only signed R2 URLs;
+  both vendors are polled from durable receipts on later passes. Focused tests
+  live in `lib/capture/DriveAllow.test.ts`,
+  `lib/capture/TransloaditNormalize.test.ts`, `lib/capture/MediaRemote.test.ts`,
+  and `lib/AssemblyAI.test.ts`.
 - Earlier: day-index memo races, notes-source scoping (4534 files → 90-day
   window), `currentJournals` newest-by-`generatedAt`, IPv6 `stripPort`, GPS
   hardening (atomic inbox writes, temp-file DuckDB transport). See git log.

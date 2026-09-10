@@ -17,10 +17,10 @@
  *   video files, whatever a capturer was rude enough to upload -- is
  *   transcoded once to a canonical form: mono 16 kHz Opus (voice-ranged
  *   bitrate), segmented into bounded chunks, with a manifest recording each
- *   chunk's offset. Chunks are derivation artifacts under a versioned key
- *   (`media/<version>/<captureId>/`); the manifest's existence is the
- *   freshness check. After this the original blob is never read again --
- *   transcription and playback consume chunks.
+ *   chunk's offset. Chunk bytes live durably in R2; local normalization may
+ *   create a temporary/local copy first, but it is uploaded before the
+ *   manifest is considered settled. After this the original blob is never
+ *   read again -- transcription consumes signed chunk URLs.
  *
  * - Transcribe: consumes manifests, not blobs. Each chunk is transcribed
  *   separately and the utterances merged with cumulative offsets into one
@@ -31,10 +31,10 @@ import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
-import * as Stream from "effect/Stream"
 import { AssemblyAI } from "../AssemblyAI.ts"
 import { Bucket } from "../Bucket.ts"
 import * as Files from "../Files.ts"
+import { R2TempCreds } from "../R2TempCreds.ts"
 import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
 import { TransloaditNormalize } from "./TransloaditNormalize.ts"
@@ -89,6 +89,22 @@ export class MediaManifest extends Schema.Class<MediaManifest>("MediaManifest")(
   createdAt: Schema.String,
   sourceDurationSeconds: Schema.NullOr(Schema.Number),
   chunks: Schema.Array(MediaChunk)
+}) {}
+
+export const transcriptJobsKey = (captureId: string) =>
+  `transcript/${TRANSCRIPT_VERSION}/${captureId}.jobs.json`
+
+export class TranscriptChunkJob extends Schema.Class<TranscriptChunkJob>("TranscriptChunkJob")({
+  index: Schema.Number,
+  key: Schema.String,
+  transcriptId: Schema.String,
+  submittedAt: Schema.String
+}) {}
+
+export class TranscriptJobReceipt extends Schema.Class<TranscriptJobReceipt>("TranscriptJobReceipt")({
+  captureId: Schema.String,
+  version: Schema.String,
+  chunks: Schema.Array(TranscriptChunkJob)
 }) {}
 
 const METADATA_NAMES = new Set(["provenance.json", "media-timing.json", "ffprobe.json"])
@@ -249,6 +265,27 @@ const captureIds = Effect.gen(function*() {
   return [...new Set(entries.map((entry) => entry.split("/")[0]!))].sort()
 })
 
+const ensureManifestChunksInR2 = (manifest: MediaManifest) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const bucket = yield* Bucket
+    if (!bucket.configured) {
+      return yield* Effect.fail(new Error("R2 bucket is required before media chunks can be transcribed"))
+    }
+    let uploaded = 0
+    for (const chunk of manifest.chunks) {
+      const remote = yield* bucket.head(chunk.key)
+      if (remote !== null && remote.size !== null && remote.size > 0) continue
+      const local = dataPath(chunk.key)
+      if (!(yield* fs.exists(local))) {
+        return yield* Effect.fail(new Error(`media chunk is missing from R2 and local storage: ${chunk.key}`))
+      }
+      yield* bucket.putFile(chunk.key, local, "audio/ogg")
+      uploaded++
+    }
+    return uploaded
+  })
+
 /**
  * Probe + normalize as a pipeline stage. Every capture is probed once;
  * every media capture is transcoded once. Settled captures cost one probe
@@ -262,14 +299,19 @@ export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNor
       const fs = yield* FileSystem.FileSystem
       const probe = yield* probeCapture(captureId)
       if (!probe.media) return "skipped" as const
-      if (yield* fs.exists(dataPath(mediaManifestKey(captureId)))) return "cached" as const
+      if (yield* fs.exists(dataPath(mediaManifestKey(captureId)))) {
+        const stored = Option.getOrNull(yield* Files.readJson(MediaManifest, dataPath(mediaManifestKey(captureId))))
+        if (stored === null) return yield* Effect.fail(new Error(`manifest vanished for ${captureId}`))
+        return (yield* ensureManifestChunksInR2(stored)) > 0 ? "ingested" as const : "cached" as const
+      }
       const transloadit = yield* TransloaditNormalize
       if (transloadit.configured) {
         if (probe.blobName === null) return yield* Effect.fail(new Error(`no blob name for media capture ${captureId}`))
         const result = yield* transloadit.normalize(captureId, probe.blobName, probeDuration(probe.ffprobe))
         return result === "pending" ? "skipped" as const : "ingested" as const
       }
-      yield* normalizeCapture(captureId)
+      const manifest = yield* normalizeCapture(captureId)
+      yield* ensureManifestChunksInR2(manifest)
       return "ingested" as const
     }),
   label: (captureId) => `capture/${captureId}`,
@@ -323,12 +365,137 @@ export const mergeChunkTranscripts = (
 }
 
 /**
- * Transcription as a stage over manifests: normalized chunks in, one
- * merged transcript per capture out. Never touches original blobs. The
- * existing transcript key gates re-work, so captures transcribed under the
- * old inline path are simply cached here.
+ * Transcription as a stage over manifests: R2 chunk URLs in, one merged
+ * transcript per capture out. A first pass submits short-lived signed URLs
+ * and persists transcript ids; later passes only poll those ids. No audio is
+ * uploaded to AssemblyAI or downloaded through Medina.
  */
-export const mediaTranscribeSource: Source<AssemblyAI | FileSystem.FileSystem> = makeItemSource({
+export const transcribeMediaCapture = (captureId: string) =>
+  Effect.gen(function*() {
+    const bucket = yield* Bucket
+    const r2 = yield* R2TempCreds
+    const assemblyai = yield* AssemblyAI
+    if (!bucket.configured || !r2.configured) {
+      return yield* Effect.fail(new Error(`R2 signed URLs are not configured for transcription of ${captureId}`))
+    }
+    const manifest = Option.getOrNull(
+      yield* Files.readJson(MediaManifest, dataPath(mediaManifestKey(captureId)))
+    )
+    if (manifest === null) return yield* Effect.fail(new Error(`manifest vanished for ${captureId}`))
+    if (manifest.chunks.length === 0) return yield* Effect.fail(new Error(`empty media manifest for ${captureId}`))
+
+    const receiptPath = dataPath(transcriptJobsKey(captureId))
+    const existing = yield* Files.readJson(TranscriptJobReceipt, receiptPath)
+    if (Option.isNone(existing)) {
+      const jobs: Array<TranscriptChunkJob> = []
+      for (const chunk of manifest.chunks) {
+        const remote = yield* bucket.head(chunk.key)
+        if (remote === null || remote.size === null || remote.size <= 0) {
+          return yield* Effect.fail(new Error(`R2 media chunk missing for transcription: ${chunk.key}`))
+        }
+        yield* Effect.log(
+          `submitting ${captureId.slice(0, 12)} chunk ${chunk.index + 1}/${manifest.chunks.length}`
+        )
+        const audioUrl = yield* r2.presignGet(chunk.key, 2 * 60 * 60)
+        const submitted = yield* assemblyai.submit(audioUrl)
+        jobs.push(new TranscriptChunkJob({
+          index: chunk.index,
+          key: chunk.key,
+          transcriptId: submitted.transcript.id,
+          submittedAt: new Date().toISOString()
+        }))
+        // Commit after every accepted job: a later submission failure must
+        // not duplicate the already-running AssemblyAI transcripts.
+        yield* Files.writeJson(receiptPath, new TranscriptJobReceipt({
+          captureId,
+          version: TRANSCRIPT_VERSION,
+          chunks: jobs
+        }))
+      }
+      return "ingested" as const
+    }
+
+    const receipt = existing.value
+    if (receipt.chunks.length > manifest.chunks.length || receipt.chunks.some((job, index) => {
+      const chunk = manifest.chunks[index]
+      return chunk === undefined || job.index !== chunk.index || job.key !== chunk.key
+    })) {
+      return yield* Effect.fail(new Error(`transcription receipt does not match media manifest for ${captureId}`))
+    }
+    if (receipt.chunks.length < manifest.chunks.length) {
+      const jobs = [...receipt.chunks]
+      for (const chunk of manifest.chunks.slice(jobs.length)) {
+        const remote = yield* bucket.head(chunk.key)
+        if (remote === null || remote.size === null || remote.size <= 0) {
+          return yield* Effect.fail(new Error(`R2 media chunk missing for transcription: ${chunk.key}`))
+        }
+        const audioUrl = yield* r2.presignGet(chunk.key, 2 * 60 * 60)
+        const submitted = yield* assemblyai.submit(audioUrl)
+        jobs.push(new TranscriptChunkJob({
+          index: chunk.index,
+          key: chunk.key,
+          transcriptId: submitted.transcript.id,
+          submittedAt: new Date().toISOString()
+        }))
+        yield* Files.writeJson(receiptPath, new TranscriptJobReceipt({
+          captureId,
+          version: TRANSCRIPT_VERSION,
+          chunks: jobs
+        }))
+      }
+      return "ingested" as const
+    }
+
+    const results = []
+    for (const [index, job] of receipt.chunks.entries()) {
+      yield* Effect.log(
+        `polling ${captureId.slice(0, 12)} chunk ${index + 1}/${receipt.chunks.length}`
+      )
+      results.push(yield* assemblyai.poll(job.transcriptId))
+    }
+    if (results.some((result) => result.transcript.status === "queued" || result.transcript.status === "processing")) {
+      return "skipped" as const
+    }
+
+    const parts = results.map((result, index) => {
+      const chunk = manifest.chunks[index]!
+      return {
+        chunk,
+        utterances: (result.transcript.utterances ?? []).map((utterance) => ({
+          speaker: utterance.speaker ?? null,
+          startMs: utterance.start,
+          endMs: utterance.end,
+          text: utterance.text,
+          confidence: utterance.confidence ?? null
+        })),
+        text: result.transcript.text ?? null,
+        transcriptId: result.transcript.id,
+        error: result.transcript.status === "error"
+          ? result.transcript.error ?? "AssemblyAI transcription failed"
+          : result.transcript.error ?? null
+      }
+    })
+
+    const provenance = yield* Files.readJson(Provenance, dataPath(provenanceKey(captureId))).pipe(
+      Effect.orElseSucceed(() => Option.none<Provenance>())
+    )
+    const filename = Option.isSome(provenance) ? provenance.value.records[0]?.filename ?? null : null
+    const capturedAt = filename === null ? null : filenameWallClock(filename)
+
+    yield* Files.writeJson(dataPath(vendorKey(captureId)), {
+      chunked: true,
+      chunks: results.map((result) => result.raw)
+    })
+    yield* Files.writeJson(
+      dataPath(transcriptKey(captureId)),
+      mergeChunkTranscripts(captureId, manifest, capturedAt, parts)
+    )
+    return "ingested" as const
+  })
+
+export const mediaTranscribeSource: Source<
+  AssemblyAI | Bucket | R2TempCreds | FileSystem.FileSystem
+> = makeItemSource({
   name: "media-transcribe",
   discover: Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
@@ -341,56 +508,7 @@ export const mediaTranscribeSource: Source<AssemblyAI | FileSystem.FileSystem> =
     }
     return pending
   }),
-  ingest: (captureId) =>
-    Effect.gen(function*() {
-      const fs = yield* FileSystem.FileSystem
-      const assemblyai = yield* AssemblyAI
-      const manifest = Option.getOrNull(
-        yield* Files.readJson(MediaManifest, dataPath(mediaManifestKey(captureId)))
-      )
-      if (manifest === null) return yield* Effect.fail(new Error(`manifest vanished for ${captureId}`))
-
-      const parts = []
-      const raws: Array<unknown> = []
-      for (const chunk of manifest.chunks) {
-        yield* Effect.log(
-          `transcribing ${captureId.slice(0, 12)} chunk ${chunk.index + 1}/${manifest.chunks.length}`
-        )
-        const audio = fs.stream(dataPath(chunk.key)).pipe(
-          Stream.mapError((cause) => new Error(String(cause)))
-        )
-        const result = yield* assemblyai.transcribe(audio)
-        raws.push(result.raw)
-        parts.push({
-          chunk,
-          utterances: (result.transcript.utterances ?? []).map((utterance) => ({
-            speaker: utterance.speaker ?? null,
-            startMs: utterance.start,
-            endMs: utterance.end,
-            text: utterance.text,
-            confidence: utterance.confidence ?? null
-          })),
-          text: result.transcript.text ?? null,
-          transcriptId: result.transcript.id ?? null,
-          error: result.transcript.error ?? null
-        })
-      }
-
-      // The filename stamp, when provenance kept one, is a capture-time
-      // hint for legacy attribution paths; container evidence supersedes it.
-      const provenance = yield* Files.readJson(Provenance, dataPath(provenanceKey(captureId))).pipe(
-        Effect.orElseSucceed(() => Option.none<Provenance>())
-      )
-      const filename = Option.isSome(provenance) ? provenance.value.records[0]?.filename ?? null : null
-      const capturedAt = filename === null ? null : filenameWallClock(filename)
-
-      yield* Files.writeJson(dataPath(vendorKey(captureId)), { chunked: true, chunks: raws })
-      yield* Files.writeJson(
-        dataPath(transcriptKey(captureId)),
-        mergeChunkTranscripts(captureId, manifest, capturedAt, parts)
-      )
-      return "ingested" as const
-    }),
+  ingest: transcribeMediaCapture,
   label: (captureId) => `capture/${captureId}`,
-  concurrency: 1
+  concurrency: 4
 })

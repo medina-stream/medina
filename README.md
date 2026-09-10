@@ -89,7 +89,7 @@ Git credential and SSH configuration provide private-repository access. Set
 `NOTES_REPO_DIR` instead to read an existing checkout without managing it.
 
 `MEDINA_SOURCES` is a comma-separated subset of the external sources
-`audio,notes,bucket`.
+`audio,inventory,allow,notes,bucket`.
 Missing source-specific configuration disables that source and reports why at
 `GET /status`; it does not prevent the server from starting. An empty value
 disables every scheduled source. Existing data remains readable and HTTP
@@ -139,6 +139,15 @@ mint, not a Google API endpoint. Enabling the `audio` source requires a
 reachable token mint plus `GDRIVE_FOLDER_ID`; direct local Google
 authentication is not implemented yet. Leave `audio` out of `MEDINA_SOURCES`
 to run without Drive or AssemblyAI.
+
+The `allow` source is remote-first. It uses the token mint only to create a
+short-lived private Drive request, then a signed Transloadit SDK Assembly reads
+the file directly from Google and stores the original plus one-hour Opus chunks
+in R2. Medina keeps provenance, Assembly receipts, and manifests locally; no
+allowlisted file bytes pass through the VM. AssemblyAI likewise receives only
+short-lived R2 URLs, and transcript IDs are polled on later pipeline passes.
+This path requires `TRANSLOADIT_API_KEY`, `TRANSLOADIT_AUTH_SECRET`, and the R2
+temporary-credential settings documented in `.env.example`.
 
 Check and run the application from the repository root:
 

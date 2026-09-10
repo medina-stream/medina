@@ -5,6 +5,8 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Stream from "effect/Stream"
 import { Drive, DriveItem } from "../Drive.ts"
+import { layerMemory } from "../Bucket.ts"
+import { TransloaditNormalize } from "./TransloaditNormalize.ts"
 import * as Files from "../Files.ts"
 import { DATA_DIR, dataPath } from "../lifelog/Resources.ts"
 import {
@@ -61,10 +63,14 @@ describe("buildInventory", () => {
 })
 
 describe("driveAllowlistSource", () => {
-  const driveOf = (items: ReadonlyArray<DriveItem>, downloads: Array<string>) =>
+  const driveOf = (items: ReadonlyArray<DriveItem>, downloads: Array<string>, imports: Array<string>) =>
     Layer.succeed(Drive)({
       list: () => Effect.succeed([]),
       listAll: Effect.succeed(items),
+      importRequest: (id) => Effect.sync(() => {
+        imports.push(id)
+        return { url: `https://drive.test/${id}`, headers: ["Authorization: Bearer ephemeral"] }
+      }),
       download: (id) =>
         Effect.sync(() => {
           downloads.push(id)
@@ -72,22 +78,81 @@ describe("driveAllowlistSource", () => {
         })
     })
 
-  const layersOf = (items: ReadonlyArray<DriveItem>, downloads: Array<string>) =>
-    Layer.mergeAll(driveOf(items, downloads), BunFileSystem.layer)
+  const transloaditOf = (remote: Array<string>, configured = true) => {
+    const completed = new Set<string>()
+    return Layer.succeed(TransloaditNormalize)({
+      configured,
+      normalize: () => Effect.succeed("completed"),
+      ingestDrive: (_source, file, request) => completed.has(file.id)
+        ? Effect.succeed("cached")
+        : Effect.flatMap(request, () => Effect.sync(() => {
+            remote.push(file.id)
+            completed.add(file.id)
+            return "completed" as const
+          }))
+    })
+  }
 
-  test("an empty allowlist downloads nothing", async () => {
+  const layersOf = (
+    items: ReadonlyArray<DriveItem>,
+    downloads: Array<string>,
+    imports: Array<string>,
+    remote: Array<string>,
+    configured = true
+  ) => Layer.mergeAll(
+    driveOf(items, downloads, imports),
+    transloaditOf(remote, configured),
+    layerMemory(),
+    BunFileSystem.layer
+  )
+
+  test("an empty allowlist imports and downloads nothing", async () => {
     const downloads: Array<string> = []
+    const imports: Array<string> = []
+    const remote: Array<string> = []
     const report = await Effect.runPromise(
       driveAllowlistSource.ingest.pipe(
-        Effect.provide(layersOf([item({ id: "f1", name: "a.txt" })], downloads))
+        Effect.provide(layersOf([item({ id: "f1", name: "a.txt" })], downloads, imports, remote))
       )
     )
     expect(report.discovered).toBe(0)
     expect(downloads).toEqual([])
+    expect(imports).toEqual([])
+    expect(remote).toEqual([])
   })
 
-  test("only allowlisted files are downloaded; unknown ids fail visibly", async () => {
+  test("an unconfigured remote path fails closed without reading Drive content", async () => {
     const downloads: Array<string> = []
+    const imports: Array<string> = []
+    const remote: Array<string> = []
+    await Effect.runPromise(
+      Files.writeJson(
+        dataPath(DRIVE_ALLOWLIST_KEY),
+        new DriveAllowlist({ files: [{ id: "blocked" }] })
+      ).pipe(Effect.provide(BunFileSystem.layer))
+    )
+    const report = await Effect.runPromise(
+      driveAllowlistSource.ingest.pipe(
+        Effect.provide(layersOf(
+          [item({ id: "blocked", name: "large.wav", mimeType: "audio/wav" })],
+          downloads,
+          imports,
+          remote,
+          false
+        ))
+      )
+    )
+    expect(report.failures.length).toBe(1)
+    expect(report.failures[0]!.error).toContain("refusing to download it to this host")
+    expect(downloads).toEqual([])
+    expect(imports).toEqual([])
+    expect(remote).toEqual([])
+  })
+
+  test("only allowlisted files are remotely imported; Drive download is never called", async () => {
+    const downloads: Array<string> = []
+    const imports: Array<string> = []
+    const remote: Array<string> = []
     await Effect.runPromise(
       Files.writeJson(
         dataPath(DRIVE_ALLOWLIST_KEY),
@@ -98,23 +163,28 @@ describe("driveAllowlistSource", () => {
       item({ id: "f1", name: "a.txt", md5Checksum: "abc" }),
       item({ id: "f2", name: "never-allowed.txt" })
     ]
+    const live = layersOf(items, downloads, imports, remote)
     const report = await Effect.runPromise(
       driveAllowlistSource.ingest.pipe(
-        Effect.provide(layersOf(items, downloads))
+        Effect.provide(live)
       )
     )
-    expect(downloads).toEqual(["f1"])
+    expect(downloads).toEqual([])
+    expect(imports).toEqual(["f1"])
+    expect(remote).toEqual(["f1"])
     expect(report.ingested).toBe(1)
     expect(report.failures.length).toBe(1)
     expect(report.failures[0]!.item).toBe("gone")
 
-    // A second pass is settled by the receipt: no new download.
+    // A second pass is settled by the remote-ingest receipt; no new import.
     const second = await Effect.runPromise(
       driveAllowlistSource.ingest.pipe(
-        Effect.provide(layersOf(items, downloads))
+        Effect.provide(live)
       )
     )
-    expect(downloads).toEqual(["f1"])
+    expect(downloads).toEqual([])
+    expect(imports).toEqual(["f1"])
+    expect(remote).toEqual(["f1"])
     expect(second.cached).toBe(1)
   })
 })

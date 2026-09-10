@@ -4,7 +4,6 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
-import type * as Stream from "effect/Stream"
 import * as HttpBody from "effect/unstable/http/HttpBody"
 import * as HttpClient from "effect/unstable/http/HttpClient"
 import * as HttpClientError from "effect/unstable/http/HttpClientError"
@@ -31,10 +30,14 @@ export interface AssemblyAIResult {
   readonly raw: unknown
 }
 
-const Upload = Schema.Struct({ upload_url: Schema.String })
-
+/**
+ * URL-only transcription API. AssemblyAI fetches an R2-signed object itself;
+ * Medina never uploads audio to AssemblyAI and never waits in-process for a
+ * transcript. The pipeline persists the returned id and polls on later passes.
+ */
 export class AssemblyAI extends Context.Service<AssemblyAI, {
-  readonly transcribe: (audio: Stream.Stream<Uint8Array, Error>) => Effect.Effect<AssemblyAIResult, Error>
+  readonly submit: (audioUrl: string) => Effect.Effect<AssemblyAIResult, Error>
+  readonly poll: (transcriptId: string) => Effect.Effect<AssemblyAIResult, Error>
 }>()("medina/AssemblyAI") {}
 
 export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpClient> = Layer.effect(AssemblyAI)(
@@ -53,10 +56,6 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
     )
     const asError = (cause: unknown) => new Error("AssemblyAI request failed", { cause })
 
-    // Only transport-level and 5xx failures are worth retrying: a 4xx or a
-    // bad body will fail the same way next second. Previously any of these
-    // on upload/submit failed the whole file until the next hourly pass
-    // re-uploaded it.
     const isTransient = (error: unknown) =>
       error instanceof HttpClientError.HttpClientError &&
       (error.reason._tag === "TransportError" ||
@@ -69,74 +68,39 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
     const decodeTranscript = (raw: unknown) =>
       Schema.decodeUnknownEffect(VendorTranscript)(raw).pipe(Effect.mapError(asError))
 
-    const getTranscript = (id: string) =>
-      client.get(`${baseUrl}/v2/transcript/${encodeURIComponent(id)}`).pipe(
+    const response = (request: Effect.Effect<HttpClientResponse.HttpClientResponse, unknown>) =>
+      request.pipe(
         Effect.flatMap(HttpClientResponse.schemaBodyJson(Schema.Unknown)),
+        Effect.retry(retryTransient),
         Effect.flatMap((raw) => Effect.map(decodeTranscript(raw), (transcript) => ({ transcript, raw }))),
         Effect.mapError(asError)
       )
 
     return {
-      transcribe: (audio) =>
-        Effect.gen(function*() {
-          const upload = yield* client.post(`${baseUrl}/v2/upload`, {
-            body: HttpBody.stream(audio, "application/octet-stream")
-          }).pipe(
-            Effect.flatMap(HttpClientResponse.schemaBodyJson(Upload)),
-            Effect.retry(retryTransient),
-            Effect.mapError(asError)
-          )
-
-          const submittedRaw = yield* client.post(`${baseUrl}/v2/transcript`, {
-            body: HttpBody.jsonUnsafe({
-              audio_url: upload.upload_url,
-              speech_models: ["universal-3-5-pro"],
-              speaker_labels: true,
-              language_detection: true,
-              ...(prompt ? { prompt } : {}),
-              ...(speakerNames.length > 0
-                ? {
-                  speech_understanding: {
-                    request: {
-                      speaker_identification: {
-                        speaker_type: "name",
-                        known_values: speakerNames
-                      }
-                    }
+      submit: (audioUrl) => response(client.post(`${baseUrl}/v2/transcript`, {
+        body: HttpBody.jsonUnsafe({
+          audio_url: audioUrl,
+          speech_models: ["universal-3-5-pro"],
+          speaker_labels: true,
+          language_detection: true,
+          ...(prompt ? { prompt } : {}),
+          ...(speakerNames.length > 0
+            ? {
+              speech_understanding: {
+                request: {
+                  speaker_identification: {
+                    speaker_type: "name",
+                    known_values: speakerNames
                   }
                 }
-                : {})
-            })
-          }).pipe(
-            Effect.flatMap(HttpClientResponse.schemaBodyJson(Schema.Unknown)),
-            Effect.retry(retryTransient),
-            Effect.mapError(asError)
-          )
-          const submitted = yield* decodeTranscript(submittedRaw)
-
-          return yield* getTranscript(submitted.id).pipe(
-            Effect.flatMap((result) =>
-              result.transcript.status === "completed" || result.transcript.status === "error"
-                ? Effect.succeed(result)
-                : Effect.fail(new Pending(result.transcript.id))
-            ),
-            Effect.retry({
-              while: (error) => error instanceof Pending,
-              schedule: Schedule.spaced("10 seconds").pipe(Schedule.upTo({ duration: "2 hours" }))
-            }),
-            Effect.mapError((error) =>
-              error instanceof Pending ? new Error(`AssemblyAI transcript ${error.id} did not finish in time`) : error
-            )
-          )
+              }
+            }
+            : {})
         })
+      })),
+      poll: (transcriptId) => response(client.get(
+        `${baseUrl}/v2/transcript/${encodeURIComponent(transcriptId)}`
+      ))
     }
   })
 )
-
-class Pending extends Error {
-  readonly id: string
-  constructor(id: string) {
-    super(`transcript ${id} still processing`)
-    this.id = id
-  }
-}

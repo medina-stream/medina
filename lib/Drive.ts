@@ -40,6 +40,13 @@ const ItemPage = Schema.Struct({
 })
 const Token = Schema.Struct({ access_token: Schema.String })
 
+export interface DriveImportRequest {
+  /** Google Drive media endpoint. Transloadit, not Medina, reads this URL. */
+  readonly url: string
+  /** Short-lived authorization headers; callers must never persist or log them. */
+  readonly headers: ReadonlyArray<string>
+}
+
 export class Drive extends Context.Service<Drive, {
   readonly list: (folderId: string, pageSize: number) => Effect.Effect<ReadonlyArray<DriveFile>, Error>
   /**
@@ -48,6 +55,11 @@ export class Drive extends Context.Service<Drive, {
    * whole Drive must be structurally unable to ingest it.
    */
   readonly listAll: Effect.Effect<ReadonlyArray<DriveItem>, Error>
+  /**
+   * Mint a short-lived request Transloadit can use to import a private Drive
+   * object directly. The bearer token is ephemeral and must not be persisted.
+   */
+  readonly importRequest: (fileId: string) => Effect.Effect<DriveImportRequest, Error>
   readonly download: (fileId: string) => Effect.Effect<Stream.Stream<Uint8Array, Error>, Error>
 }>()("medina/Drive") {}
 
@@ -110,6 +122,12 @@ export const layer: Layer.Layer<Drive, Config.ConfigError, HttpClient.HttpClient
         } while (pageToken !== undefined)
         return items as ReadonlyArray<DriveItem>
       }).pipe(Effect.mapError(asError)),
+
+      importRequest: (fileId) =>
+        Effect.map(token, (accessToken) => ({
+          url: `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`,
+          headers: [`Authorization: Bearer ${accessToken}`]
+        })),
 
       download: (fileId) =>
         authorized(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`).pipe(

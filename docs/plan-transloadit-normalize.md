@@ -1,5 +1,11 @@
 # Plan: Transloadit offload for media normalization
 
+> Superseded on September 10, 2026 by the implemented remote-first workflow.
+> The implementation no longer downloads canonical audio to the VM: Drive is
+> imported directly, originals and one-hour Opus chunks are stored in R2, and
+> AssemblyAI receives signed R2 URLs with later-pass polling. The material below
+> remains as probe history for the earlier canonical-file design.
+
 Status: all external dependencies verified live (2026-09-09, conversation
 "assess-branch-divergence"). This file is the implementation brief; nothing
 here is speculative — every integration claim below was probed end-to-end.
