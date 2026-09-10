@@ -1,5 +1,6 @@
 /** Transloadit-backed normalization. Credentials in receipts are deliberately
  * excluded: receipts only coordinate polling and can safely be discarded. */
+import { ApiError, Transloadit } from "transloadit"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -37,22 +38,22 @@ const optional = (name: string) =>
 const terminal = (ok: string | undefined) => !["ASSEMBLY_UPLOADING", "ASSEMBLY_EXECUTING", "ASSEMBLY_REPLAYING"].includes(ok ?? "")
 const asError = (cause: unknown) => cause instanceof Error ? cause : new Error(String(cause))
 
-const responseJson = async (response: Response): Promise<Record<string, unknown>> => {
-  const body = await response.json()
-  if (body === null || typeof body !== "object" || Array.isArray(body)) throw new Error("invalid Transloadit response")
-  return body as Record<string, unknown>
-}
-
 export const layer: Layer.Layer<TransloaditNormalize, Config.ConfigError, R2TempCreds> = Layer.effect(
   TransloaditNormalize
 )(Effect.gen(function*() {
   const apiKey = yield* optional("TRANSLOADIT_API_KEY")
+  const authSecret = yield* optional("TRANSLOADIT_AUTH_SECRET")
   const apiUrl = ((yield* optional("TRANSLOADIT_API_URL")) ?? "https://api2.transloadit.com").replace(/\/$/, "")
   const r2 = yield* R2TempCreds
-  const configured = apiKey !== null && r2.configured
+  const configured = apiKey !== null && authSecret !== null && r2.configured
   const failUnconfigured = () => Effect.fail(new Error(
-    "Transloadit normalization is not configured: set TRANSLOADIT_API_KEY, R2_ACCOUNT_ID, and R2_PARENT_ACCESS_KEY_ID"
+    "Transloadit normalization is not configured: set TRANSLOADIT_API_KEY, TRANSLOADIT_AUTH_SECRET, R2_ACCOUNT_ID, and R2_PARENT_ACCESS_KEY_ID"
   ))
+  const client = configured ? new Transloadit({ authKey: apiKey, authSecret, endpoint: apiUrl, maxRetries: 0 }) : null
+  const sdkError = (operation: string, cause: unknown) => {
+    if (cause instanceof ApiError) return new Error(`Transloadit ${operation} failed: ${cause.message}`, { cause })
+    return asError(cause)
+  }
   return {
     configured,
     normalize: (captureId, blobName, sourceDurationSeconds) => !configured ? failUnconfigured() : Effect.gen(function*() {
@@ -90,13 +91,8 @@ export const layer: Layer.Layer<TransloaditNormalize, Config.ConfigError, R2Temp
           }
         }
         const created = yield* Effect.tryPromise({
-          try: async () => {
-            const form = new FormData()
-            form.set("params", JSON.stringify(params))
-            const response = await fetch(`${apiUrl}/assemblies`, { method: "POST", body: form })
-            if (!response.ok) throw new Error(`Transloadit create failed (${response.status})`)
-            return responseJson(response)
-          }, catch: asError
+          try: () => client!.createAssembly({ params }),
+          catch: (cause) => sdkError("create", cause)
         })
         const assemblyId = typeof created.assembly_id === "string" ? created.assembly_id : null
         const assemblySslUrl = typeof created.assembly_ssl_url === "string" ? created.assembly_ssl_url : null
@@ -107,18 +103,15 @@ export const layer: Layer.Layer<TransloaditNormalize, Config.ConfigError, R2Temp
         return "fired" as const
       }
       const polled = yield* Effect.tryPromise({
-        try: async () => {
-          const response = await fetch(receipt.value.assemblySslUrl)
-          if (response.status === 404) return { vanished: true } as Record<string, unknown>
-          if (!response.ok) throw new Error(`Transloadit poll failed (${response.status})`)
-          return responseJson(response)
-        }, catch: asError
+        try: () => client!.getAssembly(receipt.value.assemblyId),
+        catch: (cause) => sdkError("poll", cause)
       })
-      if (polled.vanished === true || (terminal(typeof polled.ok === "string" ? polled.ok : undefined) && polled.ok !== "ASSEMBLY_COMPLETED")) {
+      const status = typeof polled.ok === "string" ? polled.ok : undefined
+      if (terminal(status) && status !== "ASSEMBLY_COMPLETED") {
         yield* fs.remove(dataPath(transloaditReceiptKey(captureId)), { force: true }).pipe(Effect.ignore)
-        return yield* Effect.fail(new Error(`Transloadit assembly ${receipt.value.assemblyId} failed or vanished`))
+        return yield* Effect.fail(new Error(`Transloadit assembly ${receipt.value.assemblyId} failed: ${polled.error ?? status}`))
       }
-      if (polled.ok !== "ASSEMBLY_COMPLETED") return "pending" as const
+      if (status !== "ASSEMBLY_COMPLETED") return "pending" as const
       const canonical = yield* bucket.head(canonicalKey)
       if (canonical === null || canonical.size === null || canonical.size <= 0) {
         return yield* Effect.fail(new Error(`Transloadit completed without canonical output for ${captureId}`))
