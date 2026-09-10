@@ -260,7 +260,7 @@ export const layerWithClient = (
         },
         split: {
           robot: "/audio/split",
-          use: ":import",
+          use: "import",
           ffmpeg_stack: "v7",
           preset: "empty",
           ffmpeg: { "c:a": "libopus", "b:a": "24k", ar: 16000, ac: 1, f: "ogg", vn: true },
