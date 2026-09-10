@@ -15,8 +15,9 @@
   },
   "scripts": {
     "build:client": "bun build ./lib/lifelog/client.ts --outfile ./example-lifelog/public/app.js --target browser --minify",
-    "dev": "bun run build:client && bun --watch example-lifelog/main.ts",
-    "start": "bun run build:client && bun example-lifelog/main.ts",
+    "build:cli": "bun build ./example-lifelog/cli.ts --outfile ./example-lifelog/public/medina-cli.js --target bun --minify",
+    "dev": "bun run build:client && bun run build:cli && bun --watch example-lifelog/main.ts",
+    "start": "bun run build:client && bun run build:cli && bun example-lifelog/main.ts",
     "mcp:lifelog": "bun example-lifelog/mcp.ts",
     "cli:lifelog": "bun example-lifelog/cli.ts",
     "typecheck": "tsc --noEmit"

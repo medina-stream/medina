@@ -205,7 +205,7 @@ const unauthenticated = (request: HttpServerRequest.HttpServerRequest) =>
 
 const publicAuthPath = (url: string) => {
   const path = url.split("?", 1)[0] ?? ""
-  return path === "/auth.md" || path === "/cli/skill.md" || path === "/.well-known/oauth-protected-resource" ||
+  return path === "/auth.md" || path === "/cli/skill.md" || path === "/cli/medina.js" || path === "/.well-known/oauth-protected-resource" ||
     path === "/.well-known/oauth-authorization-server" || path === "/auth/requests" ||
     path.startsWith("/auth/approve/") || path === "/auth/delegations" || path === "/oauth2/token" || path === "/oauth2/revoke"
 }
@@ -235,54 +235,54 @@ Medina supports one delegated scope: \`${MEDINA_SCOPE}\` (full access).
 
 Tokens last one hour, are stored only as hashes, and can be revoked at \`POST /oauth2/revoke\`.
 `, { contentType: "text/markdown", headers: { "cache-control": "no-store" } })))
-    yield* router.add("GET", "/cli/skill.md", Effect.succeed(HttpServerResponse.text(`# Medina CLI skill
+    yield* router.add("GET", "/cli/skill.md", Effect.succeed(HttpServerResponse.text(`# Medina CLI
 
-Use this skill when you need to query or update its owner's Medina context.
+Use the CLI for typed-RPC access to Medina. It prints JSON on success. On an
+error, read the plain-English guidance at this URL.
 
-## Authorization
-
-First create a delegation request; do not ask for a long-lived secret:
-
-\`\`\`sh
-curl -sS -X POST "$MEDINA_URL/auth/requests" \\
-  -H 'content-type: application/json' \\
-  --data '{"client_name":"Muse"}'
-\`\`\`
-
-Show the returned \`approval_url\` to the owner. Poll until approval:
+## Run it without installing anything
 
 \`\`\`sh
-curl -sS -X POST "$MEDINA_URL/oauth2/token" \\
-  -H 'content-type: application/json' \\
-  --data '{"grant_type":"urn:medina:delegation","request_id":"REQUEST_ID"}'
+curl -fsSL https://medina-dev.warthog-yo.ts.net/cli/medina.js | \\
+  bun - --url https://medina-dev.warthog-yo.ts.net status
 \`\`\`
 
-Store \`access_token\` only in your secret environment as \`MEDINA_TOKEN\`.
-It grants the one current \`medina\` scope (full access), expires after one
-hour, and may be revoked by the owner. Never put it in a prompt, log, commit,
-or tool output.
+The runtime must be connected to the tailnet that is allowed to reach Medina.
+That is normally all that is needed: Tailscale authenticates the connection.
 
-## Install and use the typed-RPC CLI
-
-In a Medina checkout with Bun dependencies installed:
+## Commands
 
 \`\`\`sh
-bun install
-export MEDINA_URL=https://medina-dev.warthog-yo.ts.net
-export MEDINA_TOKEN=md_…
-bun run cli:lifelog status
-bun run cli:lifelog days 30
-bun run cli:lifelog journal 2026-09-09
-bun run cli:lifelog search 'meeting follow-up'
+# Recent days (default: 30)
+bun medina-cli.js --url URL days 10
+
+# Full journal for one day
+bun medina-cli.js --url URL journal 2026-09-09
+
+# Transcript search
+bun medina-cli.js --url URL search 'meeting follow-up'
+
+# Pipeline health, transcripts, and places
+bun medina-cli.js --url URL status
+bun medina-cli.js --url URL transcripts 2026-09-09
+bun medina-cli.js --url URL places
 \`\`\`
 
-The CLI is a thin wrapper around the typed \`/rpc\` interface and prints JSON
-to stdout. Its available commands are \`status\`, \`days [limit]\`,
-\`journal YYYY-MM-DD\`, \`transcripts YYYY-MM-DD\`, \`search QUERY\`, and
-\`places\`.
+## If access is denied
 
-Keep all traffic on the tailnet URL. For protocol details, fetch \`/auth.md\`.
+Make sure the runtime is on the approved tailnet. If the owner has explicitly
+delegated a Medina bearer token, set \`MEDINA_TOKEN\` in the runtime's secret
+environment and retry. Do not place tokens in prompts, logs, or source files.
+
+A future published package may make this \`bunx medina\`; until then the
+one-line download above is the zero-install form.
 `, { contentType: "text/markdown", headers: { "cache-control": "no-store" } })))
+    yield* router.add("GET", "/cli/medina.js", Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const path = "example-lifelog/public/medina-cli.js"
+      if (!(yield* fs.exists(path))) return HttpServerResponse.text("CLI bundle missing: run bun run build:cli", { status: 503 })
+      return HttpServerResponse.text(yield* fs.readFileString(path), { contentType: "text/javascript", headers: { "cache-control": "private, max-age=60" } })
+    }).pipe(Effect.orDie))
     yield* router.add("GET", "/.well-known/oauth-protected-resource", Effect.gen(function*() {
       const request = yield* HttpServerRequest.HttpServerRequest
       const origin = requestOrigin(request)
