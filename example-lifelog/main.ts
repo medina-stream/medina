@@ -205,7 +205,7 @@ const unauthenticated = (request: HttpServerRequest.HttpServerRequest) =>
 
 const publicAuthPath = (url: string) => {
   const path = url.split("?", 1)[0] ?? ""
-  return path === "/auth.md" || path === "/.well-known/oauth-protected-resource" ||
+  return path === "/auth.md" || path === "/cli/skill.md" || path === "/.well-known/oauth-protected-resource" ||
     path === "/.well-known/oauth-authorization-server" || path === "/auth/requests" ||
     path.startsWith("/auth/approve/") || path === "/auth/delegations" || path === "/oauth2/token" || path === "/oauth2/revoke"
 }
@@ -234,6 +234,54 @@ Medina supports one delegated scope: \`${MEDINA_SCOPE}\` (full access).
 4. Send the resulting bearer token in \`Authorization: Bearer …\`.
 
 Tokens last one hour, are stored only as hashes, and can be revoked at \`POST /oauth2/revoke\`.
+`, { contentType: "text/markdown", headers: { "cache-control": "no-store" } })))
+    yield* router.add("GET", "/cli/skill.md", Effect.succeed(HttpServerResponse.text(`# Medina CLI skill
+
+Use this skill when you need to query or update its owner's Medina context.
+
+## Authorization
+
+First create a delegation request; do not ask for a long-lived secret:
+
+\`\`\`sh
+curl -sS -X POST "$MEDINA_URL/auth/requests" \\
+  -H 'content-type: application/json' \\
+  --data '{"client_name":"Muse"}'
+\`\`\`
+
+Show the returned \`approval_url\` to the owner. Poll until approval:
+
+\`\`\`sh
+curl -sS -X POST "$MEDINA_URL/oauth2/token" \\
+  -H 'content-type: application/json' \\
+  --data '{"grant_type":"urn:medina:delegation","request_id":"REQUEST_ID"}'
+\`\`\`
+
+Store \`access_token\` only in your secret environment as \`MEDINA_TOKEN\`.
+It grants the one current \`medina\` scope (full access), expires after one
+hour, and may be revoked by the owner. Never put it in a prompt, log, commit,
+or tool output.
+
+## Install and use the typed-RPC CLI
+
+In a Medina checkout with Bun dependencies installed:
+
+\`\`\`sh
+bun install
+export MEDINA_URL=https://medina-dev.warthog-yo.ts.net
+export MEDINA_TOKEN=md_…
+bun run cli:lifelog status
+bun run cli:lifelog days 30
+bun run cli:lifelog journal 2026-09-09
+bun run cli:lifelog search 'meeting follow-up'
+\`\`\`
+
+The CLI is a thin wrapper around the typed \`/rpc\` interface and prints JSON
+to stdout. Its available commands are \`status\`, \`days [limit]\`,
+\`journal YYYY-MM-DD\`, \`transcripts YYYY-MM-DD\`, \`search QUERY\`, and
+\`places\`.
+
+Keep all traffic on the tailnet URL. For protocol details, fetch \`/auth.md\`.
 `, { contentType: "text/markdown", headers: { "cache-control": "no-store" } })))
     yield* router.add("GET", "/.well-known/oauth-protected-resource", Effect.gen(function*() {
       const request = yield* HttpServerRequest.HttpServerRequest
