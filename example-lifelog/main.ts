@@ -207,7 +207,7 @@ const publicAuthPath = (url: string) => {
   const path = url.split("?", 1)[0] ?? ""
   return path === "/auth.md" || path === "/.well-known/oauth-protected-resource" ||
     path === "/.well-known/oauth-authorization-server" || path === "/auth/requests" ||
-    path.startsWith("/auth/approve/") || path === "/oauth2/token" || path === "/oauth2/revoke"
+    path.startsWith("/auth/approve/") || path === "/auth/delegations" || path === "/oauth2/token" || path === "/oauth2/revoke"
 }
 
 /** Apply the same full-access check to REST and the typed RPC endpoint. */
@@ -275,6 +275,21 @@ Tokens last one hour, are stored only as hashes, and can be revoked at \`POST /o
       if (!result) return HttpServerResponse.text("This delegation request is missing, expired, or already decided.", { status: 404 })
       yield* Effect.log(`delegation ${result.status}: ${result.clientName} by ${login}`)
       return HttpServerResponse.text(`<!doctype html><title>Medina delegation</title><p>${result.status === "approved" ? "Access approved. Muse may now obtain its token." : "Access denied."}</p>`, { contentType: "text/html", headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("GET", "/auth/delegations", Effect.gen(function*() {
+      const login = yield* approvalAccess
+      if (!login) return HttpServerResponse.text("Viewing delegations requires the configured owner over Tailscale.", { status: 403 })
+      const rows = auth.listTokens().map((token) => `<tr><td>${token.clientName.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)}</td><td><code>${token.id}</code></td><td>${token.expiresAt}</td><td>${token.revokedAt ?? "active"}</td><td><form method="post"><input type="hidden" name="id" value="${token.id}"><button>Revoke</button></form></td></tr>`).join("") || "<tr><td colspan=5>No delegated tokens.</td></tr>"
+      return HttpServerResponse.text(`<!doctype html><title>Medina delegations</title><h1>Medina delegations</h1><p>Owner: ${login}</p><table><thead><tr><th>Agent</th><th>ID</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`, { contentType: "text/html", headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("POST", "/auth/delegations", Effect.gen(function*() {
+      const login = yield* approvalAccess
+      if (!login) return HttpServerResponse.text("Revoking delegations requires the configured owner over Tailscale.", { status: 403 })
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const form = new URLSearchParams(new TextDecoder().decode(yield* Effect.orDie(request.arrayBuffer)))
+      const revoked = auth.revokeId(form.get("id") ?? "")
+      if (revoked) yield* Effect.log(`delegation revoked by ${login}`)
+      return HttpServerResponse.redirect("/auth/delegations", { status: 303 })
     }))
     yield* router.add("POST", "/oauth2/token", Effect.gen(function*() {
       const request = yield* HttpServerRequest.HttpServerRequest

@@ -28,7 +28,7 @@ describe("MedinaAuth", () => {
     expect(redeemed.token).toStartWith("md_")
     expect(auth.authorize(redeemed.token)).toMatchObject({ clientName: "Muse" })
     expect(auth.redeem(request.id)).toBe("missing")
-    expect(auth.revoke(redeemed.token)).toBe(true)
+    expect(auth.revokeId(auth.authorize(redeemed.token)?.tokenId ?? "")).toBe(true)
     expect(auth.authorize(redeemed.token)).toBeNull()
   })
 

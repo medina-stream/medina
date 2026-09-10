@@ -148,6 +148,18 @@ export class MedinaAuth {
     return { clientName: entry.clientName, tokenId: entry.id }
   }
 
+  listTokens(): ReadonlyArray<Omit<StoredToken, "hash">> {
+    return this.#read().tokens.map(({ hash: _hash, ...token }) => token)
+  }
+
+  revokeId(id: string): boolean {
+    const state = this.#read()
+    const entry = state.tokens.find((candidate) => candidate.id === id)
+    if (!entry || entry.revokedAt) return false
+    this.#write({ ...state, tokens: state.tokens.map((candidate) => candidate.id === id ? { ...candidate, revokedAt: now() } : candidate) })
+    return true
+  }
+
   revoke(token: string): boolean {
     const state = this.#read()
     const hash = digest(token)
