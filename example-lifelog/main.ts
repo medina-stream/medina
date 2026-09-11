@@ -786,12 +786,12 @@ const Main = Layer.mergeAll(
   Layer.provide(StartTimeHintsLive),
   // Cold caches over the network mount can push the first / render past
   // Bun's default 10s request timeout; give handlers more room.
-  // Bind loopback by default. Reads (journals, GPS, transcripts) are
-  // unauthenticated by design -- something in front is expected to
-  // authenticate: `tailscale serve` and the exe.dev proxy both terminate
-  // outside and forward to 127.0.0.1. Defaulting to 0.0.0.0 would instead
-  // publish a personal lifelog to whatever network the host is on. Set
-  // `HOST=0.0.0.0` deliberately, and only behind such a front door.
+  // Bind loopback by default. Tailscale Serve and the exe.dev proxy terminate
+  // outside and forward to 127.0.0.1. The application then accepts either the
+  // configured Tailscale owner or a valid delegated bearer token. Defaulting
+  // to 0.0.0.0 would instead publish a personal lifelog to whatever network
+  // the host is on. Set `HOST=0.0.0.0` deliberately, and only behind such a
+  // front door.
   Layer.provide(BunHttpServer.layer({
     hostname: process.env.HOST ?? "127.0.0.1",
     port: Number(process.env.PORT ?? 8000),

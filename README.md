@@ -193,7 +193,14 @@ front of it:
 - **exe.dev** (recommended for the owner): the proxy authenticates the VM owner
   before a request reaches the port.
 - **Tailscale**: `tailscale serve` terminates TLS for the tailnet and forwards
-  to loopback, injecting a verified `Tailscale-User-Login`.
+  to loopback, injecting a verified `Tailscale-User-Login`. Enable it with:
+
+  ```sh
+  tailscale serve --bg 8000
+  ```
+
+  The Serve configuration persists in Tailscale, so it survives a Medina
+  process or VM restart.
 - **Anything else**: a reverse proxy that authenticates and forwards to
   loopback.
 
@@ -210,6 +217,12 @@ system. `GET /auth.md` describes the compact approval flow:
 2. You open the returned approval URL from Tailscale and choose Allow or Deny.
 3. The agent polls `POST /oauth2/token` and receives a one-hour Bearer token.
 4. It sends that token as `Authorization: Bearer …` to REST and `/rpc`.
+
+Tailscale is the transport boundary. The configured owner may use its verified
+Tailscale identity directly; a non-owner agent such as Muse must use its
+Bearer token even when it can reach the host over the tailnet. Store that token
+in the agent's secret environment as `MEDINA_TOKEN`, never in a prompt, log,
+or source file.
 
 `AUTH_OWNER` names the Tailscale login allowed to approve a delegation; it
 falls back to `INGEST_OWNER`. Tokens are opaque, stored only as SHA-256 hashes
