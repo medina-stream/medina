@@ -67,11 +67,27 @@ const STYLE = `
   a { color: var(--accent); }
   .stale { font-size: .7rem; font-weight: 500; color: var(--muted); }
 
-  /* Room for the floating account button above whatever the view puts
-     first -- a day row's badge or the Places heading. Set on the mount
-     rather than inside the table, so the virtual scroll math keeps its
-     one-to-one mapping from scrollTop to row index. */
-  #app { padding-top: 3.25rem; }
+  /* A quiet instance label: enough presence to orient the viewer without
+     competing with the journal. The client scales only unusually long names. */
+  .site-header {
+    padding: .45rem 3.4rem .15rem 0;
+    margin-bottom: 1.65rem;
+    overflow: hidden;
+  }
+  .hostname {
+    width: 100%; overflow: hidden; white-space: nowrap;
+    font-family: "Inter"; font-size: .875rem; font-weight: 500;
+    line-height: 1.35; letter-spacing: .025em;
+  }
+  .hostname-lead {
+    color: var(--ink);
+    font-weight: 620;
+  }
+  .hostname-rest { color: var(--muted); }
+
+  /* A little separation below the instance name, without changing the
+     virtual table's one-to-one mapping from scrollTop to row index. */
+  #app { padding-top: .25rem; }
 
   /* Controls: one look, and never smaller than a comfortable tap. */
   input, button, select {
@@ -357,8 +373,13 @@ export const journalPage = (views: ReadonlyArray<JournalView>) =>
 export const spaHome = () =>
   "<!doctype html>" + render(
     <Layout title="Medina" scriptSrc="/app.js">
-      {/* No page title: the list is the page. The account button floats over
-          it so nothing competes with the days for vertical space. */}
+      <header class="site-header">
+        <h1 id="hostname" class="hostname" aria-label="Hostname">
+          <span id="hostname-lead" class="hostname-lead"></span>
+          <span id="hostname-rest" class="hostname-rest"></span>
+        </h1>
+      </header>
+      {/* The account button shares the top line with the instance name. */}
       <button type="button" id="account-open" class="iconbutton accountbutton" aria-label="Account and status" aria-haspopup="dialog">
         <span class="status-dot" id="account-dot"></span>
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">

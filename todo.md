@@ -10,6 +10,18 @@ Baseline (September 10, 2026): `bun test` 147 pass, `bun run typecheck` clean.
 
 ## Next
 
+- [ ] **Rebuild the pyannoteAI Scott voiceprint** (`scripts/pyannote-speaker-experiment.ts`)
+  The current enrollment is a 47-second composite in `/tmp` (no manifest,
+  unknown provenance) that separates Scott cleanly only on the capture it came
+  from (matched avg 67/100) and collapses elsewhere (avg 27-34, near the 16-20
+  floor). Re-enroll with 3-5 minutes of verified Scott-only speech across
+  several captures/days/environments; verify each clip is single-speaker before
+  adding it to the composite; store the composite in the data dir with a
+  manifest (capture, time ranges, verified-by). Add a confidence threshold on
+  `/v1/identify` output before labeling -- `match` fires at 16-30 today, which
+  is noise. Validate with the experiment script on labeled captures and check
+  Scott-cluster separation.
+
 - [x] **Remote-first Transloadit media ingest** — allowlisted Drive files are
   imported directly by signed SDK Assemblies; originals and one-hour Opus
   chunks land in R2, while Medina retains receipts/manifests only. AssemblyAI

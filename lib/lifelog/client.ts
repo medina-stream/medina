@@ -159,6 +159,34 @@ const routeSearch = (hash: string): string | null => {
 
 const mount = document.getElementById("app")!
 
+/** Paint the browser's complete host name and fit it to one line. Resetting
+ * to the restrained CSS size before each measurement lets short names use
+ * the cap again after a resize, while long MagicDNS names scale to fit. */
+const hostnameHeading = document.getElementById("hostname") as HTMLHeadingElement | null
+const hostnameLead = document.getElementById("hostname-lead")
+const hostnameRest = document.getElementById("hostname-rest")
+
+const fitHostname = () => {
+  if (!hostnameHeading) return
+  hostnameHeading.style.fontSize = ""
+  const available = hostnameHeading.clientWidth
+  const natural = hostnameHeading.scrollWidth
+  if (available > 0 && natural > available) {
+    const startingPixels = Number.parseFloat(getComputedStyle(hostnameHeading).fontSize)
+    hostnameHeading.style.fontSize = `${startingPixels * available / natural}px`
+  }
+}
+
+if (hostnameHeading && hostnameLead && hostnameRest) {
+  const hostname = window.location.hostname
+  const firstDot = hostname.indexOf(".")
+  hostnameLead.textContent = firstDot === -1 ? hostname : hostname.slice(0, firstDot)
+  hostnameRest.textContent = firstDot === -1 ? "" : hostname.slice(firstDot)
+  fitHostname()
+  window.addEventListener("resize", fitHostname, { passive: true })
+  void document.fonts.ready.then(fitHostname)
+}
+
 /**
  * Modal helpers over the native `dialog`, which brings focus trapping, Esc,
  * and inertness of the page behind it -- none of which is worth
