@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.BucketCapture" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#365E3B</item>
+    </style>
+</resources>
