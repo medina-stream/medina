@@ -47,6 +47,16 @@ export interface Resource<R> {
   readonly instance?: (label: string) => Effect.Effect<ResourceInstance<R>, Error, R>
 }
 
+/**
+ * Some resources are also consumed by builds. A build supplies the concrete
+ * paths/keys it needs; the resource keeps one materializer for both durable
+ * resource-tree and build-time targets instead of growing a parallel asset
+ * generation system.
+ */
+export interface TargetMaterializable<R, Target> {
+  readonly materialize: (target: Target) => Effect.Effect<void, Error, R>
+}
+
 /** Read an already-materialized instance without doing derivative work. */
 export const readCachedInstance = <S extends Schema.Codec<any, any>, R>(
   schema: S,

@@ -7,6 +7,8 @@ import { raw, render, type Child } from "../Html.ts"
 import { dayId } from "./DayLabels.ts"
 import type { Journal } from "./Resources.ts"
 import type { JournalView } from "./Views.ts"
+import { AppIcon } from "../../example-lifelog/app-icon.ts"
+import { webIconOutput } from "../../example-lifelog/AppIconResource.ts"
 
 const STYLE = `
   /* Inter, self-hosted (see the /inter.woff2 route). One typeface for the
@@ -301,6 +303,11 @@ const Layout = ({ title, children, scriptSrc }: { title: string; children?: Chil
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <meta name="theme-color" content={AppIcon.themeColor} />
+      <link rel="manifest" href={webIconOutput("manifest").route} />
+      <link rel="icon" type="image/svg+xml" href={webIconOutput("svg").route} />
+      <link rel="icon" type="image/x-icon" href={webIconOutput("ico").route} />
+      <link rel="apple-touch-icon" href={webIconOutput("png", 180).route} />
       <title>{title}</title>
       <style>{raw(STYLE)}</style>
     </head>

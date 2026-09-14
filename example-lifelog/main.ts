@@ -48,6 +48,7 @@ import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
 import { archiveSweepSource, audioSource, driveAllowlistSource, driveInventorySource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
+import { appIconResponse, webIconTarget } from "./AppIconResource.ts"
 
 const auth = new MedinaAuth({ directory: dataPath("auth") })
 
@@ -205,7 +206,7 @@ const unauthenticated = (request: HttpServerRequest.HttpServerRequest) =>
 
 const publicAuthPath = (url: string) => {
   const path = url.split("?", 1)[0] ?? ""
-  return path === "/auth.md" || path === "/cli/skill.md" || path === "/cli/medina.js" || path === "/.well-known/oauth-protected-resource" ||
+  return webIconTarget.outputs.some((output) => output.route === path) || path === "/auth.md" || path === "/cli/skill.md" || path === "/cli/medina.js" || path === "/.well-known/oauth-protected-resource" ||
     path === "/.well-known/oauth-authorization-server" || path === "/auth/requests" ||
     path.startsWith("/auth/approve/") || path === "/auth/delegations" || path === "/oauth2/token" || path === "/oauth2/revoke"
 }
@@ -365,6 +366,19 @@ one-line download above is the zero-install form.
       "/",
       Effect.succeed(HttpServerResponse.html(spaHome()))
     )
+    // AppIcon declares this exact allowlist. Every URL includes the canonical
+    // content hash, so successful responses are safe to cache forever.
+    for (const output of webIconTarget.outputs) {
+      yield* router.add("GET", output.route as `/${string}`, appIconResponse(output.route).pipe(
+        Effect.map((asset) => asset
+          ? HttpServerResponse.uint8Array(asset.bytes, {
+              contentType: asset.contentType,
+              headers: { "cache-control": asset.cacheControl }
+            })
+          : HttpServerResponse.text("app icon output missing: run bun run build:icons", { status: 503 })),
+        Effect.orDie
+      ))
+    }
     yield* router.add(
       "GET",
       "/app.js",
