@@ -1,6 +1,7 @@
 /**
- * Medina, the Effect edition: a Bun process that hourly ingests the latest N
- * Drive files, transcribes new audio with AssemblyAI, journals each day with
+ * Medina, the Effect edition: a Bun process that ingests the latest N
+ * Drive files every minute (the Drive metadata inventory stays hourly),
+ * transcribes new audio with AssemblyAI, journals each day with
  * an LLM, and serves the journal at GET /.
  */
 import { BunHttpClient, BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun"
@@ -450,7 +451,7 @@ one-line download above is the zero-install form.
         const request = yield* HttpServerRequest.HttpServerRequest
         const wantsHtml = (request.headers["accept"] ?? "").includes("text/html")
         // Read-only: never materialize here. A stale or missing journal is a
-        // 202 placeholder; the hourly pipeline pass converges it.
+        // 202 placeholder; the minutely pipeline pass converges it.
         const cached = yield* journalCachedForDay(day).pipe(Effect.orDie)
         if (Option.isNone(cached)) {
           return wantsHtml
@@ -488,7 +489,7 @@ one-line download above is the zero-install form.
           return HttpServerResponse.text("not a day: use 020260907 or 2026-09-07", { status: 400 })
         }
         // Read-only: never materialize here. A stale or missing movement is
-        // a 202 placeholder; the hourly pipeline pass converges it.
+        // a 202 placeholder; the minutely pipeline pass converges it.
         const cached = yield* movementCachedForDay(day).pipe(Effect.orDie)
         if (Option.isNone(cached)) {
           return HttpServerResponse.jsonUnsafe({ status: "pending", day }, {
@@ -648,13 +649,6 @@ const Ingest = Layer.effectDiscard(
         disabledReason: enabled.has("audio") ? "GDRIVE_FOLDER_ID and GOOGLE_TOKEN_URL are required" : "disabled by MEDINA_SOURCES"
       },
       {
-        // Metadata-only crawl of everything the Drive credential can see.
-        // Inspection is not ingestion: this source reads no file content.
-        name: "drive-inventory",
-        source: enabled.has("inventory") && tokenUrl ? driveInventorySource : undefined,
-        disabledReason: enabled.has("inventory") ? "GOOGLE_TOKEN_URL is required" : "disabled by MEDINA_SOURCES"
-      },
-      {
         // Ingestion of individually allowlisted Drive files (allow/drive.json
         // in the data dir). An empty allowlist ingests nothing.
         name: "drive-allow",
@@ -711,6 +705,22 @@ const Ingest = Layer.effectDiscard(
           : "disabled by MEDINA_SOURCES"
       }
     ]
+
+    // The Drive metadata inventory is a full re-crawl of everything the
+    // Drive credential can see -- far too heavy for the minutely ingest
+    // loop. It rides its own hourly loop below; inspection is not
+    // ingestion, and no stage or journal reads the inventory, so nothing
+    // else needs it fresh.
+    const inventorySources: ReadonlyArray<PipelineSource<LifelogEnv>> = [
+      {
+        // Metadata-only crawl of everything the Drive credential can see.
+        // Inspection is not ingestion: this source reads no file content.
+        name: "drive-inventory",
+        source: enabled.has("inventory") && tokenUrl ? driveInventorySource : undefined,
+        disabledReason: enabled.has("inventory") ? "GOOGLE_TOKEN_URL is required" : "disabled by MEDINA_SOURCES"
+      }
+    ]
+
     yield* Effect.andThen(
       runPipeline<LifelogEnv>(
         sources,
@@ -732,6 +742,24 @@ const Ingest = Layer.effectDiscard(
       // previews behind, so readers see them without paying derivation.
       Effect.forkDetach(refreshDayPreviews)
     ).pipe(
+      // Ingest-relevant sources poll every minute: every pass is
+      // receipt-guarded and idempotent, and Schedule.spaced starts the
+      // interval after a pass finishes, so passes can never overlap.
+      Effect.repeat(Schedule.spaced("1 minute")),
+      Effect.forkScoped
+    )
+
+    // The Drive inventory crawl stays hourly: it re-crawls all Drive
+    // metadata every pass, which is wasteful at a one-minute cadence.
+    // It needs no stages or resources -- it only rewrites the inventory
+    // snapshot, which nothing downstream reads in real time.
+    yield* runPipeline<LifelogEnv>(
+      inventorySources,
+      [],
+      [],
+      dataPath
+    ).pipe(
+      Effect.catchCause((cause) => Effect.logError("inventory pipeline run failed", cause)),
       Effect.repeat(Schedule.spaced("1 hour")),
       Effect.forkScoped
     )
