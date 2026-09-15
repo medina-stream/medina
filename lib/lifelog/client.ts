@@ -747,6 +747,7 @@ const program = Effect.gen(function*() {
     reconcileRows()
     if (before !== rows[0]?.day) refreshChrome()
     paintWindow()
+    paintHero()
   }
 
   const scheduleMidnight = () => {
@@ -777,6 +778,38 @@ const program = Effect.gen(function*() {
         : `<p class="empty">Nothing recorded.</p>`)
   }
 
+  /**
+   * The Today card above the list: big date, lifetime stats, and today's
+   * preview, all derived from the already-loaded rows. Repainted whenever
+   * the rows change, so the stats stay in step with the list.
+   */
+  const paintHero = () => {
+    const hero = document.getElementById("today-hero")
+    if (hero === null) return
+    const button = hero.querySelector("button")
+    if (button === null) return
+    if (rows.length === 0) {
+      button.innerHTML = `<span class="today-hero-loading">Loading…</span>`
+      return
+    }
+    const today = todayDay()
+    const date = new Date()
+    const dateLabel = date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })
+    const logged = rows.filter((row) => row.preview !== "" || row.audioSeconds > 0).length
+    const totalAudio = rows.reduce((sum, row) => sum + row.audioSeconds, 0)
+    const audio = audioLabel(totalAudio)
+    const todayRow = rows.find((row) => row.day === today)
+    const preview = todayRow?.preview?.trim() || ""
+    button.innerHTML =
+      `<span class="today-hero-kicker">Today</span>` +
+      `<span class="today-hero-date">${escapeHtml(dateLabel)}</span>` +
+      `<span class="today-hero-stats">${logged} ${logged === 1 ? "day" : "days"} logged` +
+      (audio ? ` · ${escapeHtml(audio)} recorded` : "") + `</span>` +
+      (preview
+        ? `<span class="today-hero-preview">${escapeHtml(preview)}</span>`
+        : `<span class="today-hero-preview">Nothing recorded yet — tap to open the day.</span>`)
+  }
+
   /** Append the next server page, unless one is already in flight. Failures
    * the in-flight flag without touching rows, so the next paint retries. */
   const loadPage = () => {
@@ -801,6 +834,7 @@ const program = Effect.gen(function*() {
           reconcileRows()
           refreshChrome()
           paintWindow()
+          paintHero()
         })
       ),
       Effect.catchCause(() => Effect.sync(() => {
@@ -861,6 +895,7 @@ const program = Effect.gen(function*() {
           reconcileRows()
           refreshChrome()
           paintWindow()
+          paintHero()
         })
       ),
       Effect.catchCause(() => Effect.void)
@@ -944,11 +979,15 @@ const program = Effect.gen(function*() {
     exhausted = false
     mount.innerHTML =
       searchHeader("") +
+      `<section class="today-hero" id="today-hero" aria-label="Today"><button type="button" class="today-hero-inner" id="today-hero-open"><span class="today-hero-loading">Loading…</span></button></section>` +
       `<div class="vtable" id="vtable" tabindex="0">` +
       `<div class="vspacer" id="vspacer"></div>` +
       `</div>` +
       `<noscript><p class="empty">The journal loads over a typed RPC and needs JavaScript.</p></noscript>`
     wireSearchForm()
+    document.getElementById("today-hero-open")?.addEventListener("click", () => {
+      location.hash = dayRoute(todayDay())
+    })
     table = document.getElementById("vtable")!
     spacer = document.getElementById("vspacer")!
     // Delegated: rows are recycled on every scroll paint, so per-row

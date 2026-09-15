@@ -220,6 +220,17 @@ const STYLE = `
   /* Search lives above either primary main view: the days list or a result
      set. The route swaps only the content below this header. */
   .home-header { padding-bottom: .75rem; border-bottom: 1px solid var(--rule-soft); margin-bottom: .25rem; }
+
+  /* The Today card pins the current day above the virtualized list: a big
+     date, lifetime stats, and today's preview. Tapping it opens the day. */
+  .today-hero { margin: 1rem 0 .5rem; }
+  .today-hero-inner { display: block; width: 100%; text-align: left; border: 1px solid var(--rule-soft); border-radius: .9rem; padding: 1rem 1.1rem; background: linear-gradient(135deg, var(--surface), transparent 70%); cursor: pointer; color: inherit; font: inherit; }
+  .today-hero-inner:hover { border-color: var(--rule); }
+  .today-hero-kicker { display: block; font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  .today-hero-date { display: block; font-size: 1.35rem; font-weight: 700; letter-spacing: -.01em; margin: .15rem 0 .35rem; }
+  .today-hero-stats { display: block; font-size: .82rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .today-hero-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin-top: .5rem; font-size: .88rem; color: var(--muted); }
+  .today-hero-loading { color: var(--muted); font-size: .88rem; }
   .search-form { display: flex; gap: .5rem; margin: 0; }
   .search-form input { flex: 1 1 auto; min-width: 0; }
   .search-hit { display: flex; flex-direction: column; gap: .2rem; width: 100%; text-align: left; white-space: normal; border: 0; border-bottom: 1px solid var(--rule-soft); border-radius: 0; padding: .85rem 0; background: transparent; }
