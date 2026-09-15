@@ -57,7 +57,11 @@ export class TransloaditReceipt extends Schema.Class<TransloaditReceipt>("Transl
   originalKey: Schema.optional(Schema.String),
   sourceDurationSeconds: Schema.optional(Schema.NullOr(Schema.Number)),
   previousAssemblyIds: Schema.optional(Schema.Array(Schema.String)),
-  completedAt: Schema.optional(Schema.String)
+  completedAt: Schema.optional(Schema.String),
+  /** Chunk-assembly re-fires for receipts whose chunks never landed in R2
+   * (the segment_index store-template era wrote every chunk to one key).
+   * Capped at MAX_CHUNK_REFIRES; older receipts simply lack the field. */
+  refires: Schema.optional(Schema.Number)
 }) {}
 
 export interface RemoteDriveObject {
@@ -133,7 +137,35 @@ const mediaMime = (mimeType: string) => mimeType.startsWith("audio/") || mimeTyp
 const originalKeyFor = (captureId: string, filename: string) =>
   `capture/${captureId}/${captureBlobName(filename)}`
 const chunkPrefixFor = (captureId: string) => `media/${MEDIA_VERSION}/${captureId}/`
-const remoteChunkKey = (captureId: string, index: number) => `${chunkPrefixFor(captureId)}chunk-${index}.ogg`
+
+/** Transloadit's /audio/split robot never sets a segment_index in file meta.
+ * The chunk index lives only in the generated filename: the robot appends
+ * `_<index>` to the source basename, so `recording_12.ogg` is chunk 12.
+ * Rows arrive unordered, so the index is parsed per row, never by position. */
+const segmentIndexFromSplitRow = (row: Record<string, unknown>): number | null => {
+  const raw = text(row.basename) ?? text(row.name)
+  if (raw === null) return null
+  let decoded = raw
+  try {
+    decoded = decodeURIComponent(raw)
+  } catch {
+    // keep the raw value when it is not valid percent-encoding
+  }
+  const base = decoded.replace(/\.[^.]*$/, "")
+  const match = base.match(/_(\d+)$/)
+  if (match === null) return null
+  const index = Number(match[1])
+  return Number.isSafeInteger(index) ? index : null
+}
+
+/** R2 key for one split result, mirroring the store_chunks path template
+ * (`${chunkPrefixFor(captureId)}${file.basename}.ogg`) exactly. */
+const chunkKeyForSplitRow = (captureId: string, row: Record<string, unknown>): string | null => {
+  const basename = text(row.basename)
+  return basename === null ? null : `${chunkPrefixFor(captureId)}${basename}.ogg`
+}
+
+const MAX_CHUNK_REFIRES = 3
 
 const segmentsFor = (durationSeconds: number) => {
   const count = Math.ceil(durationSeconds / CHUNK_SECONDS)
@@ -241,7 +273,8 @@ export const layerWithClient = (
     sourceKey: string,
     originalKey: string,
     durationSeconds: number,
-    previousAssemblyIds: ReadonlyArray<string>
+    previousAssemblyIds: ReadonlyArray<string>,
+    refires: number
   ) => Effect.gen(function*() {
     const sourceUrl = yield* r2.presignGet(sourceKey, JOB_TTL_SECONDS)
     const write = yield* r2.mint({
@@ -271,7 +304,7 @@ export const layerWithClient = (
           r2,
           write,
           "split",
-          `${chunkPrefixFor(captureId)}chunk-\${file.meta.segment_index}.ogg`
+          `${chunkPrefixFor(captureId)}\${file.basename}.ogg`
         )
       }
     }, {
@@ -280,36 +313,57 @@ export const layerWithClient = (
       captureId,
       originalKey,
       sourceDurationSeconds: durationSeconds,
-      previousAssemblyIds: [...previousAssemblyIds]
+      previousAssemblyIds: [...previousAssemblyIds],
+      refires
     })
   })
 
-  const manifestFromCompletedChunks = (
+  /** Settle a completed chunk assembly: write the manifest when every
+   * chunk is in R2, otherwise re-fire a fresh chunk assembly (capped) when
+   * the store wrote nothing usable -- the poisoned-receipt recovery path. */
+  const settleChunks = (
+    receiptPath: string,
     captureId: string,
-    durationSeconds: number,
+    receipt: TransloaditReceipt,
     assembly: unknown
-  ) => Effect.gen(function*() {
+  ): Effect.Effect<"completed" | "fired", Error, Bucket | FileSystem.FileSystem> => Effect.gen(function*() {
     const bucket = yield* Bucket
+    const durationSeconds = receipt.sourceDurationSeconds
+    if (durationSeconds == null) {
+      return yield* Effect.fail(new Error(`invalid Transloadit receipt for ${captureId}: missing source duration`))
+    }
     const segments = segmentsFor(durationSeconds)
     const splitRows = resultRows(assembly, "split")
-    const indexes = splitRows.flatMap((row) => {
-      const index = number(record(row.meta).segment_index)
-      return index === null ? [] : [index]
-    })
-    if (splitRows.length !== segments.length || indexes.length !== segments.length) {
+    const rowsByIndex = new Map<number, Record<string, unknown>>()
+    for (const row of splitRows) {
+      const index = segmentIndexFromSplitRow(row)
+      if (index === null || rowsByIndex.has(index)) {
+        return yield* Effect.fail(new Error(
+          `Transloadit completed with ${splitRows.length} chunks for ${captureId}; expected ${segments.length}`
+        ))
+      }
+      rowsByIndex.set(index, row)
+    }
+    if (rowsByIndex.size !== segments.length) {
       return yield* Effect.fail(new Error(
         `Transloadit completed with ${splitRows.length} chunks for ${captureId}; expected ${segments.length}`
       ))
     }
     const chunks: Array<MediaChunk> = []
+    const missing: Array<number> = []
     for (const [index, segment] of segments.entries()) {
-      if (!indexes.includes(index)) {
+      const row = rowsByIndex.get(index)
+      if (row === undefined) {
         return yield* Effect.fail(new Error(`Transloadit result omitted chunk ${index} for ${captureId}`))
       }
-      const key = remoteChunkKey(captureId, index)
+      const key = chunkKeyForSplitRow(captureId, row)
+      if (key === null) {
+        return yield* Effect.fail(new Error(`Transloadit split result for chunk ${index} of ${captureId} has no filename`))
+      }
       const stored = yield* bucket.head(key)
       if (stored === null || stored.size === null || stored.size <= 0) {
-        return yield* Effect.fail(new Error(`Transloadit completed without R2 chunk ${index} for ${captureId}: ${key}`))
+        missing.push(index)
+        continue
       }
       chunks.push(new MediaChunk({
         index,
@@ -318,15 +372,41 @@ export const layerWithClient = (
         durationSeconds: segment.to - segment.from
       }))
     }
-    const manifest = new MediaManifest({
+    if (missing.length === 0) {
+      const manifest = new MediaManifest({
+        captureId,
+        version: MEDIA_VERSION,
+        createdAt: new Date().toISOString(),
+        sourceDurationSeconds: durationSeconds,
+        chunks
+      })
+      yield* Files.writeJson(dataPath(mediaManifestKey(captureId)), manifest)
+      yield* completeReceipt(receiptPath, receipt)
+      return "completed" as const
+    }
+    const refires = receipt.refires ?? 0
+    if (refires >= MAX_CHUNK_REFIRES) {
+      return yield* Effect.fail(new Error(
+        `Transloadit chunks for ${captureId} never landed in R2 after ${MAX_CHUNK_REFIRES} re-fires; giving up (missing chunks: ${missing.join(", ")})`
+      ))
+    }
+    const originalKey = receipt.originalKey
+    if (originalKey === undefined) {
+      return yield* Effect.fail(new Error(`invalid Transloadit receipt for ${captureId}: missing original key`))
+    }
+    yield* Effect.logWarning(
+      `re-firing chunk assembly for ${captureId}: chunks missing from R2 (${missing.join(", ")}); attempt ${refires + 1} of ${MAX_CHUNK_REFIRES}`
+    )
+    const next = yield* createChunkReceipt(
       captureId,
-      version: MEDIA_VERSION,
-      createdAt: new Date().toISOString(),
-      sourceDurationSeconds: durationSeconds,
-      chunks
-    })
-    yield* Files.writeJson(dataPath(mediaManifestKey(captureId)), manifest)
-    return manifest
+      originalKey,
+      originalKey,
+      durationSeconds,
+      [...(receipt.previousAssemblyIds ?? []), receipt.assemblyId],
+      refires + 1
+    )
+    yield* Files.writeJson(receiptPath, next)
+    return "fired" as const
   })
 
   const completeReceipt = (path: string, receipt: TransloaditReceipt) => Files.writeJson(
@@ -351,7 +431,7 @@ export const layerWithClient = (
         }
         const original = yield* bucket.head(originalKey)
         if (original === null) return yield* Effect.fail(new Error(`archived blob missing for ${captureId}: ${originalKey}`))
-        const receipt = yield* createChunkReceipt(captureId, originalKey, originalKey, sourceDurationSeconds, [])
+        const receipt = yield* createChunkReceipt(captureId, originalKey, originalKey, sourceDurationSeconds, [], 0)
         yield* Files.writeJson(path, receipt)
         return "fired" as const
       }
@@ -371,7 +451,7 @@ export const layerWithClient = (
         }
         const duration = sourceDurationSeconds ?? resultDuration(assembly, ["encode", "store"])
         if (duration === null) return yield* Effect.fail(new Error(`Transloadit returned no duration for ${captureId}`))
-        const next = yield* createChunkReceipt(captureId, canonicalKey, originalKey, duration, [receipt.assemblyId])
+        const next = yield* createChunkReceipt(captureId, canonicalKey, originalKey, duration, [receipt.assemblyId], 0)
         yield* Files.writeJson(path, next)
         return "fired" as const
       }
@@ -379,9 +459,7 @@ export const layerWithClient = (
       if (receipt.phase !== "chunks" || receipt.sourceDurationSeconds == null) {
         return yield* Effect.fail(new Error(`invalid Transloadit receipt for ${captureId}: phase ${receipt.phase ?? "missing"}`))
       }
-      yield* manifestFromCompletedChunks(captureId, receipt.sourceDurationSeconds, assembly)
-      yield* completeReceipt(path, receipt)
-      return "completed" as const
+      return yield* settleChunks(path, captureId, receipt, assembly)
     })
 
   const ingestDrive = (
@@ -448,15 +526,15 @@ export const layerWithClient = (
           if (duration === null) {
             return yield* Effect.fail(new Error(`Transloadit returned no media duration for ${file.name} (${file.id})`))
           }
-          receipt = yield* createChunkReceipt(captureId, originalKey, originalKey, duration, [receipt.assemblyId])
+          receipt = yield* createChunkReceipt(captureId, originalKey, originalKey, duration, [receipt.assemblyId], 0)
           yield* Files.writeJson(jobReceiptPath, receipt)
           return "fired" as const
         }
         yield* completeReceipt(jobReceiptPath, receipt)
         receipt = new TransloaditReceipt({ ...receipt, phase: "completed", completedAt: new Date().toISOString() })
       } else if (receipt.phase === "chunks" && receipt.sourceDurationSeconds != null) {
-        yield* manifestFromCompletedChunks(captureId, receipt.sourceDurationSeconds, assembly)
-        yield* completeReceipt(jobReceiptPath, receipt)
+        const settled = yield* settleChunks(jobReceiptPath, captureId, receipt, assembly)
+        if (settled === "fired") return "fired" as const
         receipt = new TransloaditReceipt({ ...receipt, phase: "completed", completedAt: new Date().toISOString() })
       } else {
         return yield* Effect.fail(new Error(
