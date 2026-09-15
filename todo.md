@@ -10,6 +10,19 @@ Baseline (September 10, 2026): `bun test` 147 pass, `bun run typecheck` clean.
 
 ## Next
 
+- [ ] **Transloadit chunk-index repair** (media-normalize step, Transloadit assembly handling)
+  Transloadit names chunks `_0.ogg`, `_1.ogg`, … but the code looks for a
+  `meta.segment_index` tag that Transloadit never sets, so chunk manifests
+  collide/break and transcription starves (many downstream `UnknownError`s;
+  journal runs with zero transcripts). Store chunks at
+  `chunkPrefix + file.name`; parse the index from `_(\d+)\.ogg`; detect
+  duplicate, missing, malformed, or empty chunks; re-fire poisoned completed
+  assemblies while preserving assembly IDs; cap attempts at three per capture.
+  Cover ordinary and Drive ingestion; test against real Transloadit output;
+  run focused tests, the full suite, and typecheck; prove real end-to-end
+  transcripts. Constraints: do not revert `502795d`; do not alter
+  `store_original`'s `use: ":import"`; do not edit `.env` or the Android app.
+
 - [ ] **Rebuild the pyannoteAI Scott voiceprint** (`scripts/pyannote-speaker-experiment.ts`)
   The current enrollment is a 47-second composite in `/tmp` (no manifest,
   unknown provenance) that separates Scott cleanly only on the capture it came
