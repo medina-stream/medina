@@ -270,7 +270,7 @@ export const layerWithClient = (
         store_chunks: s3Store(
           r2,
           write,
-          ":split",
+          "split",
           `${chunkPrefixFor(captureId)}chunk-\${file.meta.segment_index}.ogg`
         )
       }
