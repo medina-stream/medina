@@ -190,16 +190,32 @@ const STYLE = `
   /* Days table. No page header any more, so the list starts at the top. */
   .vtable { overflow-y: auto; height: min(84vh, 58rem); position: relative; -webkit-overflow-scrolling: touch; }
   .vspacer { position: relative; width: 100%; }
-  .vrow { position: absolute; left: 0; right: 0; height: 100px; }
+  /* Row heights come from the inline style per row kind; content is clamped
+     and can never change them. */
+  .vrow { position: absolute; left: 0; right: 0; }
   /* The whole row is the target, so it is a button, not a link inside text. */
   .vrow-inner {
-    display: block; width: 100%; height: 100px; text-align: left;
+    display: block; width: 100%; height: 100%; text-align: left;
     padding: 14px .5rem; margin: 0; overflow: hidden;
     background: none; border: 0; border-bottom: 1px solid var(--rule-soft);
     border-radius: 0; cursor: pointer; color: inherit;
   }
   .vrow-inner:hover { background: var(--surface); }
   .vrow-inner:active { transform: none; }
+  /* Today and Yesterday are special inside the list's own flow: Today gets
+     presence (accent bar, live light, roomier preview), Yesterday a quieter
+     lift. The ghost Tomorrow is faint and non-interactive. */
+  .vrow-today .vrow-inner { background: var(--surface); border-left: 3px solid var(--accent); padding-left: calc(.5rem - 3px); }
+  .vrow-today .vrow-inner:hover { background: var(--surface); }
+  .vrow-today .vrow-day { font-size: 1.2rem; }
+  .vrow-today .vrow-inner p { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .vrow-yesterday .vrow-inner { background: color-mix(in srgb, var(--surface) 45%, transparent); }
+  .vrow-tomorrow { display: flex; align-items: center; padding: 0 .5rem; border-bottom: 1px dashed var(--rule-soft); }
+  .vrow-ghost-label { color: var(--muted); opacity: .55; font-size: .8rem; font-style: italic; }
+  /* Data-is-flowing light, living in the Today cell. */
+  .live-dot { display: inline-block; width: .55rem; height: .55rem; border-radius: 50%; background: var(--rule); flex: none; align-self: center; }
+  .live-dot.on { background: #2fa84f; animation: live-pulse 1.6s ease-in-out infinite; }
+  @keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
   .vrow-title { display: flex; align-items: baseline; gap: .55rem; margin-bottom: .3rem; }
   /* Tabular figures keep the compact dates in a true column. */
   .vrow-day {
@@ -220,17 +236,6 @@ const STYLE = `
   /* Search lives above either primary main view: the days list or a result
      set. The route swaps only the content below this header. */
   .home-header { padding-bottom: .75rem; border-bottom: 1px solid var(--rule-soft); margin-bottom: .25rem; }
-
-  /* The Today card pins the current day above the virtualized list: a big
-     date, lifetime stats, and today's preview. Tapping it opens the day. */
-  .today-hero { margin: 1rem 0 .5rem; }
-  .today-hero-inner { display: block; width: 100%; text-align: left; border: 1px solid var(--rule-soft); border-radius: .9rem; padding: 1rem 1.1rem; background: linear-gradient(135deg, var(--surface), transparent 70%); cursor: pointer; color: inherit; font: inherit; }
-  .today-hero-inner:hover { border-color: var(--rule); }
-  .today-hero-kicker { display: block; font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
-  .today-hero-date { display: block; font-size: 1.35rem; font-weight: 700; letter-spacing: -.01em; margin: .15rem 0 .35rem; }
-  .today-hero-stats { display: block; font-size: .82rem; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .today-hero-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin-top: .5rem; font-size: .88rem; color: var(--muted); }
-  .today-hero-loading { color: var(--muted); font-size: .88rem; }
   .search-form { display: flex; gap: .5rem; margin: 0; }
   .search-form input { flex: 1 1 auto; min-width: 0; }
   .search-hit { display: flex; flex-direction: column; gap: .2rem; width: 100%; text-align: left; white-space: normal; border: 0; border-bottom: 1px solid var(--rule-soft); border-radius: 0; padding: .85rem 0; background: transparent; }
