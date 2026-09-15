@@ -12,6 +12,11 @@
  * without credentials), but `configured` is false and every operation fails
  * with instructions. Callers that archive best-effort log and move on; the
  * sweep stage fails visibly in pipeline status until the bucket exists.
+ *
+ * A second bucket can be attached as a *source*: `SourceBucket` (below)
+ * lists and downloads from it, and its API has no write operations at all,
+ * so the pipeline physically cannot store anything there. The capture app's
+ * bucket is attached this way -- medina ingests from it, never writes to it.
  */
 import {
   AbortMultipartUploadCommand,
@@ -69,188 +74,300 @@ const unconfigured: BucketApi = {
   putFile: () => Effect.fail(new Error(NOT_CONFIGURED))
 }
 
-export const layer: Layer.Layer<Bucket, Config.ConfigError> = Layer.effect(Bucket)(
+interface S3Connection {
+  readonly bucket: string | null
+  readonly endpoint: string | null
+  readonly accessKeyId: string
+  readonly secretAccessKey: string
+  readonly region: string
+  readonly forcePathStyle: boolean
+}
+
+const readS3Connection = (
+  prefix: "BUCKET" | "SOURCE_BUCKET",
+  regionDefault: string
+): Effect.Effect<S3Connection, Config.ConfigError> =>
   Effect.gen(function*() {
     const optional = (name: string) =>
       Effect.map(
-        Config.option(Config.string(name)),
+        Config.option(Config.string(`${prefix}_${name}`)),
         (value) => Option.getOrNull(value)?.trim() || null
       )
-    const bucket = yield* optional("BUCKET_NAME")
-    // "disabled" grandfathers earlier configs that used it as an explicit off.
-    if (!bucket || bucket === "disabled") {
-      return unconfigured
-    }
-    const endpoint = yield* optional("BUCKET_ENDPOINT")
     // Keyless is a real configuration: an edge-signing endpoint (e.g. an
     // exe.dev s3 integration) injects credentials at the network boundary
     // and ignores the SDK's signature. The SDK still requires credential
     // strings to build a request, so placeholders stand in. Against a real
-    // S3 endpoint the placeholders fail per-operation, which the archive
-    // stage surfaces — misconfiguration is visible either way.
-    const accessKeyId = (yield* optional("BUCKET_ACCESS_KEY_ID")) ?? "edge-injected"
-    const secretAccessKey = (yield* optional("BUCKET_SECRET_ACCESS_KEY")) ?? "edge-injected"
-    const region = (yield* optional("BUCKET_REGION")) ?? "us-east-1"
-    const forcePathStyle = yield* Config.boolean("BUCKET_FORCE_PATH_STYLE").pipe(Config.withDefault(true))
-    const client = new S3Client({
-      ...(endpoint === null ? {} : { endpoint }),
-      region,
-      forcePathStyle,
-      credentials: {
-        accessKeyId,
-        secretAccessKey
-      }
-    })
-
+    // S3 endpoint the placeholders fail per-operation, which the stages
+    // surface -- misconfiguration is visible either way.
     return {
-      configured: true,
+      bucket: yield* optional("NAME"),
+      endpoint: yield* optional("ENDPOINT"),
+      accessKeyId: (yield* optional("ACCESS_KEY_ID")) ?? "edge-injected",
+      secretAccessKey: (yield* optional("SECRET_ACCESS_KEY")) ?? "edge-injected",
+      region: (yield* optional("REGION")) ?? regionDefault,
+      forcePathStyle: yield* Config.boolean(`${prefix}_FORCE_PATH_STYLE`).pipe(Config.withDefault(true))
+    }
+  })
 
-      list: (prefix, limit) => Effect.tryPromise({
-        try: async () => {
-          if (limit <= 0) return []
-          const objects: Array<BucketObject> = []
-          let continuationToken: string | undefined
-          do {
-            const response = await client.send(new ListObjectsV2Command({
-              Bucket: bucket,
-              Prefix: prefix,
-              MaxKeys: 1000,
-              ...(continuationToken === undefined ? {} : { ContinuationToken: continuationToken })
-            }))
-            objects.push(...(response.Contents ?? []).flatMap((object) => object.Key === undefined ? [] : [{
-              key: object.Key,
-              size: object.Size ?? null,
-              etag: object.ETag?.replace(/^"|"$/g, "") ?? null,
-              lastModified: object.LastModified?.toISOString() ?? null
-            }]))
-            continuationToken = response.NextContinuationToken
-          } while (continuationToken !== undefined)
-          return objects
-            .sort((a, b) => (b.lastModified ?? "").localeCompare(a.lastModified ?? ""))
-            .slice(0, limit)
-        },
-        catch: asError
-      }),
+const makeS3Client = (connection: Omit<S3Connection, "bucket">): S3Client =>
+  new S3Client({
+    ...(connection.endpoint === null ? {} : { endpoint: connection.endpoint }),
+    region: connection.region,
+    forcePathStyle: connection.forcePathStyle,
+    credentials: {
+      accessKeyId: connection.accessKeyId,
+      secretAccessKey: connection.secretAccessKey
+    }
+  })
 
-      download: (key) => Effect.tryPromise({
-        try: () => client.send(new GetObjectCommand({ Bucket: bucket, Key: key })),
-        catch: asError
-      }).pipe(Effect.flatMap((response) => {
-        const body = response.Body
-        if (body === undefined || !(Symbol.asyncIterator in body)) {
-          return Effect.fail(new Error(`bucket object has no streaming body: ${key}`))
+/** The read half of an S3 bucket: list, download, head. Shared by both buckets. */
+const s3ReadApi = (
+  client: S3Client,
+  bucket: string
+): Pick<BucketApi, "list" | "download" | "head"> => ({
+  list: (prefix, limit) => Effect.tryPromise({
+    try: async () => {
+      if (limit <= 0) return []
+      const objects: Array<BucketObject> = []
+      let continuationToken: string | undefined
+      do {
+        const response = await client.send(new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: prefix,
+          MaxKeys: 1000,
+          ...(continuationToken === undefined ? {} : { ContinuationToken: continuationToken })
+        }))
+        objects.push(...(response.Contents ?? []).flatMap((object) => object.Key === undefined ? [] : [{
+          key: object.Key,
+          size: object.Size ?? null,
+          etag: object.ETag?.replace(/^"|"$/g, "") ?? null,
+          lastModified: object.LastModified?.toISOString() ?? null
+        }]))
+        continuationToken = response.NextContinuationToken
+      } while (continuationToken !== undefined)
+      return objects
+        .sort((a, b) => (b.lastModified ?? "").localeCompare(a.lastModified ?? ""))
+        .slice(0, limit)
+    },
+    catch: asError
+  }),
+
+  download: (key) => Effect.tryPromise({
+    try: () => client.send(new GetObjectCommand({ Bucket: bucket, Key: key })),
+    catch: asError
+  }).pipe(Effect.flatMap((response) => {
+    const body = response.Body
+    if (body === undefined || !(Symbol.asyncIterator in body)) {
+      return Effect.fail(new Error(`bucket object has no streaming body: ${key}`))
+    }
+    return Effect.succeed(Stream.fromAsyncIterable(
+      body as AsyncIterable<Uint8Array>,
+      asError
+    ))
+  })),
+
+  head: (key) => Effect.tryPromise({
+    try: async () => {
+      try {
+        const response = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+        return {
+          key,
+          size: response.ContentLength ?? null,
+          etag: response.ETag?.replace(/^"|"$/g, "") ?? null,
+          lastModified: response.LastModified?.toISOString() ?? null
         }
-        return Effect.succeed(Stream.fromAsyncIterable(
-          body as AsyncIterable<Uint8Array>,
-          asError
-        ))
-      })),
+      } catch (cause) {
+        const status = (cause as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
+        const name = (cause as { name?: string }).name
+        if (status === 404 || name === "NotFound" || name === "NoSuchKey") return null
+        throw cause
+      }
+    },
+    catch: asError
+  })
+})
 
-      head: (key) => Effect.tryPromise({
-        try: async () => {
-          try {
-            const response = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
-            return {
-              key,
-              size: response.ContentLength ?? null,
-              etag: response.ETag?.replace(/^"|"$/g, "") ?? null,
-              lastModified: response.LastModified?.toISOString() ?? null
-            }
-          } catch (cause) {
-            const status = (cause as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
-            const name = (cause as { name?: string }).name
-            if (status === 404 || name === "NotFound" || name === "NoSuchKey") return null
-            throw cause
-          }
-        },
-        catch: asError
-      }),
+/** The write half of an S3 bucket: put, putFile. Only the archive bucket gets this. */
+const s3WriteApi = (
+  client: S3Client,
+  bucket: string
+): Pick<BucketApi, "put" | "putFile"> => ({
+  put: (key, bytes, contentType) => Effect.tryPromise({
+    try: async () => {
+      const response = await client.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: bytes,
+        ContentLength: bytes.length,
+        ...(contentType === undefined ? {} : { ContentType: contentType })
+      }))
+      return response.ETag?.replace(/^"|"$/g, "") ?? null
+    },
+    catch: asError
+  }),
 
-      put: (key, bytes, contentType) => Effect.tryPromise({
-        try: async () => {
-          const response = await client.send(new PutObjectCommand({
-            Bucket: bucket,
-            Key: key,
-            Body: bytes,
-            ContentLength: bytes.length,
-            ...(contentType === undefined ? {} : { ContentType: contentType })
-          }))
-          return response.ETag?.replace(/^"|"$/g, "") ?? null
-        },
-        catch: asError
-      }),
-
-      putFile: (key, path, contentType) => Effect.tryPromise({
-        try: async () => {
-          // The SDK's node-stream body handling stalls under Bun (and web
-          // streams trip its hashing), so files are read with positional
-          // reads and sent as buffers: one plain put when small, multipart
-          // in fixed parts when large. Bounded memory either way, and
-          // multipart keeps each HTTP body a signed, sized buffer -- which
-          // also suits edge-signing proxies that re-sign whole requests.
-          const PART = 8 * 1024 * 1024
-          const size = (await Bun.file(path).stat()).size
-          if (size <= PART) {
-            const bytes = new Uint8Array(await Bun.file(path).arrayBuffer())
-            const response = await client.send(new PutObjectCommand({
-              Bucket: bucket,
-              Key: key,
-              Body: bytes,
-              ContentLength: bytes.length,
-              ...(contentType === undefined ? {} : { ContentType: contentType })
-            }))
-            return response.ETag?.replace(/^"|"$/g, "") ?? null
-          }
-          const created = await client.send(new CreateMultipartUploadCommand({
-            Bucket: bucket,
-            Key: key,
-            ...(contentType === undefined ? {} : { ContentType: contentType })
-          }))
-          try {
-            const handle = await open(path, "r")
-            const parts: Array<{ ETag: string; PartNumber: number }> = []
-            try {
-              let offset = 0
-              while (offset < size) {
-                const length = Math.min(PART, size - offset)
-                const buffer = Buffer.alloc(length)
-                await handle.read(buffer, 0, length, offset)
-                const part = await client.send(new UploadPartCommand({
-                  Bucket: bucket,
-                  Key: key,
-                  UploadId: created.UploadId,
-                  PartNumber: parts.length + 1,
-                  Body: buffer,
-                  ContentLength: length
-                }))
-                if (part.ETag === undefined) throw new Error(`part ${parts.length + 1} returned no etag`)
-                parts.push({ ETag: part.ETag, PartNumber: parts.length + 1 })
-                offset += length
-              }
-            } finally {
-              await handle.close()
-            }
-            const completed = await client.send(new CompleteMultipartUploadCommand({
+  putFile: (key, path, contentType) => Effect.tryPromise({
+    try: async () => {
+      // The SDK's node-stream body handling stalls under Bun (and web
+      // streams trip its hashing), so files are read with positional
+      // reads and sent as buffers: one plain put when small, multipart
+      // in fixed parts when large. Bounded memory either way, and
+      // multipart keeps each HTTP body a signed, sized buffer -- which
+      // also suits edge-signing proxies that re-sign whole requests.
+      const PART = 8 * 1024 * 1024
+      const size = (await Bun.file(path).stat()).size
+      if (size <= PART) {
+        const bytes = new Uint8Array(await Bun.file(path).arrayBuffer())
+        const response = await client.send(new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: bytes,
+          ContentLength: bytes.length,
+          ...(contentType === undefined ? {} : { ContentType: contentType })
+        }))
+        return response.ETag?.replace(/^"|"$/g, "") ?? null
+      }
+      const created = await client.send(new CreateMultipartUploadCommand({
+        Bucket: bucket,
+        Key: key,
+        ...(contentType === undefined ? {} : { ContentType: contentType })
+      }))
+      try {
+        const handle = await open(path, "r")
+        const parts: Array<{ ETag: string; PartNumber: number }> = []
+        try {
+          let offset = 0
+          while (offset < size) {
+            const length = Math.min(PART, size - offset)
+            const buffer = Buffer.alloc(length)
+            await handle.read(buffer, 0, length, offset)
+            const part = await client.send(new UploadPartCommand({
               Bucket: bucket,
               Key: key,
               UploadId: created.UploadId,
-              MultipartUpload: { Parts: parts }
+              PartNumber: parts.length + 1,
+              Body: buffer,
+              ContentLength: length
             }))
-            return completed.ETag?.replace(/^"|"$/g, "") ?? null
-          } catch (cause) {
-            await client.send(new AbortMultipartUploadCommand({
-              Bucket: bucket,
-              Key: key,
-              UploadId: created.UploadId
-            })).catch(() => undefined)
-            throw cause
+            if (part.ETag === undefined) throw new Error(`part ${parts.length + 1} returned no etag`)
+            parts.push({ ETag: part.ETag, PartNumber: parts.length + 1 })
+            offset += length
           }
-        },
-        catch: asError
-      })
+        } finally {
+          await handle.close()
+        }
+        const completed = await client.send(new CompleteMultipartUploadCommand({
+          Bucket: bucket,
+          Key: key,
+          UploadId: created.UploadId,
+          MultipartUpload: { Parts: parts }
+        }))
+        return completed.ETag?.replace(/^"|"$/g, "") ?? null
+      } catch (cause) {
+        await client.send(new AbortMultipartUploadCommand({
+          Bucket: bucket,
+          Key: key,
+          UploadId: created.UploadId
+        })).catch(() => undefined)
+        throw cause
+      }
+    },
+    catch: asError
+  })
+})
+
+export const layer: Layer.Layer<Bucket, Config.ConfigError> = Layer.effect(Bucket)(
+  Effect.gen(function*() {
+    const connection = yield* readS3Connection("BUCKET", "us-east-1")
+    // "disabled" grandfathers earlier configs that used it as an explicit off.
+    if (!connection.bucket || connection.bucket === "disabled") {
+      return unconfigured
+    }
+    const client = makeS3Client(connection)
+    return {
+      configured: true,
+      ...s3ReadApi(client, connection.bucket),
+      ...s3WriteApi(client, connection.bucket)
     }
   })
 )
+
+/**
+ * A source-only bucket: medina lists and downloads from it, and the type
+ * system makes writes impossible -- this API has no put operations at all.
+ * The capture app's bucket is attached this way: medina ingests from it and
+ * can never write back, so the app's write-only credential stays meaningful
+ * and the bucket stays a pure source of born evidence.
+ */
+export interface SourceBucketApi {
+  /** False when SOURCE_BUCKET_NAME is absent; operations then fail with setup help. */
+  readonly configured: boolean
+  readonly list: BucketApi["list"]
+  readonly download: BucketApi["download"]
+  /** The object's metadata, or null when absent. */
+  readonly head: BucketApi["head"]
+}
+
+export class SourceBucket extends Context.Service<SourceBucket, SourceBucketApi>()("medina/SourceBucket") {}
+
+const SOURCE_NOT_CONFIGURED = "source bucket is not configured: set SOURCE_BUCKET_NAME and SOURCE_BUCKET_ENDPOINT "
+  + "(an exe.dev s3 integration signs at the network edge, so no access keys are needed)"
+
+const sourceUnconfigured: SourceBucketApi = {
+  configured: false,
+  list: () => Effect.fail(new Error(SOURCE_NOT_CONFIGURED)),
+  download: () => Effect.fail(new Error(SOURCE_NOT_CONFIGURED)),
+  head: () => Effect.fail(new Error(SOURCE_NOT_CONFIGURED))
+}
+
+export const sourceLayer: Layer.Layer<SourceBucket, Config.ConfigError> = Layer.effect(SourceBucket)(
+  Effect.gen(function*() {
+    const connection = yield* readS3Connection("SOURCE_BUCKET", "auto")
+    // "disabled" grandfathers the same explicit-off convention as BUCKET_NAME.
+    if (!connection.bucket || connection.bucket === "disabled") {
+      return sourceUnconfigured
+    }
+    const client = makeS3Client(connection)
+    return {
+      configured: true,
+      ...s3ReadApi(client, connection.bucket)
+    }
+  })
+)
+
+/** The read half of the in-memory bucket, shared by both memory layers. */
+const memoryReadApi = (
+  store: Map<string, { bytes: Uint8Array; contentType?: string }>
+): Pick<BucketApi, "list" | "download" | "head"> => ({
+  list: (prefix, limit) =>
+    Effect.sync(() =>
+      [...store.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .slice(0, Math.max(0, limit))
+        .map(([key, value]) => ({
+          key,
+          size: value.bytes.length,
+          etag: md5Hex(value.bytes),
+          lastModified: null
+        }))
+    ),
+  download: (key) => {
+    const entry = store.get(key)
+    return entry === undefined
+      ? Effect.fail(new Error(`no such key: ${key}`))
+      : Effect.succeed(Stream.make(entry.bytes))
+  },
+  head: (key) =>
+    Effect.sync(() => {
+      const entry = store.get(key)
+      return entry === undefined ? null : {
+        key,
+        size: entry.bytes.length,
+        etag: md5Hex(entry.bytes),
+        lastModified: null
+      }
+    })
+})
 
 /**
  * An in-memory bucket for tests: the same contract with a Map behind it.
@@ -262,34 +379,7 @@ export const layerMemory = (
 ): Layer.Layer<Bucket> =>
   Layer.succeed(Bucket)({
     configured: true,
-    list: (prefix, limit) =>
-      Effect.sync(() =>
-        [...store.entries()]
-          .filter(([key]) => key.startsWith(prefix))
-          .slice(0, Math.max(0, limit))
-          .map(([key, value]) => ({
-            key,
-            size: value.bytes.length,
-            etag: md5Hex(value.bytes),
-            lastModified: null
-          }))
-      ),
-    download: (key) => {
-      const entry = store.get(key)
-      return entry === undefined
-        ? Effect.fail(new Error(`no such key: ${key}`))
-        : Effect.succeed(Stream.make(entry.bytes))
-    },
-    head: (key) =>
-      Effect.sync(() => {
-        const entry = store.get(key)
-        return entry === undefined ? null : {
-          key,
-          size: entry.bytes.length,
-          etag: md5Hex(entry.bytes),
-          lastModified: null
-        }
-      }),
+    ...memoryReadApi(store),
     put: (key, bytes, contentType) =>
       Effect.sync(() => {
         store.set(key, { bytes: bytes.slice(), ...(contentType === undefined ? {} : { contentType }) })
@@ -304,6 +394,17 @@ export const layerMemory = (
         },
         catch: asError
       })
+  })
+
+/**
+ * An in-memory source bucket for tests: reads only, like the real thing.
+ */
+export const sourceLayerMemory = (
+  store: Map<string, { bytes: Uint8Array; contentType?: string }> = new Map()
+): Layer.Layer<SourceBucket> =>
+  Layer.succeed(SourceBucket)({
+    configured: true,
+    ...memoryReadApi(store)
   })
 
 const md5Hex = (bytes: Uint8Array) => {

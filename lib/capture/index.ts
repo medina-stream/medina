@@ -1,5 +1,6 @@
 export * from "./Archive.ts"
 export * from "./Audio.ts"
+export * from "./CaptureBucket.ts"
 export * from "./DriveAllow.ts"
 export * from "./HttpIngest.ts"
 export * from "./Media.ts"

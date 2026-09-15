@@ -8,6 +8,7 @@
  */
 export { archiveCapture, archiveSweepSource } from "../lib/capture/index.ts"
 export { audioSource, recordingObjectSource } from "../lib/capture/index.ts"
+export { captureBucketSource, CAPTURE_BUCKET_SOURCE_NAME } from "../lib/capture/index.ts"
 export { driveAllowlistSource, driveInventorySource, readAllowlist } from "../lib/capture/index.ts"
 export { mediaNormalizeSource, mediaTranscribeSource } from "../lib/capture/index.ts"
 export { notesSource, noteForDay, NOTE_RECHECK_DAYS, NOTE_WINDOW_DAYS } from "./Notes.ts"

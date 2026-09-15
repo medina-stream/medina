@@ -45,7 +45,7 @@ import type { Source } from "../lib/Resource.ts"
 import { MedinaAuth, MEDINA_SCOPE } from "../lib/lifelog/Auth.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
-import { archiveSweepSource, audioSource, driveAllowlistSource, driveInventorySource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { archiveSweepSource, audioSource, captureBucketSource, driveAllowlistSource, driveInventorySource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 import { appIconResponse, webIconTarget } from "./AppIconResource.ts"
@@ -605,12 +605,12 @@ one-line download above is the zero-install form.
   })
 )
 
-type LifelogEnv = Drive.Drive | Bucket.Bucket | R2TempCreds.R2TempCreds | TransloaditNormalize.TransloaditNormalize | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine | StartTimeRulesService
+type LifelogEnv = Drive.Drive | Bucket.Bucket | Bucket.SourceBucket | R2TempCreds.R2TempCreds | TransloaditNormalize.TransloaditNormalize | AssemblyAI.AssemblyAI | Git.Git | FileSystem.FileSystem | LanguageModel.LanguageModel | WorkflowEngine | StartTimeRulesService
 
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const enabled = new Set(
-      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow")
+      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture")
         .split(",")
         .map((name) => name.trim())
         .filter(Boolean)
@@ -625,6 +625,9 @@ const Ingest = Layer.effectDiscard(
     const bucket = yield* Bucket.Bucket
     const bucketPrefix = process.env.BUCKET_PREFIX ?? ""
     const bucketLimit = Number(process.env.BUCKET_LIMIT ?? "25")
+    const sourceBucket = yield* Bucket.SourceBucket
+    const sourceBucketPrefix = process.env.SOURCE_BUCKET_PREFIX ?? ""
+    const sourceBucketLimit = Number(process.env.SOURCE_BUCKET_LIMIT ?? "25")
 
     const managedNotes: Source<LifelogEnv> | undefined = notesUrl
       ? {
@@ -689,6 +692,22 @@ const Ingest = Layer.effectDiscard(
           : undefined,
         disabledReason: enabled.has("bucket")
           ? "BUCKET_NAME and BUCKET_ENDPOINT are required"
+          : "disabled by MEDINA_SOURCES"
+      },
+      {
+        // The capture app's bucket: ingest-only. The SourceBucket API has no
+        // write operations, so this source physically cannot store anything
+        // there -- the archive sweep keeps writing to the archive Bucket.
+        name: "capture-bucket",
+        source: enabled.has("capture") && sourceBucket.configured
+          ? captureBucketSource(
+              sourceBucket,
+              sourceBucketPrefix,
+              Number.isFinite(sourceBucketLimit) ? sourceBucketLimit : 25
+            )
+          : undefined,
+        disabledReason: enabled.has("capture")
+          ? "SOURCE_BUCKET_NAME and SOURCE_BUCKET_ENDPOINT are required"
           : "disabled by MEDINA_SOURCES"
       }
     ]
@@ -762,6 +781,7 @@ const WorkflowsLive = Layer.mergeAll(
 const Services = Layer.mergeAll(
   Drive.layer,
   Bucket.layer,
+  Bucket.sourceLayer,
   R2TempCreds.layer,
   TransloaditNormalize.layer.pipe(Layer.provide(R2TempCreds.layer)),
   AssemblyAI.layer,
