@@ -45,9 +45,13 @@ class S3Uploader(private val client: OkHttpClient = OkHttpClient.Builder()
         val payloadHash = sha256(file)
         val headers = SigV4.headers("PUT", url, settings.region, settings.accessKey, settings.secretKey, payloadHash, md5, type, now)
         val body = object : RequestBody() {
-            override fun contentType() = type.toMediaType()
+            // Content-Type is set explicitly from the signed headers map; body type intentionally null.
+            override fun contentType(): MediaType? = null
             override fun contentLength() = file.length()
-            override fun writeTo(sink: BufferedSink) { file.inputStream().use { sink.writeAll(okio.source(it)) } }
+            override fun writeTo(sink: BufferedSink) { file.inputStream().use { input ->
+                val buf = ByteArray(8192)
+                while (true) { val n = input.read(buf); if (n < 0) break; sink.write(buf, 0, n) }
+            } }
         }
         val request = Request.Builder().url(url).put(body).apply { headers.forEach { (k, v) -> header(k, v) } }.build()
         return try {
