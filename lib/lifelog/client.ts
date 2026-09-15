@@ -45,11 +45,7 @@ const RpcLive = RpcClient.layerProtocolHttp({ url: "/rpc" }).pipe(
 )
 
 /** Fixed row pitch in px; must match `.vrow` in Pages.tsx. */
-import { GHOST_TOMORROW_MS, LIVE_HOLD_MS, ROW_H, rowHeight, shiftDay } from "./row-layout.ts"
-
-/** Display row: a server day plus the synthetic today placeholder and, near
- * local midnight, a ghost tomorrow row. */
-type ClientRow = DayRow & { ghost?: boolean }
+const ROW_H = 100
 /** Rows rendered past each edge of the viewport. */
 const OVERSCAN = 6
 /** Rows per ListDays page: constant-time initial load, endless scroll. */
@@ -342,14 +338,7 @@ const program = Effect.gen(function*() {
   // midnight rather than being discarded.
   let sourceRows: Array<DayRow> = []
   let sourceOffset = 0
-  /** Display rows: server days plus the synthetic today placeholder and,
-   * near local midnight, a ghost tomorrow row. */
-  let rows: Array<ClientRow> = []
-  /** Cumulative top offset of each row, recomputed with the rows. */
-  let rowOffsets: Array<number> = []
-  let rowTotal = 0
-  /** The Today "data is flowing" light burns until this timestamp. */
-  let todayLiveUntil = 0
+  let rows: Array<DayRow> = []
   let exhausted = false
   let generation = 0
   let pageFiber: Fiber.Fiber<any, any> | null = null
@@ -735,35 +724,19 @@ const program = Effect.gen(function*() {
    * that date is actually today for this browser. */
   const reconcileRows = () => {
     const today = todayDay()
-    const yesterday = shiftDay(today, -1)
     const byDay = new Map<string, DayRow>()
     for (const row of sourceRows) {
       if (row.day <= today) byDay.set(row.day, row)
     }
-    const current: ClientRow = byDay.get(today) ?? { day: today, stale: false, preview: "", audioSeconds: 0 }
+    const current = byDay.get(today) ?? { day: today, stale: false, preview: "", audioSeconds: 0 }
     rows = [current, ...Array.from(byDay.values())
       .filter((row) => row.day < today)
       .sort((left, right) => right.day.localeCompare(left.day))]
-    // Ghost Tomorrow: a faint, non-interactive row above Today as local
-    // midnight approaches. Pure presentation -- the server knows nothing
-    // special about the boundary; "today" is the viewer's civil day.
-    const midnight = new Date()
-    midnight.setHours(24, 0, 0, 0)
-    if (midnight.getTime() - Date.now() < GHOST_TOMORROW_MS) {
-      rows = [{ day: shiftDay(today, 1), stale: false, preview: "", audioSeconds: 0, ghost: true }, ...rows]
-    }
-    rowOffsets = []
-    let top = 0
-    for (const row of rows) {
-      rowOffsets.push(top)
-      top += rowHeight(row, today, yesterday)
-    }
-    rowTotal = top
   }
 
   /** The spacer height follows the displayed rows. */
   const refreshChrome = () => {
-    if (spacer !== null) spacer.style.height = `${rowTotal}px`
+    if (spacer !== null) spacer.style.height = `${rows.length * ROW_H}px`
   }
 
   /** Reconcile on the local midnight boundary. Browsers may throttle timers
@@ -791,42 +764,19 @@ const program = Effect.gen(function*() {
    * journal yet. It becomes the server's row automatically as soon as a
    * ListDays response includes it.
    */
-  /**
-   * One virtual row. Today and Yesterday render as special kinds inside the
-   * list's own flow; the ghost Tomorrow is faint and non-interactive.
-   * Every height is a per-kind constant set inline -- content is clamped
-   * and can never move a row.
-   */
-  const rowHtml = (row: ClientRow, top: number, height: number, today: string, yesterday: string): string => {
-    if (row.ghost === true) {
-      return `<div class="vrow vrow-tomorrow" style="top:${top}px;height:${height}px" aria-hidden="true">` +
-        `<span class="vrow-ghost-label">Tomorrow</span></div>`
-    }
+  const rowHtml = (row: DayRow): string => {
     const audio = audioLabel(row.audioSeconds)
-    const kind = row.day === today ? "vrow-today" : row.day === yesterday ? "vrow-yesterday" : ""
-    const live = row.day === today && Date.now() < todayLiveUntil
-    return `<div class="vrow ${kind}" style="top:${top}px;height:${height}px" data-day="${escapeHtml(row.day)}">` +
-      `<button type="button" class="vrow-inner" data-open-day="${escapeHtml(row.day)}">` +
-      `<span class="vrow-title">` +
+    return `<span class="vrow-title">` +
       `<span class="vrow-day">${escapeHtml(dayId(row.day))}</span>` +
-      `<span class="vrow-rel">${escapeHtml(relativeDay(row.day, today))}</span>` +
-      (row.day === today
-        ? `<span class="live-dot${live ? " on" : ""}" title="${live ? "Data is flowing" : "No live data"}"></span>`
-        : "") +
+      `<span class="vrow-rel">${escapeHtml(relativeDay(row.day, todayDay()))}</span>` +
       (row.stale ? `<span class="stale">rewriting</span>` : "") +
       (audio ? `<span class="vrow-audio" title="Recorded audio">${escapeHtml(audio)}</span>` : "") +
       `</span>` +
       (row.preview
         ? `<p class="preview">${escapeHtml(row.preview)}</p>`
-        : `<p class="empty">Nothing recorded.</p>`) +
-      `</button></div>`
+        : `<p class="empty">Nothing recorded.</p>`)
   }
 
-  /**
-   * The Today card above the list: big date, lifetime stats, and today's
-   * preview, all derived from the already-loaded rows. Repainted whenever
-   * the rows change, so the stats stay in step with the list.
-   */
   /** Append the next server page, unless one is already in flight. Failures
    * the in-flight flag without touching rows, so the next paint retries. */
   const loadPage = () => {
@@ -862,30 +812,20 @@ const program = Effect.gen(function*() {
 
   const paintWindow = () => {
     if (table === null || spacer === null || rows.length === 0) return
-    const today = todayDay()
-    const yesterday = shiftDay(today, -1)
-    const viewTop = table.scrollTop
-    const viewBottom = viewTop + table.clientHeight
-    // Binary search the first row overlapping the viewport.
-    let lo = 0
-    let hi = rows.length - 1
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (rowOffsets[mid]! + rowHeight(rows[mid]!, today, yesterday) <= viewTop) lo = mid + 1
-      else hi = mid
-    }
-    const start = Math.max(0, lo - OVERSCAN)
+    const start = Math.max(0, Math.floor(table.scrollTop / ROW_H) - OVERSCAN)
+    const end = Math.min(
+      rows.length,
+      Math.ceil((table.scrollTop + table.clientHeight) / ROW_H) + OVERSCAN
+    )
     let html = ""
-    let index = start
-    for (; index < rows.length; index++) {
-      const top = rowOffsets[index]!
-      if (top >= viewBottom + OVERSCAN * ROW_H) break
+    for (let index = start; index < end; index++) {
       const row = rows[index]!
-      html += rowHtml(row, top, rowHeight(row, today, yesterday), today, yesterday)
+      html += `<div class="vrow" style="top:${index * ROW_H}px" data-day="${escapeHtml(row.day)}">` +
+        `<button type="button" class="vrow-inner" data-open-day="${escapeHtml(row.day)}">${rowHtml(row)}</button></div>`
     }
     spacer.innerHTML = html
     // Near the loaded tail with more possibly behind: fetch the next page.
-    if (!exhausted && index > rows.length - PAGE_SIZE) loadPage()
+    if (!exhausted && end > rows.length - PAGE_SIZE) loadPage()
   }
 
   const onScroll = () => {
@@ -929,8 +869,6 @@ const program = Effect.gen(function*() {
   }
 
   const handleDayEvent = (day: string) => {
-    // The Today cell's "data is flowing" light, whatever is on screen.
-    if (day === todayDay()) todayLiveUntil = Date.now() + LIVE_HOLD_MS
     const hash = location.hash
     const viewing = routeDay(hash)
     if (viewing !== null) {
@@ -1210,11 +1148,6 @@ const program = Effect.gen(function*() {
   yield* loadRoute()
   yield* refreshStatus
   window.setInterval(() => Effect.runFork(refreshStatus), 30_000)
-  // The Today "data is flowing" light decays on its own; repaint the visible
-  // window so it dims without waiting for a scroll or event.
-  window.setInterval(() => {
-    if (table !== null && rows.length > 0) paintWindow()
-  }, 5_000)
   yield* subscribeLive
   // Keep this scope — and the RPC client living in it — open for the life of
   // the page. Route loads fork into it; closing it would strand them.
