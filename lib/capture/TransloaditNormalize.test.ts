@@ -132,12 +132,9 @@ describe("Transloadit remote media", () => {
           }
         }
         chunkPolls++
-        return {
-          ok: "ASSEMBLY_COMPLETED",
-          results: {
-            store_chunks: [0, 1, 2].map((index) => ({ name: `_${index}.ogg` }))
-          }
-        }
+        // Reality: /s3/store reports no results in the Assembly JSON even
+        // when the chunks land in R2 — the manifest comes from the listing.
+        return { ok: "ASSEMBLY_COMPLETED", results: { import: [{}] } }
       }
     }
     const file = {
@@ -242,6 +239,9 @@ describe("Transloadit remote media", () => {
 
   test("re-fires a poisoned chunk assembly, preserving assembly IDs", async () => withConfig(async () => {
     const store = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    // The stored chunk has a malformed name (no trailing _<index>.ogg):
+    // the manifest is built from the R2 listing, not the Assembly JSON.
+    store.set("media/media-v1/retry-a/chunk-.ogg", { bytes: new Uint8Array([1]) })
     const creates: Array<string> = []
     const client = {
       createAssembly: async () => {
@@ -249,14 +249,9 @@ describe("Transloadit remote media", () => {
         creates.push(id)
         return { assembly_id: id, assembly_url: `http://poll.test/${id}`, assembly_ssl_url: `https://poll.test/${id}` }
       },
-      getAssembly: async (id: string) => {
-        if (id === "assembly-poisoned") {
-          // Completed on Transloadit's side, but the only stored chunk
-          // collides on the old empty-segment_index key: chunk 0 is missing.
-          return { ok: "ASSEMBLY_COMPLETED", results: { store_chunks: [{ name: "chunk-.ogg" }] } }
-        }
-        return { ok: "ASSEMBLY_COMPLETED", results: { store_chunks: [{ name: "_0.ogg" }] } }
-      }
+      // Transloadit's /s3/store step reports no results in the Assembly
+      // JSON even on success — ground truth is the R2 listing.
+      getAssembly: async () => ({ ok: "ASSEMBLY_COMPLETED", results: { import: [{}] } })
     }
     await Effect.runPromise(
       Files.writeJson(dataPath(transloaditReceiptKey("retry-a")), new TransloaditReceipt({
@@ -290,7 +285,8 @@ describe("Transloadit remote media", () => {
     expect(next.previousAssemblyIds).toEqual(["assembly-poisoned"])
     expect(next.phase).toBe("chunks")
 
-    store.set("media/media-v1/retry-a/_0.ogg", { bytes: new Uint8Array([9]) })
+    store.delete("media/media-v1/retry-a/chunk-.ogg")
+    store.set("media/media-v1/retry-a/recording_0.ogg", { bytes: new Uint8Array([9]) })
     const completed = await Effect.runPromise(
       Effect.flatMap(TransloaditNormalize, (service) => service.normalize("retry-a", "input.wav", 3600)).pipe(
         Effect.provide(live)
@@ -302,21 +298,64 @@ describe("Transloadit remote media", () => {
         Effect.provide(BunFileSystem.layer)
       )
     ))
-    expect(manifest.chunks.map((chunk) => chunk.key)).toEqual(["media/media-v1/retry-a/_0.ogg"])
+    expect(manifest.chunks.map((chunk) => chunk.key)).toEqual(["media/media-v1/retry-a/recording_0.ogg"])
+  }))
+
+  test("completes from the R2 listing when the Assembly JSON omits store results", async () => withConfig(async () => {
+    // Production regression (2026-09-16): Transloadit completed the chunk
+    // Assembly and the chunk landed in R2, but the Assembly JSON carried no
+    // store_chunks results, so the old code failed loudly on good data.
+    const store = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    store.set(
+      "media/media-v1/listing-a/20260916T024907Z-05087468-be14-4aac-b135-3af6d23d317b_0.ogg",
+      { bytes: new Uint8Array([7]) }
+    )
+    const client = {
+      createAssembly: async () => { throw new Error("must not re-fire") },
+      getAssembly: async () => ({ ok: "ASSEMBLY_COMPLETED", results: { import: [{}] } })
+    }
+    await Effect.runPromise(
+      Files.writeJson(dataPath(transloaditReceiptKey("listing-a")), new TransloaditReceipt({
+        assemblyId: "assembly-listing",
+        assemblySslUrl: "https://poll.test/listing",
+        createdAt: new Date().toISOString(),
+        mediaVersion: "media-v1",
+        workflowVersion: "remote-media-v1",
+        phase: "chunks",
+        captureId: "listing-a",
+        originalKey: "capture/listing-a/input.m4a",
+        sourceDurationSeconds: 900,
+        previousAssemblyIds: []
+      })).pipe(Effect.provide(BunFileSystem.layer))
+    )
+    const result = await Effect.runPromise(
+      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("listing-a", "input.m4a", 900)).pipe(
+        Effect.provide(services(store, client))
+      )
+    )
+    expect(result).toBe("completed")
+    const manifest = Option.getOrThrow(await Effect.runPromise(
+      Files.readJson(MediaManifest, dataPath(mediaManifestKey("listing-a"))).pipe(
+        Effect.provide(BunFileSystem.layer)
+      )
+    ))
+    expect(manifest.chunks.map((chunk) => chunk.key)).toEqual([
+      "media/media-v1/listing-a/20260916T024907Z-05087468-be14-4aac-b135-3af6d23d317b_0.ogg"
+    ])
   }))
 
   test("re-fires on duplicate chunk names", async () => withConfig(async () => {
     const store = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    // Two stored files both parse to chunk index 0.
+    store.set("media/media-v1/dup-a/a_0.ogg", { bytes: new Uint8Array([1]) })
+    store.set("media/media-v1/dup-a/b_0.ogg", { bytes: new Uint8Array([2]) })
     let creates = 0
     const client = {
       createAssembly: async () => {
         creates++
         return { assembly_id: "assembly-new", assembly_url: "http://poll.test/new", assembly_ssl_url: "https://poll.test/new" }
       },
-      getAssembly: async () => ({
-        ok: "ASSEMBLY_COMPLETED",
-        results: { store_chunks: [{ name: "_0.ogg" }, { name: "_0.ogg" }] }
-      })
+      getAssembly: async () => ({ ok: "ASSEMBLY_COMPLETED", results: { import: [{}] } })
     }
     await Effect.runPromise(
       Files.writeJson(dataPath(transloaditReceiptKey("dup-a")), new TransloaditReceipt({
@@ -356,10 +395,7 @@ describe("Transloadit remote media", () => {
         creates++
         return { assembly_id: "assembly-new", assembly_url: "http://poll.test/new", assembly_ssl_url: "https://poll.test/new" }
       },
-      getAssembly: async () => ({
-        ok: "ASSEMBLY_COMPLETED",
-        results: { store_chunks: [{ name: "_0.ogg" }] }
-      })
+      getAssembly: async () => ({ ok: "ASSEMBLY_COMPLETED", results: { import: [{}] } })
     }
     await Effect.runPromise(
       Files.writeJson(dataPath(transloaditReceiptKey("empty-a")), new TransloaditReceipt({
@@ -392,10 +428,7 @@ describe("Transloadit remote media", () => {
         creates++
         throw new Error("must not re-fire")
       },
-      getAssembly: async () => ({
-        ok: "ASSEMBLY_COMPLETED",
-        results: { store_chunks: [{ name: "not-a-chunk.ogg" }] }
-      })
+      getAssembly: async () => ({ ok: "ASSEMBLY_COMPLETED", results: { import: [{}] } })
     }
     await Effect.runPromise(
       Files.writeJson(dataPath(transloaditReceiptKey("giveup-a")), new TransloaditReceipt({

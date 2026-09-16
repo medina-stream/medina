@@ -42,10 +42,11 @@ const MAX_CHUNKS = 200
 /** A completed chunk Assembly gets at most this many attempts per capture
  * before the pipeline stops re-firing and fails loudly instead. */
 const MAX_CHUNK_ATTEMPTS = 3
-/** Transloadit's /audio/split names its outputs `_0.ogg`, `_1.ogg`, … —
- * the chunk index lives in the filename. It never sets
- * `file.meta.segment_index`, so that template variable interpolates empty. */
-const CHUNK_NAME_PATTERN = /^_(\d+)\.ogg$/
+/** Transloadit's /audio/split names its outputs `<original-basename>_<index>.ogg`
+ * (e.g. `recording_0.ogg`) — the chunk index is the trailing `_<index>.ogg`
+ * suffix of the filename. It never sets `file.meta.segment_index`, so that
+ * template variable interpolates empty. */
+const CHUNK_NAME_PATTERN = /_(\d+)\.ogg$/
 
 export const transloaditReceiptKey = (captureId: string) => `normalize/transloadit/${captureId}.json`
 export const transloaditDriveReceiptKey = (fileId: string, version: string) =>
@@ -313,26 +314,41 @@ export const layerWithClient = (
     })
   })
 
+  /** Build the chunk manifest for a completed chunk Assembly.
+   * Transloadit's /s3/store step does not report its results in the Assembly
+   * JSON, so the stored chunks are discovered by listing the chunk prefix in
+   * R2 (ground truth) instead of trusting the Assembly response. */
   const manifestFromCompletedChunks = (
     captureId: string,
-    durationSeconds: number,
-    assembly: unknown
+    durationSeconds: number
   ) => Effect.gen(function*() {
     const bucket = yield* Bucket
     const segments = segmentsFor(durationSeconds)
+    const prefix = chunkPrefixFor(captureId)
+    const stored = yield* bucket.list(prefix, MAX_CHUNKS + 1)
     const namesByIndex = new Map<number, string>()
-    for (const row of resultRows(assembly, "store_chunks")) {
-      const name = text(row.name)
-      const index = name === null ? null : chunkIndexFromName(name)
-      if (name === null || index === null) {
+    for (const obj of stored) {
+      const name = obj.key.startsWith(prefix) ? obj.key.slice(prefix.length) : obj.key
+      if (name.includes("/")) {
+        return yield* Effect.fail(new ChunkValidationError(
+          `Transloadit stored an unexpected nested chunk key for ${captureId}: ${obj.key}`
+        ))
+      }
+      const index = chunkIndexFromName(name)
+      if (index === null) {
         return yield* Effect.fail(new ChunkValidationError(
           `Transloadit stored a malformed chunk name for ${captureId}: ` +
-          `${JSON.stringify(name)} (expected _<index>.ogg)`
+          `${JSON.stringify(name)} (expected a name ending _<index>.ogg)`
         ))
       }
       if (namesByIndex.has(index)) {
         return yield* Effect.fail(new ChunkValidationError(
           `Transloadit stored duplicate chunks for index ${index} for ${captureId}`
+        ))
+      }
+      if (obj.size === null || obj.size <= 0) {
+        return yield* Effect.fail(new ChunkValidationError(
+          `Transloadit stored an empty chunk ${index} for ${captureId}: ${obj.key}`
         ))
       }
       namesByIndex.set(index, name)
@@ -342,20 +358,13 @@ export const layerWithClient = (
       const name = namesByIndex.get(index)
       if (name === undefined) {
         return yield* Effect.fail(new ChunkValidationError(
-          `Transloadit result omitted chunk ${index} for ${captureId} ` +
+          `Transloadit stored no chunk ${index} for ${captureId} ` +
           `(expected ${segments.length} chunks)`
-        ))
-      }
-      const key = `${chunkPrefixFor(captureId)}${name}`
-      const stored = yield* bucket.head(key)
-      if (stored === null || stored.size === null || stored.size <= 0) {
-        return yield* Effect.fail(new ChunkValidationError(
-          `Transloadit stored an empty chunk ${index} for ${captureId}: ${key}`
         ))
       }
       chunks.push(new MediaChunk({
         index,
-        key,
+        key: `${prefix}${name}`,
         startSeconds: segment.from,
         durationSeconds: segment.to - segment.from
       }))
@@ -392,8 +401,7 @@ export const layerWithClient = (
   const settleCompletedChunks = (
     receiptPath: string,
     receipt: TransloaditReceipt,
-    captureId: string,
-    assembly: unknown
+    captureId: string
   ): Effect.Effect<"completed" | "fired", Error, Bucket | FileSystem.FileSystem> =>
     Effect.gen(function*() {
       const duration = receipt.sourceDurationSeconds
@@ -403,7 +411,7 @@ export const layerWithClient = (
           `invalid Transloadit receipt for ${captureId}: missing duration or original key`
         ))
       }
-      const settled = yield* manifestFromCompletedChunks(captureId, duration, assembly).pipe(
+      const settled = yield* manifestFromCompletedChunks(captureId, duration).pipe(
         Effect.as("manifest" as const),
         Effect.catchIf(
           isChunkValidationError,
@@ -474,7 +482,7 @@ export const layerWithClient = (
       if (receipt.phase !== "chunks" || receipt.sourceDurationSeconds == null) {
         return yield* Effect.fail(new Error(`invalid Transloadit receipt for ${captureId}: phase ${receipt.phase ?? "missing"}`))
       }
-      return yield* settleCompletedChunks(path, receipt, captureId, assembly)
+      return yield* settleCompletedChunks(path, receipt, captureId)
     })
 
   const ingestDrive = (
@@ -548,7 +556,7 @@ export const layerWithClient = (
         yield* completeReceipt(jobReceiptPath, receipt)
         receipt = new TransloaditReceipt({ ...receipt, phase: "completed", completedAt: new Date().toISOString() })
       } else if (receipt.phase === "chunks" && receipt.sourceDurationSeconds != null) {
-        const settled = yield* settleCompletedChunks(jobReceiptPath, receipt, captureId, assembly)
+        const settled = yield* settleCompletedChunks(jobReceiptPath, receipt, captureId)
         if (settled === "fired") return "fired" as const
         receipt = new TransloaditReceipt({ ...receipt, phase: "completed", completedAt: new Date().toISOString() })
       } else {
