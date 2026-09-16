@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema"
 import * as FileSystem from "effect/FileSystem"
 import * as Files from "./Files.ts"
 import { publishEvent } from "./RuntimeEvents.ts"
-import type { Resource, Source, SourceReport } from "./Resource.ts"
+import type { Resource, ResourceInstance, Source, SourceReport } from "./Resource.ts"
 
 const durationMs = Schema.Number.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0)))
 const elapsedMs = (started: number) => Math.max(0, Math.round(performance.now() - started))
@@ -217,36 +217,41 @@ export const runPipeline = <R>(
       )
       let made = 0
       let failed = enumerationFailed ? 1 : 0
-      for (const instance of instances) {
-        if (yield* fs.exists(dataPath(instance.key))) continue
-        yield* Effect.log(`materializing ${resource.name}/${instance.label}`)
-        yield* publishEvent({
-          type: "resource",
-          name: resource.name,
-          status: "running",
-          message: `Materializing ${resource.name}/${instance.label}`
-        })
-        yield* instance.materialize.pipe(
-          Effect.tap(() => Effect.sync(() => {
-            made++
-            materialized.push({ resource: resource.name, label: instance.label })
-          }).pipe(Effect.andThen(publishEvent({
+      // Resource materialization is network-bound (LLM calls, remote reads):
+      // run instances concurrently so the newest days don't wait behind the
+      // backlog. Per-instance failures stay isolated, as in the old loop.
+      const materializeOne = (instance: ResourceInstance<R>) =>
+        Effect.gen(function*() {
+          if (yield* fs.exists(dataPath(instance.key))) return
+          yield* Effect.log(`materializing ${resource.name}/${instance.label}`)
+          yield* publishEvent({
             type: "resource",
             name: resource.name,
-            status: "complete",
-            message: `Materialized ${resource.name}/${instance.label}`
-          })))),
-          Effect.catchCause((cause) => Effect.sync(() => { failed++ }).pipe(
-            Effect.andThen(publishEvent({
+            status: "running",
+            message: `Materializing ${resource.name}/${instance.label}`
+          })
+          yield* instance.materialize.pipe(
+            Effect.tap(() => Effect.sync(() => {
+              made++
+              materialized.push({ resource: resource.name, label: instance.label })
+            }).pipe(Effect.andThen(publishEvent({
               type: "resource",
               name: resource.name,
-              status: "failing",
-              message: `${resource.name}/${instance.label} failed`
-            })),
-            Effect.andThen(fail(resource.name, instance.label)(cause))
-          ))
-        )
-      }
+              status: "complete",
+              message: `Materialized ${resource.name}/${instance.label}`
+            })))),
+            Effect.catchCause((cause) => Effect.sync(() => { failed++ }).pipe(
+              Effect.andThen(publishEvent({
+                type: "resource",
+                name: resource.name,
+                status: "failing",
+                message: `${resource.name}/${instance.label} failed`
+              })),
+              Effect.andThen(fail(resource.name, instance.label)(cause))
+            ))
+          )
+        })
+      yield* Effect.forEach(instances, materializeOne, { concurrency: 4, discard: true })
       resourceReports.push({ name: resource.name, durationMs: elapsedMs(resourceStarted), discovered: instances.length, materialized: made, failed })
     }
 

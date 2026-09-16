@@ -266,7 +266,8 @@ export const notesResource: Resource<NotesEnv> = {
   instances: Effect.gen(function*() {
     const index = yield* currentDayIndex
     const since = yield* eagerSinceDay
-    const days = withinEagerWindow(Object.keys(index.days), since, (day) => day).sort()
+    // Newest first: today's notes feed today's journal; the backlog can wait.
+    const days = withinEagerWindow(Object.keys(index.days), since, (day) => day).sort().reverse()
     const instances = yield* Effect.forEach(days, (day) => notesInstance(day, index))
     return instances.filter((instance): instance is NonNullable<typeof instance> => instance !== null)
   }).pipe(Effect.mapError((error) => new Error(String(error)))),
@@ -394,7 +395,8 @@ export const journalResource: Resource<JournalEnv> = {
       hasJournalInputs(index.days[day]?.length ?? 0, gpsDays.has(day), notes.has(day))
     )
     const catchup = yield* Effect.forEach(catchupDays, instanceForDay)
-    return [...eager, ...catchup.filter((instance) => !onDisk.has(instance.key))]
+    // Newest first: the present day's journal matters more than the backlog.
+    return [...eager.reverse(), ...catchup.filter((instance) => !onDisk.has(instance.key)).reverse()]
   }).pipe(Effect.mapError((error) => new Error(String(error)))),
   // Lazy: any well-formed day with inputs dereferences; a truly input-less
   // day fails, and the derefs below answer it transiently without persisting
