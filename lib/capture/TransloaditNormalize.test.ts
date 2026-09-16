@@ -95,7 +95,7 @@ describe("Transloadit remote media", () => {
     const steps = creates[0]!.steps as Record<string, Record<string, unknown>>
     expect(steps.import!.url).toBe("https://signed.example/capture/local-a/input.wav")
     expect((steps.split!.segments as Array<unknown>).length).toBe(2)
-    expect(steps.store_chunks!.path).toContain("${file.basename}")
+    expect(steps.store_chunks!.path).toBe("media/media-v1/local-a/${file.name}")
     expect(steps.store_chunks!.path).not.toContain("segment_index")
 
     const receipt = await Effect.runPromise(
@@ -135,12 +135,7 @@ describe("Transloadit remote media", () => {
         return {
           ok: "ASSEMBLY_COMPLETED",
           results: {
-            split: [0, 1, 2].map((index) => ({
-              basename: `recording_${index}`,
-              name: `recording_${index}.ogg`,
-              ext: "ogg",
-              meta: {}
-            }))
+            store_chunks: [0, 1, 2].map((index) => ({ name: `_${index}.ogg` }))
           }
         }
       }
@@ -185,7 +180,7 @@ describe("Transloadit remote media", () => {
     expect((secondSteps.split!.segments as Array<unknown>).length).toBe(3)
 
     for (const index of [0, 1, 2]) {
-      store.set(`media/media-v1/${captureId}/recording_${index}.ogg`, { bytes: new Uint8Array([index + 1]) })
+      store.set(`media/media-v1/${captureId}/_${index}.ogg`, { bytes: new Uint8Array([index + 1]) })
     }
     const third = await Effect.runPromise(
       Effect.flatMap(TransloaditNormalize, (service) => service.ingestDrive("drive-allow", file, request)).pipe(
@@ -245,91 +240,184 @@ describe("Transloadit remote media", () => {
     expect(await Bun.file(dataPath(transloaditReceiptKey("failed-a"))).exists()).toBe(true)
   }))
 
-  test("re-fires a fresh chunk assembly when a completed assembly's chunks never landed in R2", async () => withConfig(async () => {
+  test("re-fires a poisoned chunk assembly, preserving assembly IDs", async () => withConfig(async () => {
     const store = new Map<string, { bytes: Uint8Array; contentType?: string }>()
-    const creates: Array<Record<string, unknown>> = []
+    const creates: Array<string> = []
     const client = {
-      createAssembly: async (options: { params: Record<string, unknown> }) => {
-        creates.push(options.params)
-        return { assembly_id: "assembly-refired", assembly_ssl_url: "https://poll.test/refired" }
+      createAssembly: async () => {
+        const id = `assembly-${creates.length + 1}`
+        creates.push(id)
+        return { assembly_id: id, assembly_url: `http://poll.test/${id}`, assembly_ssl_url: `https://poll.test/${id}` }
       },
-      getAssembly: async () => ({
-        ok: "ASSEMBLY_COMPLETED",
-        results: {
-          split: [0, 1].map((index) => ({
-            basename: `input_${index}`,
-            name: `input_${index}.ogg`,
-            ext: "ogg",
-            meta: {}
-          }))
+      getAssembly: async (id: string) => {
+        if (id === "assembly-poisoned") {
+          // Completed on Transloadit's side, but the only stored chunk
+          // collides on the old empty-segment_index key: chunk 0 is missing.
+          return { ok: "ASSEMBLY_COMPLETED", results: { store_chunks: [{ name: "chunk-.ogg" }] } }
         }
-      })
+        return { ok: "ASSEMBLY_COMPLETED", results: { store_chunks: [{ name: "_0.ogg" }] } }
+      }
     }
     await Effect.runPromise(
-      Files.writeJson(dataPath(transloaditReceiptKey("poisoned-a")), new TransloaditReceipt({
+      Files.writeJson(dataPath(transloaditReceiptKey("retry-a")), new TransloaditReceipt({
         assemblyId: "assembly-poisoned",
         assemblySslUrl: "https://poll.test/poisoned",
         createdAt: new Date().toISOString(),
         mediaVersion: "media-v1",
         workflowVersion: "remote-media-v1",
         phase: "chunks",
-        captureId: "poisoned-a",
-        originalKey: "capture/poisoned-a/input.wav",
-        sourceDurationSeconds: 3601,
+        captureId: "retry-a",
+        originalKey: "capture/retry-a/input.wav",
+        sourceDurationSeconds: 3600,
         previousAssemblyIds: []
       })).pipe(Effect.provide(BunFileSystem.layer))
     )
-    const result = await Effect.runPromise(
-      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("poisoned-a", "input.wav", 3601)).pipe(
-        Effect.provide(services(store, client))
+    const live = services(store, client)
+
+    const refired = await Effect.runPromise(
+      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("retry-a", "input.wav", 3600)).pipe(
+        Effect.provide(live)
       )
     )
-    expect(result).toBe("fired")
-    expect(creates.length).toBe(1)
-    const receipt = await Effect.runPromise(
-      Files.readJson(TransloaditReceipt, dataPath(transloaditReceiptKey("poisoned-a"))).pipe(
+    expect(refired).toBe("fired")
+    expect(creates).toEqual(["assembly-1"])
+    const next = Option.getOrThrow(await Effect.runPromise(
+      Files.readJson(TransloaditReceipt, dataPath(transloaditReceiptKey("retry-a"))).pipe(
         Effect.provide(BunFileSystem.layer)
       )
+    ))
+    expect(next.assemblyId).toBe("assembly-1")
+    expect(next.previousAssemblyIds).toEqual(["assembly-poisoned"])
+    expect(next.phase).toBe("chunks")
+
+    store.set("media/media-v1/retry-a/_0.ogg", { bytes: new Uint8Array([9]) })
+    const completed = await Effect.runPromise(
+      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("retry-a", "input.wav", 3600)).pipe(
+        Effect.provide(live)
+      )
     )
-    const value = Option.getOrThrow(receipt)
-    expect(value.assemblyId).toBe("assembly-refired")
-    expect(value.phase).toBe("chunks")
-    expect(value.refires).toBe(1)
-    expect(value.previousAssemblyIds).toEqual(["assembly-poisoned"])
+    expect(completed).toBe("completed")
+    const manifest = Option.getOrThrow(await Effect.runPromise(
+      Files.readJson(MediaManifest, dataPath(mediaManifestKey("retry-a"))).pipe(
+        Effect.provide(BunFileSystem.layer)
+      )
+    ))
+    expect(manifest.chunks.map((chunk) => chunk.key)).toEqual(["media/media-v1/retry-a/_0.ogg"])
   }))
 
-  test("gives up after the chunk re-fire cap is exhausted", async () => withConfig(async () => {
+  test("re-fires on duplicate chunk names", async () => withConfig(async () => {
     const store = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    let creates = 0
     const client = {
-      createAssembly: async () => { throw new Error("must not re-fire past the cap") },
+      createAssembly: async () => {
+        creates++
+        return { assembly_id: "assembly-new", assembly_url: "http://poll.test/new", assembly_ssl_url: "https://poll.test/new" }
+      },
       getAssembly: async () => ({
         ok: "ASSEMBLY_COMPLETED",
-        results: {
-          split: [{ basename: "input_0", name: "input_0.ogg", ext: "ogg", meta: {} }]
-        }
+        results: { store_chunks: [{ name: "_0.ogg" }, { name: "_0.ogg" }] }
       })
     }
     await Effect.runPromise(
-      Files.writeJson(dataPath(transloaditReceiptKey("poisoned-b")), new TransloaditReceipt({
-        assemblyId: "assembly-poisoned-b",
-        assemblySslUrl: "https://poll.test/poisoned-b",
+      Files.writeJson(dataPath(transloaditReceiptKey("dup-a")), new TransloaditReceipt({
+        assemblyId: "assembly-dup",
+        assemblySslUrl: "https://poll.test/dup",
         createdAt: new Date().toISOString(),
         mediaVersion: "media-v1",
         workflowVersion: "remote-media-v1",
         phase: "chunks",
-        captureId: "poisoned-b",
-        originalKey: "capture/poisoned-b/input.wav",
-        sourceDurationSeconds: 1,
-        previousAssemblyIds: ["assembly-older"],
-        refires: 3
+        captureId: "dup-a",
+        originalKey: "capture/dup-a/input.wav",
+        sourceDurationSeconds: 7200,
+        previousAssemblyIds: []
+      })).pipe(Effect.provide(BunFileSystem.layer))
+    )
+    const result = await Effect.runPromise(
+      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("dup-a", "input.wav", 7200)).pipe(
+        Effect.provide(services(store, client))
+      )
+    )
+    expect(result).toBe("fired")
+    expect(creates).toBe(1)
+    const next = Option.getOrThrow(await Effect.runPromise(
+      Files.readJson(TransloaditReceipt, dataPath(transloaditReceiptKey("dup-a"))).pipe(
+        Effect.provide(BunFileSystem.layer)
+      )
+    ))
+    expect(next.previousAssemblyIds).toEqual(["assembly-dup"])
+  }))
+
+  test("re-fires on empty chunks", async () => withConfig(async () => {
+    const store = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    store.set("media/media-v1/empty-a/_0.ogg", { bytes: new Uint8Array([]) })
+    let creates = 0
+    const client = {
+      createAssembly: async () => {
+        creates++
+        return { assembly_id: "assembly-new", assembly_url: "http://poll.test/new", assembly_ssl_url: "https://poll.test/new" }
+      },
+      getAssembly: async () => ({
+        ok: "ASSEMBLY_COMPLETED",
+        results: { store_chunks: [{ name: "_0.ogg" }] }
+      })
+    }
+    await Effect.runPromise(
+      Files.writeJson(dataPath(transloaditReceiptKey("empty-a")), new TransloaditReceipt({
+        assemblyId: "assembly-empty",
+        assemblySslUrl: "https://poll.test/empty",
+        createdAt: new Date().toISOString(),
+        mediaVersion: "media-v1",
+        workflowVersion: "remote-media-v1",
+        phase: "chunks",
+        captureId: "empty-a",
+        originalKey: "capture/empty-a/input.wav",
+        sourceDurationSeconds: 3600,
+        previousAssemblyIds: []
+      })).pipe(Effect.provide(BunFileSystem.layer))
+    )
+    const result = await Effect.runPromise(
+      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("empty-a", "input.wav", 3600)).pipe(
+        Effect.provide(services(store, client))
+      )
+    )
+    expect(result).toBe("fired")
+    expect(creates).toBe(1)
+  }))
+
+  test("gives up after three chunk attempts instead of re-firing forever", async () => withConfig(async () => {
+    const store = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    let creates = 0
+    const client = {
+      createAssembly: async () => {
+        creates++
+        throw new Error("must not re-fire")
+      },
+      getAssembly: async () => ({
+        ok: "ASSEMBLY_COMPLETED",
+        results: { store_chunks: [{ name: "not-a-chunk.ogg" }] }
+      })
+    }
+    await Effect.runPromise(
+      Files.writeJson(dataPath(transloaditReceiptKey("giveup-a")), new TransloaditReceipt({
+        assemblyId: "assembly-third",
+        assemblySslUrl: "https://poll.test/third",
+        createdAt: new Date().toISOString(),
+        mediaVersion: "media-v1",
+        workflowVersion: "remote-media-v1",
+        phase: "chunks",
+        captureId: "giveup-a",
+        originalKey: "capture/giveup-a/input.wav",
+        sourceDurationSeconds: 3600,
+        previousAssemblyIds: ["assembly-first", "assembly-second"]
       })).pipe(Effect.provide(BunFileSystem.layer))
     )
     const failure = await Effect.runPromise(
-      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("poisoned-b", "input.wav", 1)).pipe(
+      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("giveup-a", "input.wav", 3600)).pipe(
         Effect.provide(services(store, client)),
         Effect.flip
       )
     )
-    expect(failure.message).toContain("never landed in R2 after 3 re-fires")
+    expect(failure.message).toContain("after 3 attempts")
+    expect(creates).toBe(0)
   }))
 })
