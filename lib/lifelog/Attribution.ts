@@ -43,7 +43,11 @@ export const transcribedCaptures = Effect.gen(function*() {
   const prefix = `transcript/${TRANSCRIPT_VERSION}`
   const entries = yield* Files.listFiles(dataPath(prefix))
   return entries
-    .filter((entry) => entry.endsWith(".json") && !entry.endsWith(".assemblyai.json"))
+    .filter((entry) =>
+      entry.endsWith(".json") &&
+      !entry.endsWith(".assemblyai.json") &&
+      !entry.endsWith(".jobs.json")
+    )
     .map((entry) => entry.replace(/\.json$/, ""))
 })
 
