@@ -318,38 +318,46 @@ export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNor
   concurrency: 1 // ffmpeg saturates a core; parallel encodes just thrash
 })
 
-/** Merge chunk transcripts into one Transcript, offsetting each utterance
- * by its chunk's start. Chunk boundaries can split an utterance in two;
- * that is accepted — offsets stay exact and nothing is lost. */
-export const mergeChunkTranscripts = (
-  captureId: string,
-  manifest: MediaManifest,
-  capturedAt: string | null,
-  parts: ReadonlyArray<{
-    readonly chunk: MediaChunk
-    readonly utterances: ReadonlyArray<{
-      readonly speaker: string | null
-      readonly startMs: number
-      readonly endMs: number
-      readonly text: string
-      readonly confidence: number | null
-    }>
-    readonly text: string | null
-    readonly transcriptId: string | null
-    readonly error: string | null
+/** One chunk's transcription result, ready to merge. Shared by the production
+ * merge and the comparison harness so both apply identical offset semantics. */
+export interface TranscriptChunkPart {
+  readonly chunk: MediaChunk
+  readonly utterances: ReadonlyArray<{
+    readonly speaker: string | null
+    readonly startMs: number
+    readonly endMs: number
+    readonly text: string
+    readonly confidence: number | null
   }>
-): Transcript => {
+  readonly text: string | null
+  readonly transcriptId: string | null
+  readonly error: string | null
+}
+
+export interface MergedTranscriptParts {
+  readonly status: "completed" | "error"
+  readonly text: string | null
+  readonly utterances: Array<{
+    readonly speaker: string | null
+    readonly startMs: number
+    readonly endMs: number
+    readonly text: string
+    readonly confidence: number | null
+  }>
+  readonly transcriptId: string
+  readonly error: string | null
+}
+
+/**
+ * Merge per-chunk results into the shared transcript fields: joined text,
+ * utterances offset by their chunk's start, joined vendor ids, and the first
+ * error. Provider/version/vendorKey identity is left to the caller — the
+ * production merge and the comparison harness tag their output differently.
+ */
+export const mergeParts = (parts: ReadonlyArray<TranscriptChunkPart>): MergedTranscriptParts => {
   const failed = parts.find((part) => part.error !== null)
-  return new Transcript({
-    provider: "assemblyai",
-    version: TRANSCRIPT_VERSION,
-    ingestId: captureId,
-    inputKey: mediaManifestKey(captureId),
-    ...(capturedAt === null ? {} : { capturedAt }),
-    transcriptId: parts.map((part) => part.transcriptId ?? "").join(","),
-    vendorKey: vendorKey(captureId),
+  return {
     status: failed === undefined ? "completed" : "error",
-    completedAt: new Date().toISOString(),
     text: parts.map((part) => part.text ?? "").filter(Boolean).join("\n") || null,
     utterances: parts.flatMap((part) =>
       part.utterances.map((utterance) => ({
@@ -360,7 +368,34 @@ export const mergeChunkTranscripts = (
         confidence: utterance.confidence
       }))
     ),
+    transcriptId: parts.map((part) => part.transcriptId ?? "").join(","),
     error: failed?.error ?? null
+  }
+}
+
+/** Merge chunk transcripts into one Transcript, offsetting each utterance
+ * by its chunk's start. Chunk boundaries can split an utterance in two;
+ * that is accepted — offsets stay exact and nothing is lost. */
+export const mergeChunkTranscripts = (
+  captureId: string,
+  manifest: MediaManifest,
+  capturedAt: string | null,
+  parts: ReadonlyArray<TranscriptChunkPart>
+): Transcript => {
+  const merged = mergeParts(parts)
+  return new Transcript({
+    provider: "assemblyai",
+    version: TRANSCRIPT_VERSION,
+    ingestId: captureId,
+    inputKey: mediaManifestKey(captureId),
+    ...(capturedAt === null ? {} : { capturedAt }),
+    transcriptId: merged.transcriptId,
+    vendorKey: vendorKey(captureId),
+    status: merged.status,
+    completedAt: new Date().toISOString(),
+    text: merged.text,
+    utterances: merged.utterances,
+    error: merged.error
   })
 }
 
@@ -397,7 +432,7 @@ export const transcribeMediaCapture = (captureId: string) =>
           `submitting ${captureId.slice(0, 12)} chunk ${chunk.index + 1}/${manifest.chunks.length}`
         )
         const audioUrl = yield* r2.presignGet(chunk.key, 2 * 60 * 60)
-        const submitted = yield* assemblyai.submit(audioUrl)
+        const submitted = yield* assemblyai.submit({ _tag: "url", url: audioUrl })
         jobs.push(new TranscriptChunkJob({
           index: chunk.index,
           key: chunk.key,
@@ -430,7 +465,7 @@ export const transcribeMediaCapture = (captureId: string) =>
           return yield* Effect.fail(new Error(`R2 media chunk missing for transcription: ${chunk.key}`))
         }
         const audioUrl = yield* r2.presignGet(chunk.key, 2 * 60 * 60)
-        const submitted = yield* assemblyai.submit(audioUrl)
+        const submitted = yield* assemblyai.submit({ _tag: "url", url: audioUrl })
         jobs.push(new TranscriptChunkJob({
           index: chunk.index,
           key: chunk.key,

@@ -66,8 +66,9 @@ describe("remote media transcription", () => {
       })
     })
     const AssemblyTest = Layer.succeed(AssemblyAI)({
-      submit: (url) => Effect.sync(() => {
-        submitted.push(url)
+      submit: (audio) => Effect.sync(() => {
+        if (audio._tag !== "url") throw new Error("expected url audio")
+        submitted.push(audio.url)
         return {
           transcript: new VendorTranscript({ id: "transcript-1", status: "queued" }),
           raw: { id: "transcript-1", status: "queued" }

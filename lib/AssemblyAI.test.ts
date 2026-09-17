@@ -29,7 +29,7 @@ describe("AssemblyAI URL jobs", () => {
     })
     const TestConfig = ConfigProvider.fromEnv({ env: { ASSEMBLYAI_API_URL: BASE_URL } })
     const result = await Effect.runPromise(
-      Effect.flatMap(AssemblyAI, (assemblyai) => assemblyai.submit("https://r2.test/signed-chunk.ogg")).pipe(
+      Effect.flatMap(AssemblyAI, (assemblyai) => assemblyai.submit({ _tag: "url", url: "https://r2.test/signed-chunk.ogg" })).pipe(
         Effect.provide(Layer.provide(layer, Layer.succeed(HttpClient.HttpClient, client))),
         Effect.provideService(ConfigProvider.ConfigProvider, TestConfig)
       )
@@ -64,7 +64,7 @@ describe("AssemblyAI URL jobs", () => {
     })
     const TestConfig = ConfigProvider.fromEnv({ env: { ASSEMBLYAI_API_URL: BASE_URL } })
     const exit = await Effect.runPromise(
-      Effect.flatMap(AssemblyAI, (assemblyai) => assemblyai.submit("https://r2.test/chunk.ogg")).pipe(
+      Effect.flatMap(AssemblyAI, (assemblyai) => assemblyai.submit({ _tag: "url", url: "https://r2.test/chunk.ogg" })).pipe(
         Effect.provide(Layer.provide(layer, Layer.succeed(HttpClient.HttpClient, client))),
         Effect.provideService(ConfigProvider.ConfigProvider, TestConfig),
         Effect.exit
@@ -72,5 +72,25 @@ describe("AssemblyAI URL jobs", () => {
     )
     expect(exit._tag).toBe("Failure")
     expect(hits).toBe(4)
+  })
+
+  test("submit rejects file bytes: AssemblyAI fetches the URL itself", async () => {
+    const client = HttpClient.make((request) =>
+      Effect.succeed(HttpClientResponse.fromWeb(request, json({ id: "t-9", status: "queued" })))
+    )
+    const TestConfig = ConfigProvider.fromEnv({ env: { ASSEMBLYAI_API_URL: BASE_URL } })
+    const exit = await Effect.runPromise(
+      Effect.flatMap(AssemblyAI, (assemblyai) =>
+        assemblyai.submit({ _tag: "file", bytes: new Uint8Array([1]), filename: "c.ogg", contentType: "audio/ogg" })
+      ).pipe(
+        Effect.provide(Layer.provide(layer, Layer.succeed(HttpClient.HttpClient, client))),
+        Effect.provideService(ConfigProvider.ConfigProvider, TestConfig),
+        Effect.exit
+      )
+    )
+    expect(exit._tag).toBe("Failure")
+    if (exit._tag === "Failure") {
+      expect(String(exit.cause)).toMatch(/remote URL/)
+    }
   })
 })

@@ -9,36 +9,20 @@ import * as HttpClient from "effect/unstable/http/HttpClient"
 import * as HttpClientError from "effect/unstable/http/HttpClientError"
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest"
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse"
+import { VendorTranscript } from "./transcribe/VendorTranscript.ts"
+import type { TranscriptAudio, TranscriptProvider, TranscriptResult } from "./transcribe/Transcriber.ts"
 
-export class VendorTranscript extends Schema.Class<VendorTranscript>("VendorTranscript")({
-  id: Schema.String,
-  status: Schema.Literals(["queued", "processing", "completed", "error"]),
-  text: Schema.optional(Schema.NullOr(Schema.String)),
-  utterances: Schema.optional(Schema.NullOr(Schema.Array(Schema.Struct({
-    speaker: Schema.optional(Schema.NullOr(Schema.String)),
-    start: Schema.Number,
-    end: Schema.Number,
-    text: Schema.String,
-    confidence: Schema.optional(Schema.NullOr(Schema.Number))
-  })))),
-  error: Schema.optional(Schema.NullOr(Schema.String))
-}) {}
+export { VendorTranscript }
 
 /** Parsed fields Medina depends on plus the untouched JSON response. */
-export interface AssemblyAIResult {
-  readonly transcript: VendorTranscript
-  readonly raw: unknown
-}
+export interface AssemblyAIResult extends TranscriptResult {}
 
 /**
  * URL-only transcription API. AssemblyAI fetches an R2-signed object itself;
  * Medina never uploads audio to AssemblyAI and never waits in-process for a
  * transcript. The pipeline persists the returned id and polls on later passes.
  */
-export class AssemblyAI extends Context.Service<AssemblyAI, {
-  readonly submit: (audioUrl: string) => Effect.Effect<AssemblyAIResult, Error>
-  readonly poll: (transcriptId: string) => Effect.Effect<AssemblyAIResult, Error>
-}>()("medina/AssemblyAI") {}
+export class AssemblyAI extends Context.Service<AssemblyAI, TranscriptProvider>()("medina/AssemblyAI") {}
 
 export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpClient> = Layer.effect(AssemblyAI)(
   Effect.gen(function*() {
@@ -77,9 +61,14 @@ export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpC
       )
 
     return {
-      submit: (audioUrl) => response(client.post(`${baseUrl}/v2/transcript`, {
-        body: HttpBody.jsonUnsafe({
-          audio_url: audioUrl,
+      submit: (audio: TranscriptAudio) => audio._tag === "file"
+        ? Effect.fail(new Error(
+          "AssemblyAI.submit takes a remote URL ({ _tag: \"url\", ... }): AssemblyAI " +
+          "fetches the audio itself, it does not accept uploaded bytes."
+        ))
+        : response(client.post(`${baseUrl}/v2/transcript`, {
+          body: HttpBody.jsonUnsafe({
+            audio_url: audio.url,
           speech_models: ["universal-3-5-pro"],
           speaker_labels: true,
           language_detection: true,
