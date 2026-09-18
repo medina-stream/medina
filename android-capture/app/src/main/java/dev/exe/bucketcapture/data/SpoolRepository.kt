@@ -60,7 +60,7 @@ class SpoolRepository(private val context: Context, private val db: CaptureDatab
                     val relative = file.relativeTo(File(root, "audio")).invariantSeparatorsPath
                     val datePath = relative.substringBeforeLast('/')
                     val stamp = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC).format(Instant.ofEpochMilli(file.lastModified()))
-                    val key = "${settings.load().normalizedPrefix()}${installationId()}/audio/$datePath/$stamp-$id.m4a"
+                    val key = "${policies.uploadPrefix()}${installationId()}/audio/$datePath/$stamp-$id.m4a"
                     runCatching { enqueue(id, key, "audio", file, "audio/mp4") }
                 } else {
                     // A location file becomes visible before its Room transaction. If

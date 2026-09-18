@@ -14,8 +14,8 @@ import java.util.concurrent.TimeUnit
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val app = applicationContext as CaptureApplication
-        var settings = app.policies.bucketSettings()
-        if (settings == null) return@withContext Result.failure(workDataOf("error" to "No upload credentials: configure the policy URL"))
+        val settings = app.policies.bucketSettings()
+            ?: return@withContext Result.failure(workDataOf("error" to "No upload credentials: configure the policy URL"))
         for (item in app.db.manifest().pending()) {
             val file = File(item.localPath)
             if (!file.isFile || file.length() != item.byteCount) {
@@ -25,10 +25,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             var result = app.uploader.put(settings, item)
             // Credentials may have been rotated server-side: one policy refresh, then one retry.
             if (result is PutResult.ConfigurationError && result.detail.contains("HTTP 403")) {
-                if (app.policies.refresh() is PolicyFetchResult.Success) {
-                    settings = app.policies.bucketSettings()
-                    if (settings != null) result = app.uploader.put(settings, item)
-                }
+                val refreshed = if (app.policies.refresh() is PolicyFetchResult.Success) app.policies.bucketSettings() else null
+                if (refreshed != null) result = app.uploader.put(refreshed, item)
             }
             when (result) {
                 PutResult.Success -> {
