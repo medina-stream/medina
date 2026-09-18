@@ -17,7 +17,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.exe.bucketcapture.data.PolicyState
 import dev.exe.bucketcapture.data.UploadState
-import dev.exe.bucketcapture.upload.SyncScheduler
 import java.text.DateFormat
 import java.util.Date
 
@@ -61,11 +60,6 @@ fun DeveloperScreen(vm: MainViewModel, onBack: () -> Unit) {
                     item { InfoRow("Location", "${if (p.gps.enabled) "on" else "off"} · ${p.gps.describe()}") }
                     item { InfoRow("Upload", p.upload.describe() + if (p.upload.unmeteredOnly) " · unmetered only" else "") }
                 }
-            }
-
-            item { SectionTitle("Sync") }
-            item {
-                OutlinedButton(onClick = { SyncScheduler.schedule(context, true) }) { Text("Sync now") }
             }
 
             item { SectionTitle("Upload manifest") }

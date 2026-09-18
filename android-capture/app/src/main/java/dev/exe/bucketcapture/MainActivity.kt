@@ -14,13 +14,17 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat.startForegroundService
 import androidx.lifecycle.AndroidViewModel
@@ -172,6 +176,7 @@ class MainActivity : ComponentActivity() {
         val desired by vm.desired.collectAsStateWithLifecycle()
         val health by vm.health.collectAsStateWithLifecycle()
         val host = remember(vm.policyUrlField) { hostOf(vm.policyUrlField) }
+        var showSyncDialog by remember { mutableStateOf(false) }
 
         val (dot, headline, subline) = when (val s = vm.policyState) {
             PolicyState.NotConfigured ->
@@ -182,7 +187,7 @@ class MainActivity : ComponentActivity() {
                 Triple(DotState.Warn, "Server unreachable", s.detail)
             is PolicyState.Active -> Triple(
                 if (desired) DotState.On else DotState.Off,
-                if (desired) "Capture on" else "Capture off",
+                null,
                 s.staleError?.let { "Using cached policy" },
             )
         }
@@ -190,7 +195,18 @@ class MainActivity : ComponentActivity() {
 
         Scaffold(topBar = {
             TopAppBar(
-                title = { Text(host ?: "Medina Capture") },
+                title = {
+                    val name = middleEllipsize(host ?: "Medina Capture")
+                    Text(
+                        text = name,
+                        maxLines = 1,
+                        style = when {
+                            name.length > 26 -> MaterialTheme.typography.titleSmall
+                            name.length > 20 -> MaterialTheme.typography.titleMedium
+                            else -> MaterialTheme.typography.titleLarge
+                        },
+                    )
+                },
                 actions = {
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
@@ -205,24 +221,22 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.weight(1f))
                 StatusDot(dot)
                 Spacer(Modifier.height(20.dp))
-                Text(headline, style = MaterialTheme.typography.headlineSmall)
+                headline?.let { Text(it, style = MaterialTheme.typography.headlineSmall) }
                 if (subline != null) {
-                    Spacer(Modifier.height(4.dp))
+                    if (headline != null) Spacer(Modifier.height(4.dp))
                     Text(subline, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (vm.policyState is PolicyState.Active) {
                     Spacer(Modifier.height(12.dp))
-                    val anomaly = when {
-                        health.errorCount > 0 -> "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"} · ${health.lastError?.take(80)}"
-                        health.pending > 0 -> "${health.pending} pending upload${if (health.pending == 1) "" else "s"}"
-                        else -> "Everything uploaded"
-                    }
+                    val inError = health.errorCount > 0
                     Text(
-                        anomaly,
+                        text = if (inError) "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"}" else "Nominal",
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (health.errorCount > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (inError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.clickable { showSyncDialog = true },
                     )
                 }
+                if (showSyncDialog) SyncStateDialog(vm, onDismiss = { showSyncDialog = false })
                 Spacer(Modifier.height(24.dp))
                 if (configured) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -255,4 +269,63 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+/** Truncate from the middle so a long hostname always fits on one line, e.g. "very-long-hos…name". */
+private fun middleEllipsize(s: String, maxChars: Int = 28): String {
+    if (s.length <= maxChars) return s
+    val keep = maxChars - 1 // one char for "…"
+    val head = keep / 2
+    return s.take(head) + "…" + s.takeLast(keep - head)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SyncStateDialog(vm: MainViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val health by vm.health.collectAsStateWithLifecycle()
+    val items by vm.items.collectAsStateWithLifecycle()
+    val inError = health.errorCount > 0
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sync state") },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = if (inError) "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"}" else "Nominal",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = if (inError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    "${health.pending} pending · ${health.uploaded} uploaded · ${health.errorCount} with errors",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                health.lastError?.let {
+                    Text(
+                        "Last error: $it",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                OutlinedButton(onClick = { SyncScheduler.schedule(context, true) }) { Text("Sync now") }
+                HorizontalDivider()
+                Text("Recent items", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                items.take(12).forEach { item ->
+                    ListItem(
+                        headlineContent = { Text("${item.kind} · ${item.state.name.lowercase()}") },
+                        supportingContent = {
+                            Text(
+                                item.objectKey + " · attempts: ${item.attemptCount}" + (item.lastError?.let { "\n$it" } ?: ""),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        },
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
