@@ -2,58 +2,87 @@ package dev.exe.bucketcapture
 
 import android.Manifest
 import android.app.Application
+import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
+import android.content.SharedPreferences
 import android.os.Build
-import android.provider.Settings
+import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.startForegroundService
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
 import dev.exe.bucketcapture.capture.CaptureService
 import dev.exe.bucketcapture.data.PolicyFetchResult
 import dev.exe.bucketcapture.data.PolicyState
 import dev.exe.bucketcapture.data.UploadItem
+import dev.exe.bucketcapture.data.UploadState
+import dev.exe.bucketcapture.ui.DotState
+import dev.exe.bucketcapture.ui.StatusDot
+import dev.exe.bucketcapture.ui.theme.BucketCaptureTheme
 import dev.exe.bucketcapture.upload.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.text.DateFormat
-import java.util.Date
 import java.util.UUID
+
+data class HealthSummary(val pending: Int, val uploaded: Int, val errorCount: Int, val lastError: String?)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as CaptureApplication
     val items: StateFlow<List<UploadItem>> = app.spool.items.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val health: StateFlow<HealthSummary> = items.map { list ->
+        val errored = list.filter { it.lastError != null }
+        HealthSummary(
+            pending = list.count { it.state == UploadState.PENDING },
+            uploaded = list.count { it.state == UploadState.UPLOADED },
+            errorCount = errored.size,
+            lastError = errored.maxByOrNull { it.createdAt }?.lastError,
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HealthSummary(0, 0, 0, null))
+
+    private val prefs = app.getSharedPreferences("capture", Context.MODE_PRIVATE)
+    private val _desired = MutableStateFlow(prefs.getBoolean("desired", false))
+    val desired: StateFlow<Boolean> = _desired
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "desired") _desired.value = prefs.getBoolean("desired", false)
+    }
+
     var policyState by mutableStateOf<PolicyState>(app.policies.state()); private set
     var policyUrlField by mutableStateOf(app.policies.policyUrl); private set
     var message by mutableStateOf<String?>(null); private set
     var refreshing by mutableStateOf(false); private set
     var testing by mutableStateOf(false); private set
-    val captureDesired: Boolean get() = app.getSharedPreferences("capture", android.content.Context.MODE_PRIVATE).getBoolean("desired", false)
-    val usingLegacy: Boolean get() = app.policies.usingLegacySettings()
+
+    val hostname: String? get() = hostOf(policyUrlField)
 
     init {
+        prefs.registerOnSharedPreferenceChangeListener(prefListener)
         viewModelScope.launch { app.spool.recover() }
         SyncScheduler.schedulePolicy(app)
         if (app.policies.hasPolicyUrl && !app.policies.isRevoked) refreshPolicy()
     }
+
+    override fun onCleared() { prefs.unregisterOnSharedPreferenceChangeListener(prefListener) }
+
+    fun startCaptureService() =
+        startForegroundService(app, Intent(app, CaptureService::class.java).setAction(CaptureService.ACTION_START))
+    fun stopCaptureService() =
+        app.startService(Intent(app, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
 
     fun updateUrl(value: String) { policyUrlField = value }
     fun saveUrl() {
@@ -75,7 +104,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 refreshing = false
             }
-            if (result is PolicyFetchResult.Success && result.changed && captureDesired) {
+            if (result is PolicyFetchResult.Success && result.changed && _desired.value) {
                 app.startService(Intent(app, CaptureService::class.java).setAction(CaptureService.ACTION_REPOLICY))
             }
             if (result is PolicyFetchResult.Success) SyncScheduler.schedule(app)
@@ -97,108 +126,122 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
+private fun hostOf(url: String): String? {
+    if (url.isBlank()) return null
+    return runCatching { android.net.Uri.parse(url).host?.takeIf { it.isNotBlank() } }.getOrNull()
+}
+
+private enum class Screen { Status, Settings, Developers }
+
 class MainActivity : ComponentActivity() {
     private val model: MainViewModel by viewModels()
-    override fun onCreate(savedInstanceState: android.os.Bundle?) { super.onCreate(savedInstanceState); setContent { MaterialTheme { Screen(model) } } }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent { BucketCaptureTheme { Root(model) } }
+    }
+
+    @Composable
+    private fun Root(vm: MainViewModel) {
+        var screen by remember { mutableStateOf(Screen.Status) }
+        BackHandler(enabled = screen != Screen.Status) {
+            screen = if (screen == Screen.Developers) Screen.Settings else Screen.Status
+        }
+        // First run: land on Settings until a policy URL exists.
+        LaunchedEffect(vm.policyState) {
+            if (vm.policyState is PolicyState.NotConfigured) screen = Screen.Settings
+        }
+        when (screen) {
+            Screen.Status -> StatusScreen(vm, onOpenSettings = { screen = Screen.Settings })
+            Screen.Settings -> SettingsScreen(vm, onBack = { screen = Screen.Status }, onOpenDevelopers = { screen = Screen.Developers })
+            Screen.Developers -> DeveloperScreen(vm, onBack = { screen = Screen.Settings })
+        }
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
-    @Composable private fun Screen(vm: MainViewModel) {
+    @Composable
+    private fun StatusScreen(vm: MainViewModel, onOpenSettings: () -> Unit) {
         val request = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             if (result[Manifest.permission.RECORD_AUDIO] == true &&
                 (result[Manifest.permission.ACCESS_FINE_LOCATION] == true || result[Manifest.permission.ACCESS_COARSE_LOCATION] == true)) {
-                startForegroundService(this, Intent(this, CaptureService::class.java).setAction(CaptureService.ACTION_START))
+                vm.startCaptureService()
             }
         }
-        val rows by vm.items.collectAsStateWithLifecycle()
-        var showSettings by remember { mutableStateOf(vm.policyState is PolicyState.NotConfigured || vm.policyState is PolicyState.Revoked) }
-        Scaffold(topBar = { TopAppBar(title = { Text("Bucket Capture") }) }) { padding ->
-            LazyColumn(Modifier.padding(padding).padding(16.dp).fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                item { PolicyCard(vm) { showSettings = true } }
-                item { DirectiveRows(vm) }
-                item { Text("Direct, write-only capture", style = MaterialTheme.typography.titleLarge); Text("Audio and GPS stay local until an S3-compatible PUT succeeds. No bucket reads, lists, or deletes are used.") }
-                item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { val p = buildList { add(Manifest.permission.RECORD_AUDIO); add(Manifest.permission.ACCESS_FINE_LOCATION); add(Manifest.permission.ACCESS_COARSE_LOCATION); if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS) }; request.launch(p.toTypedArray()) }) { Text("Start capture") }
-                    OutlinedButton(onClick = { startService(Intent(this@MainActivity, CaptureService::class.java).setAction(CaptureService.ACTION_STOP)) }) { Text("Stop") }
-                    OutlinedButton(onClick = { SyncScheduler.schedule(this@MainActivity, true) }) { Text("Sync now") }
-                } }
-                item { OutlinedButton(onClick = { showSettings = !showSettings }) { Text(if (showSettings) "Hide policy settings" else "Policy settings") } }
-                if (showSettings) item { PolicyForm(vm) }
-                item { Text("Reliability", style = MaterialTheme.typography.titleMedium); Text("For continuous capture, allow background location separately in Android settings and consider exempting this app from battery optimization. Android requires a tap to resume microphone capture after reboot.")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }) { Text("App permissions") }
-                        TextButton(onClick = { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }) { Text("Battery settings") }
+        val desired by vm.desired.collectAsStateWithLifecycle()
+        val health by vm.health.collectAsStateWithLifecycle()
+        val host = remember(vm.policyUrlField) { hostOf(vm.policyUrlField) }
+
+        val (dot, headline, subline) = when (val s = vm.policyState) {
+            PolicyState.NotConfigured ->
+                Triple(DotState.Off, "Not connected", "Add your Medina policy URL in Settings to begin.")
+            PolicyState.Revoked ->
+                Triple(DotState.Error, "Policy revoked", "This URL was revoked. Enter a new one in Settings.")
+            is PolicyState.Unreachable ->
+                Triple(DotState.Warn, "Server unreachable", s.detail)
+            is PolicyState.Active -> Triple(
+                if (desired) DotState.On else DotState.Off,
+                host ?: "Connected",
+                buildString {
+                    append(if (desired) "Recording" else "Capture off")
+                    if (s.staleError != null) append(" · using cached policy")
+                },
+            )
+        }
+        val configured = vm.policyState is PolicyState.Active || vm.policyState is PolicyState.Unreachable
+
+        Scaffold(topBar = {
+            TopAppBar(
+                title = { Text("Capture") },
+                actions = {
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
                     }
-                }
-                item { Text("Local manifest", style = MaterialTheme.typography.titleMedium); Text("${rows.count { it.state.name == "PENDING" }} pending · ${rows.count { it.state.name == "UPLOADED" }} uploaded") }
-                items(rows, key = { it.id }) { item -> ListItem(headlineContent = { Text(item.kind + " · " + item.state.name.lowercase()) }, supportingContent = { Text(item.objectKey + (item.lastError?.let { "\n$it" } ?: "")) }) }
-            }
-        }
-    }
-
-    @Composable private fun PolicyCard(vm: MainViewModel, onConfigure: () -> Unit) {
-        val (title, detail) = when (val s = vm.policyState) {
-            PolicyState.NotConfigured -> "No policy configured" to "Paste the policy URL from your Medina server to provision this device."
-            is PolicyState.Unreachable -> "Policy unreachable" to s.detail
-            is PolicyState.Active -> "Policy v${s.policy.version}" to buildString {
-                append("Fetched ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(s.fetchedAt))}")
-                if (vm.usingLegacy) append(" · uploads use on-device settings")
-                s.staleError?.let { append("\nLast refresh failed: $it — using cached policy") }
-            }
-            PolicyState.Revoked -> "Policy revoked" to "The server rejected this policy URL. Paste a new one."
-        }
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-                Text(detail, style = MaterialTheme.typography.bodyMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = vm::refreshPolicy, enabled = !vm.refreshing) { Text(if (vm.refreshing) "Refreshing…" else "Refresh policy") }
-                    if (vm.policyState is PolicyState.NotConfigured || vm.policyState is PolicyState.Revoked) {
-                        Button(onClick = onConfigure) { Text("Configure") }
+                },
+            )
+        }) { padding ->
+            Column(
+                Modifier.padding(padding).fillMaxSize().padding(horizontal = 24.dp),
+                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+            ) {
+                Spacer(Modifier.weight(1f))
+                StatusDot(dot)
+                Spacer(Modifier.height(20.dp))
+                Text(headline, style = MaterialTheme.typography.headlineSmall)
+                Spacer(Modifier.height(4.dp))
+                Text(subline, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (vm.policyState is PolicyState.Active) {
+                    Spacer(Modifier.height(12.dp))
+                    val anomaly = when {
+                        health.errorCount > 0 -> "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"} · ${health.lastError?.take(80)}"
+                        health.pending > 0 -> "${health.pending} pending upload${if (health.pending == 1) "" else "s"}"
+                        else -> "Everything uploaded"
                     }
+                    Text(
+                        anomaly,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (health.errorCount > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                vm.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                Spacer(Modifier.height(24.dp))
+                if (configured) {
+                    Button(onClick = {
+                        if (desired) vm.stopCaptureService()
+                        else {
+                            val perms = buildList {
+                                add(Manifest.permission.RECORD_AUDIO)
+                                add(Manifest.permission.ACCESS_FINE_LOCATION)
+                                add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                                if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            request.launch(perms.toTypedArray())
+                        }
+                    }) { Text(if (desired) "Stop capture" else "Start capture") }
+                } else {
+                    Button(onClick = onOpenSettings) { Text("Open settings") }
+                }
+                Spacer(Modifier.weight(1f))
             }
-        }
-    }
-
-    @Composable private fun DirectiveRows(vm: MainViewModel) {
-        val policy = (vm.policyState as? PolicyState.Active)?.policy
-        if (policy == null) return
-        val running = vm.captureDesired
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            DirectiveRow("Audio", when {
-                !policy.audio.enabled -> "Disabled by policy"
-                running -> "Capturing · ${policy.audio.describe()}"
-                else -> "Stopped · ${policy.audio.describe()}"
-            })
-            DirectiveRow("Location", when {
-                !policy.gps.enabled -> "Disabled by policy"
-                running -> "Capturing · ${policy.gps.describe()}"
-                else -> "Stopped · ${policy.gps.describe()}"
-            })
-            val upload = policy.upload
-            DirectiveRow("Upload", when {
-                !upload.isComplete() && vm.usingLegacy -> "On-device settings · legacy mode"
-                !upload.isComplete() -> "No credentials in policy — uploads paused"
-                else -> "${upload.describe()}${if (upload.unmeteredOnly) " · unmetered only" else ""}"
-            })
-        }
-    }
-
-    @Composable private fun DirectiveRow(label: String, detail: String) {
-        ListItem(headlineContent = { Text(label) }, supportingContent = { Text(detail) })
-    }
-
-    @Composable private fun PolicyForm(vm: MainViewModel) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(vm.policyUrlField, vm::updateUrl, Modifier.fillMaxWidth(), label = { Text("Policy URL") },
-                visualTransformation = PasswordVisualTransformation(), singleLine = true)
-            Text("One URL provisions the whole device: what to capture and where to send it, including upload credentials. The URL is the credential — anyone holding it can fetch the policy.", style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = vm::saveUrl) { Text("Save") }
-                OutlinedButton(onClick = vm::test, enabled = !vm.testing) { Text("Test PUT") }
-            }
-            Text("Connection test creates a zero-byte probe object that cannot be removed by this write-only app.", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
