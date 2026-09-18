@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Build
+import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -26,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.startForegroundService
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -90,6 +92,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         app.startService(Intent(app, CaptureService::class.java).setAction(CaptureService.ACTION_STOP))
 
     fun updateUrl(value: String) { policyUrlField = value }
+    fun showMessage(text: String?) { message = text }
     fun saveUrl() {
         app.policies.policyUrl = policyUrlField
         message = "Policy URL saved"
@@ -103,7 +106,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.Main) {
                 policyState = app.policies.state()
                 message = when (result) {
-                    is PolicyFetchResult.Success -> if (result.changed) "Policy updated to v${result.policy.version}" else "Policy is up to date (v${result.policy.version})"
+                    is PolicyFetchResult.Success -> if (result.changed) "Policy updated to v${result.policy.version}" else null
                     is PolicyFetchResult.Transient -> "Policy refresh failed: ${result.detail}"
                     PolicyFetchResult.Revoked -> "This policy URL was revoked on the server"
                 }
@@ -136,7 +139,7 @@ private fun hostOf(url: String): String? {
     return runCatching { android.net.Uri.parse(url).host?.takeIf { it.isNotBlank() } }.getOrNull()
 }
 
-private enum class Screen { Status, Settings, Developers }
+private enum class Screen { Status, Settings, QrScanner }
 
 class MainActivity : ComponentActivity() {
     private val model: MainViewModel by viewModels()
@@ -150,8 +153,16 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun Root(vm: MainViewModel) {
         var screen by remember { mutableStateOf(Screen.Status) }
+        val context = LocalContext.current
+        val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                screen = Screen.QrScanner
+            } else {
+                vm.showMessage("Camera permission is needed to scan the QR code")
+            }
+        }
         BackHandler(enabled = screen != Screen.Status) {
-            screen = if (screen == Screen.Developers) Screen.Settings else Screen.Status
+            screen = if (screen == Screen.QrScanner) Screen.Settings else Screen.Status
         }
         // First run: land on Settings until a policy URL exists.
         LaunchedEffect(vm.policyState) {
@@ -159,8 +170,27 @@ class MainActivity : ComponentActivity() {
         }
         when (screen) {
             Screen.Status -> StatusScreen(vm, onOpenSettings = { screen = Screen.Settings })
-            Screen.Settings -> SettingsScreen(vm, onBack = { screen = Screen.Status }, onOpenDevelopers = { screen = Screen.Developers })
-            Screen.Developers -> DeveloperScreen(vm, onBack = { screen = Screen.Settings })
+            Screen.Settings -> SettingsScreen(
+                vm,
+                onBack = { screen = Screen.Status },
+                onScanQr = {
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                        PackageManager.PERMISSION_GRANTED
+                    ) {
+                        screen = Screen.QrScanner
+                    } else {
+                        cameraPermission.launch(Manifest.permission.CAMERA)
+                    }
+                },
+            )
+            Screen.QrScanner -> QrScannerScreen(
+                onScanned = { value ->
+                    vm.updateUrl(value)
+                    vm.saveUrl()
+                    screen = Screen.Settings
+                },
+                onBack = { screen = Screen.Settings },
+            )
         }
     }
 

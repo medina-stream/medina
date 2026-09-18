@@ -45,7 +45,7 @@ import type { PipelineSource } from "../lib/Pipeline.ts"
 import type { Source } from "../lib/Resource.ts"
 import { MedinaAuth, MEDINA_SCOPE } from "../lib/lifelog/Auth.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
-import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
+import { dayPage, devicesPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
 import { archiveSweepSource, audioSource, captureBucketSource, driveAllowlistSource, driveInventorySource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
@@ -415,6 +415,32 @@ one-line download above is the zero-install form.
       "GET",
       "/",
       Effect.succeed(HttpServerResponse.html(spaHome()))
+    )
+    // Capture-device provisioning UI. Behind the full-access gate like the
+    // token APIs it drives; the policy URL is a capability secret, so the
+    // page is not cached.
+    yield* router.add(
+      "GET",
+      "/devices",
+      Effect.succeed(HttpServerResponse.text(devicesPage(), {
+        contentType: "text/html",
+        headers: { "cache-control": "no-store" }
+      }))
+    )
+    yield* router.add(
+      "GET",
+      "/devices.js",
+      Effect.gen(function*() {
+        const fs = yield* FileSystem.FileSystem
+        const path = "example-lifelog/public/devices.js"
+        if (!(yield* fs.exists(path))) {
+          return HttpServerResponse.text("client bundle missing: run bun run build:devices", { status: 503 })
+        }
+        return HttpServerResponse.text(yield* fs.readFileString(path), {
+          contentType: "text/javascript",
+          headers: { "cache-control": "private, max-age=60" }
+        })
+      }).pipe(Effect.orDie)
     )
     // AppIcon declares this exact allowlist. Every URL includes the canonical
     // content hash, so successful responses are safe to cache forever.

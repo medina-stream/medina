@@ -408,6 +408,7 @@ export const spaHome = () =>
         <div class="modal-body">
           <nav class="accountnav">
             <a href="#/places" data-close-modal>Places</a>
+            <a href="/devices" data-close-modal>Devices</a>
           </nav>
           <div class="status" id="pipeline-status">
             <p id="status-summary" class="status-line">Checking data flow…</p>
@@ -460,5 +461,68 @@ export const pendingPage = (day: string) =>
       <main>
         <p class="empty">writing…</p>
       </main>
+    </Layout>
+  )
+
+/** Device provisioning page, behind the full-access gate. A freshly issued
+ * policy URL is shown once with a QR code the recorder app scans; the QR is
+ * rendered client-side (devices.js) from the issued URL, which is a
+ * capability secret and never appears in server-rendered HTML. */
+const DEVICES_STYLE = `
+  .token-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .6rem 0; border-top: 1px solid var(--rule-soft); }
+  .error { color: var(--bad); }
+  #issue-form { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+  #issue-form input { font: inherit; padding: .45rem .6rem; border: 1px solid var(--rule); border-radius: .4rem; background: var(--bg); color: var(--ink); min-width: 12rem; }
+  #issue-form button, #issue-result button, .token-row button { font: inherit; padding: .45rem .9rem; border-radius: .4rem; border: 1px solid var(--rule); background: var(--surface); color: var(--ink); cursor: pointer; min-height: var(--tap); }
+  #issue-result { margin-top: 1rem; padding: 1rem; border: 1px solid var(--rule); border-radius: .6rem; background: var(--surface); }
+  #issue-url { overflow-wrap: break-word; font-size: .85rem; }
+  #qr { margin-top: 1rem; }
+  #qr svg { width: min(72vw, 300px); height: auto; }
+`
+
+export const devicesPage = () =>
+  "<!doctype html>" + render(
+    <Layout title="Medina — Devices" scriptSrc="/devices.js">
+      <style>{raw(DEVICES_STYLE)}</style>
+      <header>
+        <h1>Capture devices</h1>
+        <p><a href="/">Journal</a></p>
+        <p>
+          A policy URL provisions one recorder: what to capture and where to
+          send it, including upload secrets. The URL itself is the credential —
+          hand it to the device owner over a private channel.
+        </p>
+      </header>
+      <main>
+        <section>
+          <h2>Issue a device URL</h2>
+          <form id="issue-form">
+            <label>
+              Label <input id="issue-label" name="label" type="text" placeholder="Pixel 10a" autocomplete="off" />
+            </label>
+            <button type="submit">Issue</button>
+            <span id="issue-error" class="error" role="alert"></span>
+          </form>
+          <div id="issue-result" hidden>
+            <h3>New device URL</h3>
+            <p><code id="issue-url"></code></p>
+            <p>
+              <button type="button" id="show-qr">Show QR</button>{" "}
+              <button type="button" id="copy-url">Copy</button>
+            </p>
+            <div id="qr" hidden></div>
+            <p class="stale">Shown once — it cannot be recovered later. Scan it with the capture app now.</p>
+          </div>
+        </section>
+        <section>
+          <h2>Issued URLs</h2>
+          <div id="token-list">
+            <p class="empty">Loading…</p>
+          </div>
+        </section>
+      </main>
+      <noscript>
+        <p class="empty">Issuing device URLs needs JavaScript.</p>
+      </noscript>
     </Layout>
   )

@@ -7,3 +7,6 @@ node_modules/
 !.env.example
 /data/
 example-lifelog/public/
+android-capture/.gradle/
+android-capture/app/build/
+logs/

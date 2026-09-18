@@ -16,8 +16,9 @@
   "scripts": {
     "build:icons": "bun scripts/materialize-app-icon.ts",
     "build:client": "bun build ./lib/lifelog/client.ts --outfile ./example-lifelog/public/app.js --target browser --minify",
+    "build:devices": "bun build ./lib/lifelog/devices-client.ts --outfile ./example-lifelog/public/devices.js --target browser --minify",
     "build:cli": "bun build ./example-lifelog/cli.ts --outfile ./example-lifelog/public/medina-cli.js --target bun --minify",
-    "build": "bun run build:icons && bun run build:client && bun run build:cli",
+    "build": "bun run build:icons && bun run build:client && bun run build:devices && bun run build:cli",
     "dev": "bun run build && bun --watch example-lifelog/main.ts",
     "start": "bun run build && bun example-lifelog/main.ts",
     "mcp:lifelog": "bun example-lifelog/mcp.ts",
@@ -39,6 +40,7 @@
     "@resvg/resvg-js": "2.6.2",
     "aws4fetch": "^1.0.20",
     "effect": "4.0.0-rc.112",
+    "qrcode-generator": "^2.0.4",
     "transloadit": "^4.11.1",
     "zod": "^4.5.4"
   },
