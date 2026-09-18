@@ -49,9 +49,11 @@ import { dayPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
 import { archiveSweepSource, audioSource, captureBucketSource, driveAllowlistSource, driveInventorySource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
+import { CapturePolicyStore, decodePolicy } from "../lib/capture/CapturePolicy.ts"
 import { appIconResponse, webIconTarget } from "./AppIconResource.ts"
 
 const auth = new MedinaAuth({ directory: dataPath("auth") })
+const capturePolicy = new CapturePolicyStore({ directory: dataPath("capture-policy") })
 
 const bearerToken = (headers: Readonly<Record<string, string | undefined>>) => {
   const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(headers.authorization ?? "")
@@ -207,9 +209,16 @@ const unauthenticated = (request: HttpServerRequest.HttpServerRequest) =>
 
 const publicAuthPath = (url: string) => {
   const path = url.split("?", 1)[0] ?? ""
+  // The capture-policy fetch is public: the token in the URL *is* the
+  // credential (capability URL). Token management stays behind the gate,
+  // so only /api/capture-policy/<token> is exempted here.
+  const policyFetch = path.startsWith("/api/capture-policy/") &&
+    !path.slice("/api/capture-policy/".length).includes("/") &&
+    path !== "/api/capture-policy/tokens"
   return webIconTarget.outputs.some((output) => output.route === path) || path === "/auth.md" || path === "/cli/skill.md" || path === "/cli/medina.js" || path === "/.well-known/oauth-protected-resource" ||
     path === "/.well-known/oauth-authorization-server" || path === "/auth/requests" ||
-    path.startsWith("/auth/approve/") || path === "/auth/delegations" || path === "/oauth2/token" || path === "/oauth2/revoke"
+    path.startsWith("/auth/approve/") || path === "/auth/delegations" || path === "/oauth2/token" || path === "/oauth2/revoke" ||
+    policyFetch
 }
 
 /** Apply the same full-access check to REST and the typed RPC endpoint. */
@@ -358,6 +367,46 @@ one-line download above is the zero-install form.
       if (!token) return HttpServerResponse.jsonUnsafe({ error: "invalid_request" }, { status: 400 })
       auth.revoke(token)
       return HttpServerResponse.empty({ status: 204, headers: { "cache-control": "no-store" } })
+    }))
+
+    // Capture policy: the recorder app provisions itself from a single
+    // capability URL (`GET /api/capture-policy/:token`). The token in the
+    // URL is the credential; the policy carries everything else, including
+    // the bucket upload secrets. The fetch is public; issuance, listing,
+    // revocation, and policy edits stay behind the full-access gate.
+    yield* router.add("GET", "/api/capture-policy/:token", Effect.gen(function*() {
+      const token = (yield* HttpRouter.params).token ?? ""
+      if (!capturePolicy.verifyToken(token)) return HttpServerResponse.jsonUnsafe({ error: "not_found" }, { status: 404 })
+      return HttpServerResponse.jsonUnsafe(capturePolicy.readPolicy(), { headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("POST", "/api/capture-policy/tokens", Effect.gen(function*() {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
+      const label = typeof body === "object" && body !== null && "label" in body && typeof body.label === "string" ? body.label : ""
+      const issued = capturePolicy.issueToken(label)
+      const url = `${requestOrigin(request)}/api/capture-policy/${issued.token}`
+      yield* Effect.log(`capture policy token issued: ${issued.id}`)
+      return HttpServerResponse.jsonUnsafe({ id: issued.id, token: issued.token, url }, { status: 201, headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("GET", "/api/capture-policy/tokens", Effect.gen(function*() {
+      return HttpServerResponse.jsonUnsafe({ tokens: capturePolicy.listTokens() }, { headers: { "cache-control": "no-store" } })
+    }))
+    yield* router.add("POST", "/api/capture-policy/tokens/:id/revoke", Effect.gen(function*() {
+      const id = (yield* HttpRouter.params).id ?? ""
+      const revoked = capturePolicy.revokeToken(id)
+      if (revoked) yield* Effect.log(`capture policy token revoked: ${id}`)
+      return revoked
+        ? HttpServerResponse.empty({ status: 204, headers: { "cache-control": "no-store" } })
+        : HttpServerResponse.jsonUnsafe({ error: "not_found" }, { status: 404 })
+    }))
+    yield* router.add("PUT", "/api/capture-policy", Effect.gen(function*() {
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
+      const policy = decodePolicy(body)
+      if (!policy) return HttpServerResponse.jsonUnsafe({ error: "invalid_policy" }, { status: 400 })
+      capturePolicy.writePolicy(policy)
+      yield* Effect.log(`capture policy updated: version ${policy.version}`)
+      return HttpServerResponse.jsonUnsafe(policy, { headers: { "cache-control": "no-store" } })
     }))
 
     // The home page is an SPA: a static shell plus the client bundle. All

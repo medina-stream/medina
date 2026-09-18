@@ -2,6 +2,7 @@ package dev.exe.bucketcapture.capture
 
 import android.media.MediaRecorder
 import android.os.Build
+import dev.exe.bucketcapture.data.PolicyAudio
 import dev.exe.bucketcapture.data.SpoolRepository
 import kotlinx.coroutines.*
 import java.io.File
@@ -10,9 +11,11 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
     private var recorder: MediaRecorder? = null
     private var current: Pending? = null
     private var rollover: Job? = null
+    private var config: PolicyAudio = PolicyAudio()
     private data class Pending(val id: String, val key: String, val partial: File, val final: File)
 
-    fun start() { if (recorder != null) return; startSegment() }
+    fun start(audio: PolicyAudio = config) { if (recorder != null) return; config = audio; startSegment() }
+    suspend fun restart(audio: PolicyAudio) { stop(); start(audio) }
     private fun startSegment() {
         if (spool.freeBytes() < 512L * 1024 * 1024) { onError("Audio stopped: less than 512 MiB free"); return }
         val (id, key, final) = spool.newIdentity("audio", "m4a")
@@ -22,11 +25,11 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
                 setAudioSource(MediaRecorder.AudioSource.MIC)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioChannels(1); setAudioSamplingRate(16_000); setAudioEncodingBitRate(32_000)
+                setAudioChannels(config.channels); setAudioSamplingRate(config.sampleRateHz); setAudioEncodingBitRate(config.bitrateBps)
                 setOutputFile(partial.absolutePath); prepare(); start()
             }
             current = Pending(id, key, partial, final); recorder = r
-            rollover = scope.launch { delay(15 * 60 * 1000L); seal(); startSegment() }
+            rollover = scope.launch { delay(config.segmentSeconds * 1000L); seal(); startSegment() }
         } catch (e: Exception) { recorder?.release(); recorder = null; onError("Audio start failed: ${e.message}") }
     }
     suspend fun stop() { rollover?.cancel(); rollover = null; seal() }
