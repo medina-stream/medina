@@ -23,7 +23,10 @@ issuance.
 | `PUT /api/capture-policy` | Full-access gate. Replaces the policy after schema validation (400 on invalid) |
 
 Policy sections: `audio` (enabled, codec, channels, sample rate, bitrate,
-segment length), `gps` (enabled, interval, min movement, max accepted
+segment length — segments always align to wall-clock boundaries that are
+multiples of the segment length since the epoch, so 15-minute segments start
+at :00, :15, :30, :45; a capture that begins mid-segment records a truncated
+first segment, then full aligned segments), `gps` (enabled, interval, min movement, max accepted
 accuracy), `upload` (endpoint, bucket, region, prefix, access key, secret
 key, unmetered-only). Unknown JSON fields are tolerated; the app rejects
 unsupported versions and out-of-range values. Reads hit disk on every

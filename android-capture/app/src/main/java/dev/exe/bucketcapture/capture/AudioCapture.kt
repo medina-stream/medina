@@ -14,6 +14,19 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
     private var config: PolicyAudio = PolicyAudio()
     private data class Pending(val id: String, val key: String, val partial: File, val final: File)
 
+    companion object {
+        /**
+         * Milliseconds from [nowMs] until the next multiple-of-[segmentMs] epoch
+         * boundary. Segments therefore start on wall-clock boundaries (:00, :15,
+         * :30, :45 for 15-minute segments); a capture that starts mid-segment
+         * records a truncated first segment, then full aligned segments.
+         */
+        fun millisToNextBoundary(nowMs: Long, segmentMs: Long): Long {
+            val r = nowMs % segmentMs
+            return if (r == 0L) segmentMs else segmentMs - r
+        }
+    }
+
     fun start(audio: PolicyAudio = config) { if (recorder != null) return; config = audio; startSegment() }
     suspend fun restart(audio: PolicyAudio) { stop(); start(audio) }
     private fun startSegment() {
@@ -29,7 +42,8 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
                 setOutputFile(partial.absolutePath); prepare(); start()
             }
             current = Pending(id, key, partial, final); recorder = r
-            rollover = scope.launch { delay(config.segmentSeconds * 1000L); seal(); startSegment() }
+            val segmentMs = config.segmentSeconds * 1000L
+            rollover = scope.launch { delay(millisToNextBoundary(System.currentTimeMillis(), segmentMs)); seal(); startSegment() }
         } catch (e: Exception) { recorder?.release(); recorder = null; onError("Audio start failed: ${e.message}") }
     }
     suspend fun stop() { rollover?.cancel(); rollover = null; seal() }
