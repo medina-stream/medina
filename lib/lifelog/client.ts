@@ -3,16 +3,19 @@
  * The RPC group is shared with the server, so a shape change breaks this
  * build instead of the page at runtime.
  *
- * Table rows arrive in `ListDays` pages — day, staleness, and a
- * truncated preview per row — appended as the scroll nears the bottom, so
- * the table scrolls endlessly with a constant-time initial load. In-flight
- * pages are cancelled on navigation. Row previews arrive truncated to one
- * line, keeping every cell a fixed height regardless of report length.
+ * Table rows arrive in `ListDays` pages — day, staleness, a truncated
+ * preview, and the full report per row — appended as the scroll nears the
+ * bottom, so the table scrolls endlessly with a constant-time initial load.
+ * In-flight pages are cancelled on navigation. Row previews arrive
+ * truncated to one line, keeping every cell a fixed height regardless of
+ * report length.
  *
- * Tapping a row opens the day in a modal and fetches the full journal via
- * `GetJournal`; the list stays mounted behind it, so closing costs nothing
- * and returns to the same scroll position. The modal is driven by the hash,
- * which is what makes back close it and a day link shareable.
+ * Tapping a row opens the day in a modal and renders it instantly from the
+ * row's embedded report; only the transcript evidence below the summary is
+ * fetched on open, via `GetDayTranscripts`. The list stays mounted behind
+ * it, so closing costs nothing and returns to the same scroll position.
+ * The modal is driven by the hash, which is what makes back close it and a
+ * day link shareable.
  *
  * Journal text is LLM output derived from untrusted transcripts: every
  * dynamic string goes through `escapeHtml` before it touches the DOM.
@@ -37,7 +40,6 @@ import type { DayRow, DayTranscript, PipelineStatus, ResourceStatus, SourceStatu
 import type { ApiError } from "./JournalApi.ts"
 import type { PlaceCandidate } from "./Places.ts"
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError"
-import type { Journal } from "./Resources.ts"
 
 const RpcLive = RpcClient.layerProtocolHttp({ url: "/rpc" }).pipe(
   Layer.provide(FetchHttpClient.layer),
@@ -111,12 +113,15 @@ const renderTranscripts = (recordings: ReadonlyArray<DayTranscript>) =>
         }).join("") + `</article>`
     }).join("")}</section>`
 
-/** A day's summary stays first; normalized transcript evidence follows it. */
-const renderDay = (journal: Journal | null, recordings: ReadonlyArray<DayTranscript> | null = null) => {
-  const summary = journal === null
+/** A day's summary stays first; normalized transcript evidence follows it.
+ * Takes the report text directly: the list rows already carry the full
+ * report, so the detail view renders from the embedded summary without a
+ * `GetJournal` round-trip. `null` means no journal exists yet. */
+const renderDay = (report: string | null, recordings: ReadonlyArray<DayTranscript> | null = null) => {
+  const summary = report === null
     ? `<p class="empty">writing…</p>`
-    : journal.report
-      ? renderReport(journal.report)
+    : report
+      ? renderReport(report)
       : `<p class="empty">Nothing recorded.</p>`
   return summary + (recordings === null
     ? `<section class="transcripts"><h3>Transcript</h3><p class="empty">Loading transcript…</p></section>`
@@ -728,7 +733,7 @@ const program = Effect.gen(function*() {
     for (const row of sourceRows) {
       if (row.day <= today) byDay.set(row.day, row)
     }
-    const current = byDay.get(today) ?? { day: today, stale: false, preview: "", audioSeconds: 0 }
+    const current = byDay.get(today) ?? { day: today, stale: false, preview: "", audioSeconds: 0, summary: "" }
     rows = [current, ...Array.from(byDay.values())
       .filter((row) => row.day < today)
       .sort((left, right) => right.day.localeCompare(left.day))]
@@ -1080,23 +1085,40 @@ const program = Effect.gen(function*() {
           if (routeDay(location.hash) !== null) location.hash = "#/"
         })
       }
-      const journal = yield* client.GetJournal({ day })
-      // A late response for a day the user already navigated away from
-      // must not overwrite what they are looking at now.
-      if (routeDay(location.hash) !== day) return
-      body.innerHTML = renderDay(journal)
+      const embedded = rows.find((row) => row.day === day)?.summary ?? null
+      if (embedded === null || embedded === "") {
+        // No embedded summary: the row isn't in the list yet (deep link
+        // before the first page loaded, or an older server). Fall back to
+        // fetching the journal the old way.
+        body.innerHTML = `<p class="empty">Loading…</p>`
+        const journal = yield* client.GetJournal({ day })
+        // A late response for a day the user already navigated away from
+        // must not overwrite what they are looking at now.
+        if (routeDay(location.hash) !== day) return
+        const report = journal === null ? null : journal.report
+        body.innerHTML = renderDay(report)
+        const transcripts = yield* client.GetDayTranscripts({ day })
+        if (routeDay(location.hash) !== day) return
+        body.innerHTML = renderDay(report, transcripts)
+        wireTranscriptJumps(body)
+        wireDaySearch(body, daySearchQuery(location.hash))
+        if (journal === null) {
+          const route = location.hash
+          yield* Effect.sleep("10 seconds").pipe(
+            Effect.flatMap(() => route === location.hash ? showDay(day) : Effect.void),
+            Effect.forkDetach
+          )
+        }
+        return
+      }
+      // The list row already carries the full report: render instantly,
+      // then fill in the transcript evidence below it.
+      body.innerHTML = renderDay(embedded)
       const transcripts = yield* client.GetDayTranscripts({ day })
       if (routeDay(location.hash) !== day) return
-      body.innerHTML = renderDay(journal, transcripts)
+      body.innerHTML = renderDay(embedded, transcripts)
       wireTranscriptJumps(body)
       wireDaySearch(body, daySearchQuery(location.hash))
-      if (journal === null) {
-        const route = location.hash
-        yield* Effect.sleep("10 seconds").pipe(
-          Effect.flatMap(() => route === location.hash ? showDay(day) : Effect.void),
-          Effect.forkDetach
-        )
-      }
     })
 
   const loadRoute = (): Effect.Effect<void> =>

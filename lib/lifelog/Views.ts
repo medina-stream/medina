@@ -93,13 +93,15 @@ export const previewText = (report: string): string => {
   return flat.length > PREVIEW_CHARS ? `${flat.slice(0, PREVIEW_CHARS - 1).trimEnd()}…` : flat
 }
 
-/** One virtual-table row: the day, its freshness, its preview, and how
- * much audio the day has. */
+/** One virtual-table row: the day, its freshness, its preview, how
+ * much audio the day has, and the full report so the detail view opens
+ * without a second request. */
 export interface DayPreview {
   readonly day: string
   readonly stale: boolean
   readonly preview: string
   readonly audioSeconds: number
+  readonly summary: string
 }
 
 /**
@@ -135,6 +137,7 @@ const currentDayPreviews = Effect.gen(function*() {
         day: view.journal.day,
         stale: view.stale,
         preview: previewText(view.journal.report),
+        summary: view.journal.report,
         audioSeconds: Math.round(audioSecondsFor(
           transcripts.flatMap((transcript) => Option.isSome(transcript) ? [transcript.value] : [])
         ))
@@ -164,7 +167,7 @@ const previewsMemo: PreviewsMemo = { value: null, expiresAt: 0, refreshing: fals
  * Versioned in the name: the file is schema-decoded, so adding a field
  * makes older snapshots fail to decode and recompute. Bumping the name
  * keeps that from looking like a read error and leaves the old file inert. */
-const PREVIEWS_SNAPSHOT = dataPath("views/days-v3.json")
+const PREVIEWS_SNAPSHOT = dataPath("views/days-v4.json")
 
 const storePreviews = (value: ReadonlyArray<DayPreview>, now: number) => {
   previewsMemo.value = value
@@ -206,7 +209,8 @@ const readSnapshot: Effect.Effect<ReadonlyArray<DayPreview> | null, never, FileS
               day: row.day,
               stale: row.stale,
               preview: row.preview,
-              audioSeconds: row.audioSeconds
+              audioSeconds: row.audioSeconds,
+              summary: row.summary
             }))
         )
     }

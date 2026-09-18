@@ -29,16 +29,21 @@ export class JournalEntry extends Schema.Class<JournalEntry>("JournalEntry")({
 }) {}
 
 /**
- * One row of the days table: identity, freshness, and a truncated report
- * preview. The preview is what the table shows, so scrolling needs no
- * per-day requests — only the day detail view fetches a full journal.
+ * One row of the days table: identity, freshness, a truncated report
+ * preview, and the full report. The preview is what the table shows, so
+ * scrolling needs no per-day requests; the full report rides along so the
+ * day detail can render instantly without a second round-trip. Transcripts
+ * stay behind `GetDayTranscripts` — the row carries the summary, not the
+ * evidence.
  */
 export class DayRow extends Schema.Class<DayRow>("DayRow")({
   day: Schema.String,
   stale: Schema.Boolean,
   preview: Schema.String,
   /** Seconds of recorded audio behind this day's journal. */
-  audioSeconds: Schema.Number
+  audioSeconds: Schema.Number,
+  /** The full generated report for the day, as the detail view renders it. */
+  summary: Schema.String
 }) {}
 
 /** One normalized utterance in a day-detail transcript. */
@@ -98,9 +103,9 @@ export const GetDayTranscripts = Rpc.make("GetDayTranscripts", {
 
 /**
  * The virtualized days table, newest first: day + staleness + a truncated
- * preview per row. Served from a process memo with stale-while-revalidate
- * (and an on-disk snapshot for cold boots), so reads never wait on
- * derivation; journals only change on the hourly pipeline pass.
+ * preview plus the full report per row. Served from a process memo with
+ * stale-while-revalidate (and an on-disk snapshot for cold boots), so reads
+ * never wait on derivation; journals only change on the hourly pipeline pass.
  */
 export const ListDays = Rpc.make("ListDays", {
   payload: {
