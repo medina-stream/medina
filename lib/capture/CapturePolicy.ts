@@ -68,7 +68,7 @@ export const defaultPolicy = (): CapturePolicy =>
     }),
     gps: new CapturePolicyGps({
       enabled: true,
-      intervalSeconds: 30,
+      intervalSeconds: 60,
       minUpdateDistanceMeters: 50,
       minAccuracyMeters: 100
     }),

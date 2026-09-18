@@ -32,6 +32,13 @@ key, unmetered-only). Unknown JSON fields are tolerated; the app rejects
 unsupported versions and out-of-range values. Reads hit disk on every
 fetch — a policy edit is effective immediately, no restart.
 
+GPS is sampled at the policy's `intervalSeconds` (60 on the deployed
+policy — about one fix per minute) and uploaded in batches, not per fix:
+the app seals spooled fixes into JSON files and PUTs them under
+`capture/<install-id>/location/YYYY/MM/DD/`. The ingest loop currently
+skips location JSON (audio only), so the batches are cold storage until a
+GPS consumer exists.
+
 ## Issuing a device URL
 
 ```bash
