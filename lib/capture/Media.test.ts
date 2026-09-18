@@ -7,6 +7,7 @@ import * as Files from "../Files.ts"
 import { sha256 } from "../Hash.ts"
 import { captureDir, DATA_DIR, dataPath, Transcript } from "../lifelog/Resources.ts"
 import {
+  directChunkFor,
   ffprobeKey,
   MediaChunk,
   MediaManifest,
@@ -108,6 +109,53 @@ describe("normalizeCapture", () => {
     ])
     const streams = JSON.parse(probe.stdout.toString()).streams as Array<{ codec_type: string }>
     expect(streams.map((stream) => stream.codec_type)).toEqual(["audio"])
+  })
+})
+
+describe("directChunkFor", () => {
+  const probe = (stream: Record<string, string | number>, duration: string) => ({
+    streams: [{ codec_type: "audio", ...stream }],
+    format: { duration }
+  })
+  const canonical = { codec_name: "aac", channels: 1, sample_rate: "16000" }
+
+  test("accepts the recorder app's shape: aac, mono, 16 kHz, within one chunk", () => {
+    const direct = directChunkFor(probe(canonical, "900.0"))
+    expect(direct).not.toBeNull()
+    expect(direct!.durationSeconds).toBeCloseTo(900, 5)
+  })
+
+  test("accepts opus too", () => {
+    expect(directChunkFor(probe({ ...canonical, codec_name: "opus" }, "60.0"))).not.toBeNull()
+  })
+
+  test("rejects lossless and other codecs", () => {
+    expect(directChunkFor(probe({ ...canonical, codec_name: "pcm_s16le" }, "60.0"))).toBeNull()
+    expect(directChunkFor(probe({ ...canonical, codec_name: "mp3" }, "60.0"))).toBeNull()
+  })
+
+  test("rejects stereo and non-16kHz", () => {
+    expect(directChunkFor(probe({ ...canonical, channels: 2 }, "60.0"))).toBeNull()
+    expect(directChunkFor(probe({ ...canonical, sample_rate: "44100" }, "60.0"))).toBeNull()
+  })
+
+  test("rejects captures longer than one chunk and missing durations", () => {
+    expect(directChunkFor(probe(canonical, "7200.0"))).toBeNull()
+    expect(directChunkFor(probe(canonical, "N/A"))).toBeNull()
+  })
+
+  test("rejects non-audio probes", () => {
+    expect(directChunkFor({ streams: [], format: { duration: "60.0" } })).toBeNull()
+  })
+
+  test("a real recorder-shaped m4a probes as direct; a wav does not", async () => {
+    const m4a = await makeCapture(2, "m4a", ["-c:a", "aac", "-ac", "1", "-ar", "16000", "-b:a", "32k"])
+    const m4aProbe = await Effect.runPromise(probeCapture(m4a).pipe(Effect.provide(layers)))
+    expect(directChunkFor(m4aProbe.ffprobe)).not.toBeNull()
+
+    const wav = await makeCapture(2, "wav")
+    const wavProbe = await Effect.runPromise(probeCapture(wav).pipe(Effect.provide(layers)))
+    expect(directChunkFor(wavProbe.ffprobe)).toBeNull()
   })
 })
 

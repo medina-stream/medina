@@ -9,7 +9,9 @@ export interface ItemSourceOptions<Item, R> {
   readonly discover: Effect.Effect<ReadonlyArray<Item>, Error, R>
   readonly ingest: (item: Item) => Effect.Effect<ItemOutcome, Error, R>
   readonly label: (item: Item) => string
-  readonly concurrency?: number
+  /** Per-item parallelism. Omit for 1; "unbounded" lets the downstream
+   * service (not this host) absorb the whole backlog at once. */
+  readonly concurrency?: number | "unbounded"
 }
 
 /** Build a source with bounded concurrency and per-item failure isolation. */

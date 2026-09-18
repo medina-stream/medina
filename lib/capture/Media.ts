@@ -17,7 +17,9 @@
  *   video files, whatever a capturer was rude enough to upload -- is
  *   transcoded once to a canonical form: mono 16 kHz Opus (voice-ranged
  *   bitrate), segmented into bounded chunks, with a manifest recording each
- *   chunk's offset. Chunk bytes live durably in R2; local normalization may
+ *   chunk's offset. Captures already in canonical-ish form (compact codec,
+ *   mono 16 kHz, within one chunk -- i.e. the recorder app's output) skip
+ *   this entirely: the archived original *is* the chunk. Chunk bytes live durably in R2; local normalization may
  *   create a temporary/local copy first, but it is uploaded before the
  *   manifest is considered settled. After this the original blob is never
  *   read again -- transcription consumes signed chunk URLs.
@@ -144,6 +146,34 @@ const hasAudioStream = (probe: unknown): boolean => {
 const probeDuration = (probe: unknown): number | null => {
   const duration = Number((probe as { format?: { duration?: string } }).format?.duration)
   return Number.isFinite(duration) && duration > 0 ? duration : null
+}
+
+/** Codecs compact enough that re-encoding buys transcription nothing: the
+ * canonical codec itself, plus what the recorder app emits. */
+const DIRECT_CODECS = new Set(["opus", "aac"])
+
+export interface DirectChunk {
+  readonly durationSeconds: number
+}
+
+/**
+ * Whether the probed bytes are already in canonical-ish form -- a compact
+ * speech codec, mono 16 kHz, no longer than one chunk. Such captures skip
+ * the transcode/split entirely: the archived original *is* the chunk, and
+ * the manifest points at it. Returns null for anything else (multi-hour
+ * captures, video, lossless uploads), which keeps the old path.
+ */
+export const directChunkFor = (probe: unknown): DirectChunk | null => {
+  const ffprobe = probe as {
+    streams?: Array<{ codec_type?: string; codec_name?: string; channels?: number; sample_rate?: string }>
+  }
+  const audio = ffprobe.streams?.find((stream) => stream.codec_type === "audio")
+  if (audio === undefined) return null
+  if (!DIRECT_CODECS.has(audio.codec_name ?? "")) return null
+  if (audio.channels !== 1 || audio.sample_rate !== "16000") return null
+  const duration = probeDuration(probe)
+  if (duration === null || duration > CHUNK_SECONDS) return null
+  return { durationSeconds: duration }
 }
 
 /**
@@ -288,8 +318,14 @@ const ensureManifestChunksInR2 = (manifest: MediaManifest) =>
 
 /**
  * Probe + normalize as a pipeline stage. Every capture is probed once;
- * every media capture is transcoded once. Settled captures cost one probe
- * read and one manifest existence check per pass.
+ * captures already in canonical-ish form (the recorder app's AAC) skip
+ * transcode/split and point a one-chunk manifest at the archived original.
+ * Everything else goes through the transcode path as before. Settled
+ * captures cost one probe read and one manifest existence check per pass.
+ *
+ * Unbounded: nothing here is CPU-bound -- ffprobe is milliseconds, and the
+ * heavy work (Transloadit assemblies, AssemblyAI transcripts) happens in
+ * the cloud. Let it chew in parallel.
  */
 export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNormalize | Bucket> = makeItemSource({
   name: "media-normalize",
@@ -304,6 +340,23 @@ export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNor
         if (stored === null) return yield* Effect.fail(new Error(`manifest vanished for ${captureId}`))
         return (yield* ensureManifestChunksInR2(stored)) > 0 ? "ingested" as const : "cached" as const
       }
+      const direct = directChunkFor(probe.ffprobe)
+      if (direct !== null) {
+        if (probe.blobName === null) return yield* Effect.fail(new Error(`no blob name for media capture ${captureId}`))
+        // The archive sweep runs before this stage, so the original is
+        // already the durable R2 object; the manifest points at it directly.
+        const key = `${captureDir(captureId)}/${probe.blobName}`
+        const manifest = new MediaManifest({
+          captureId,
+          version: MEDIA_VERSION,
+          createdAt: new Date().toISOString(),
+          sourceDurationSeconds: direct.durationSeconds,
+          chunks: [new MediaChunk({ index: 0, key, startSeconds: 0, durationSeconds: direct.durationSeconds })]
+        })
+        yield* Files.writeJson(dataPath(mediaManifestKey(captureId)), manifest)
+        yield* ensureManifestChunksInR2(manifest)
+        return "ingested" as const
+      }
       const transloadit = yield* TransloaditNormalize
       if (transloadit.configured) {
         if (probe.blobName === null) return yield* Effect.fail(new Error(`no blob name for media capture ${captureId}`))
@@ -315,7 +368,7 @@ export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNor
       return "ingested" as const
     }),
   label: (captureId) => `capture/${captureId}`,
-  concurrency: 1 // ffmpeg saturates a core; parallel encodes just thrash
+  concurrency: "unbounded"
 })
 
 /** One chunk's transcription result, ready to merge. Shared by the production
@@ -545,5 +598,7 @@ export const mediaTranscribeSource: Source<
   }),
   ingest: transcribeMediaCapture,
   label: (captureId) => `capture/${captureId}`,
-  concurrency: 4
+  // Unbounded: submitting and polling are API calls; AssemblyAI does the
+  // work. A backlog drains in ~one transcription pass instead of serially.
+  concurrency: "unbounded"
 })
