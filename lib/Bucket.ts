@@ -146,7 +146,11 @@ const s3ReadApi = (
         continuationToken = response.NextContinuationToken
       } while (continuationToken !== undefined)
       return objects
-        .sort((a, b) => (b.lastModified ?? "").localeCompare(a.lastModified ?? ""))
+        // Oldest-first: ingest is receipt-guarded and idempotent, so each
+        // pass takes the next un-ingested objects and a backlog always
+        // drains. Newest-first would starve everything past the limit
+        // window once the newest objects are ingested.
+        .sort((a, b) => (a.lastModified ?? "").localeCompare(b.lastModified ?? ""))
         .slice(0, limit)
     },
     catch: asError
