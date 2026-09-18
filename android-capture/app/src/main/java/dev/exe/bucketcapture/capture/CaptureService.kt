@@ -26,7 +26,13 @@ class CaptureService : Service() {
         when (intent?.action ?: ACTION_START) {
             ACTION_STOP -> stopCapture()
             ACTION_SYNC -> SyncScheduler.schedule(this, explicit = true)
-            ACTION_REPOLICY -> reloadPolicy()
+            ACTION_REPOLICY -> {
+                // May arrive via startForegroundService while capture is not running:
+                // promote immediately so the system never sees an unpromoted start,
+                // then bail out if capture isn't desired (the next start reads the policy fresh).
+                startForeground(NOTIFICATION_ID, notification("Bucket Capture"))
+                reloadPolicy()
+            }
             else -> {
                 startForeground(NOTIFICATION_ID, notification("Audio and location capture active"))
                 getSharedPreferences("capture", MODE_PRIVATE).edit().putBoolean("desired", true).apply()
@@ -41,7 +47,7 @@ class CaptureService : Service() {
     }
     /** A refreshed policy arrived while capturing: restart the components so the new parameters take effect. */
     private fun reloadPolicy() {
-        if (!getSharedPreferences("capture", MODE_PRIVATE).getBoolean("desired", false)) return
+        if (!getSharedPreferences("capture", MODE_PRIVATE).getBoolean("desired", false)) { stopSelf(); return }
         val policy = (application as CaptureApplication).policies.currentPolicy()
         scope.launch {
             if (policy.audio.enabled) audio.restart(policy.audio) else { audio.stop(); showError("Audio capture is disabled by the capture policy") }

@@ -50,8 +50,13 @@ class PolicyWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         when (val result = app.policies.refresh()) {
             is PolicyFetchResult.Success -> {
                 if (result.changed) {
-                    val intent = android.content.Intent(app, CaptureService::class.java).setAction(CaptureService.ACTION_REPOLICY)
-                    ContextCompat.startForegroundService(app, intent)
+                    // Only nudge the service when capture is desired; otherwise the
+                    // next capture start picks up the refreshed policy directly.
+                    val desired = app.getSharedPreferences("capture", Context.MODE_PRIVATE).getBoolean("desired", false)
+                    if (desired) {
+                        val intent = android.content.Intent(app, CaptureService::class.java).setAction(CaptureService.ACTION_REPOLICY)
+                        ContextCompat.startForegroundService(app, intent)
+                    }
                 }
                 // A refreshed policy may have fixed credentials: kick the uploader.
                 SyncScheduler.schedule(app)
