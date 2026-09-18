@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat.startForegroundService
@@ -181,18 +182,15 @@ class MainActivity : ComponentActivity() {
                 Triple(DotState.Warn, "Server unreachable", s.detail)
             is PolicyState.Active -> Triple(
                 if (desired) DotState.On else DotState.Off,
-                host ?: "Connected",
-                buildString {
-                    append(if (desired) "Recording" else "Capture off")
-                    if (s.staleError != null) append(" · using cached policy")
-                },
+                if (desired) "Capture on" else "Capture off",
+                s.staleError?.let { "Using cached policy" },
             )
         }
         val configured = vm.policyState is PolicyState.Active || vm.policyState is PolicyState.Unreachable
 
         Scaffold(topBar = {
             TopAppBar(
-                title = { Text("Capture") },
+                title = { Text(host ?: "Medina Capture") },
                 actions = {
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
@@ -208,8 +206,10 @@ class MainActivity : ComponentActivity() {
                 StatusDot(dot)
                 Spacer(Modifier.height(20.dp))
                 Text(headline, style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(4.dp))
-                Text(subline, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (subline != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(subline, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 if (vm.policyState is PolicyState.Active) {
                     Spacer(Modifier.height(12.dp))
                     val anomaly = when {
@@ -225,18 +225,29 @@ class MainActivity : ComponentActivity() {
                 }
                 Spacer(Modifier.height(24.dp))
                 if (configured) {
-                    Button(onClick = {
-                        if (desired) vm.stopCaptureService()
-                        else {
-                            val perms = buildList {
-                                add(Manifest.permission.RECORD_AUDIO)
-                                add(Manifest.permission.ACCESS_FINE_LOCATION)
-                                add(Manifest.permission.ACCESS_COARSE_LOCATION)
-                                if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                            request.launch(perms.toTypedArray())
-                        }
-                    }) { Text(if (desired) "Stop capture" else "Start capture") }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(
+                            checked = desired,
+                            onCheckedChange = { on ->
+                                if (on) {
+                                    val perms = buildList {
+                                        add(Manifest.permission.RECORD_AUDIO)
+                                        add(Manifest.permission.ACCESS_FINE_LOCATION)
+                                        add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                                        if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                    request.launch(perms.toTypedArray())
+                                } else {
+                                    vm.stopCaptureService()
+                                }
+                            },
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            if (desired) "Enabled" else "Disabled",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
                 } else {
                     Button(onClick = onOpenSettings) { Text("Open settings") }
                 }
