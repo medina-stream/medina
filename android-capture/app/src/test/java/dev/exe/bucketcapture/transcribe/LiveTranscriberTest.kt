@@ -42,13 +42,13 @@ class LiveTranscriberTest {
 
     @Test fun `overlap is capped by maxOverlapWords`() {
         val prev = (1..50).joinToString(" ") { "w$it" }
-        val next = (31..60).joinToString(" ") { "w$it" }
-        // 30 shared words but the cap is 10: only the last 10 are dropped.
-        val merged = LiveTranscriber.mergeOverlap(prev, next, maxOverlapWords = 10)
+        val next = (41..70).joinToString(" ") { "w$it" }
+        // 10 shared words (w41..w50) with a cap of 20: only the new tail is appended.
+        val merged = LiveTranscriber.mergeOverlap(prev, next, maxOverlapWords = 20)
         val words = merged.split(" ")
-        assertEquals(100, words.size)
+        assertEquals(60, words.size)
         assertEquals("w50", words[49])
-        assertEquals("w41", words[50])
+        assertEquals("w51", words[50])
     }
 
     @Test fun `whitespace is normalized`() {
