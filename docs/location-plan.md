@@ -58,15 +58,14 @@ never read that well in a journal.
 
 - Throttle: only on significant moves (new place likelihood, or every 5 min
   while moving). A Places call per fix would be spendy and pointless.
-- Needs a Google Cloud API key with Places API enabled. Options:
-  - **Key in the capture policy** (fits the existing design: secrets live in
-    the policy, the app stores only the bootstrap URL). Key restricted to the
-    Android app signature.
-  - **Server-side resolution** via the Places web API at ingest time instead.
-    Keeps the key off the phone entirely; adds a minute of latency to place
-    names. The live event still carries raw coords, so the map stays live.
-  - Decision needed from Scott; default to policy-delivered key unless he
-    prefers server-side.
+- **Decision (Scott, 2026-09-18): server-side.** The phone does not get a
+  Places key. The server resolves place names/IDs at ingest time via the
+  Places web API; the live event carries raw coords and the UI stays live.
+  As a free on-device complement, the system `Geocoder` (no key, no billing)
+  can supply a coarse label — "Hayes Valley, San Francisco" — for the
+  proof-of-freshness UI, while the journal waits for the rich server-side
+  name ("Aquatic Park", "Blue Bottle"). Geocoder gives addresses, never POI
+  names, so it is a stopgap label, not the journal source of truth.
 
 ### 4. Geofences (phase 3, optional)
 
@@ -133,8 +132,7 @@ policy document when Scott provisions it. All server-owned, same as today.
 
 ## Open questions
 
-- Places API key: policy-delivered (fresher, key on device) or server-side
-  resolution (key stays home, ~1 min latency on names)?
 - Retire the sealed location batches outright in phase 1, or run both during
   transition?
 - Any places that should never be named in the journal (privacy floor)?
+- Places API key for the server side: new or existing Google Cloud project?
