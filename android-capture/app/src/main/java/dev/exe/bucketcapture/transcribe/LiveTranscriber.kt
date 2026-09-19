@@ -64,9 +64,19 @@ class LiveTranscriber(
         synchronized(ringLock) { ringStart = 0; ringCount = 0; totalSamples = 0 }
     }
 
-    /** Idempotent. The model gate is checked per tick so a download that lands mid-capture picks up live transcription automatically. */
+    /**
+     * Idempotent. The mic tap does NOT open until the whisper model is
+     * actually downloaded — no point burning mic/CPU while the model is
+     * still fetching. If the model is absent we kick the wifi-constrained
+     * download and return; [MODEL_READY_ACTION] (sent by the download
+     * worker on success) picks the tap up automatically.
+     */
     fun start() {
         if (running) return
+        if (!ModelManager.isPresent(context)) {
+            ModelManager.scheduleDownload(context)
+            return
+        }
         val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         if (minBuf <= 0) return
         val rec = try {
@@ -188,6 +198,8 @@ class LiveTranscriber(
         const val SAMPLE_RATE = 16000
         const val TICK_MS = 30_000L
         const val WINDOW_SEC = 35
+        /** Broadcast when the whisper model download lands; starts the tap. */
+        const val MODEL_READY_ACTION = "dev.exe.bucketcapture.MODEL_READY"
         private const val RING_SEC = 45
         private const val MIN_WINDOW_SEC = 5
         private const val ENERGY_THRESHOLD = 0.015

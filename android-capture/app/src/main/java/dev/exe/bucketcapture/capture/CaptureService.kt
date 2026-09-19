@@ -1,10 +1,14 @@
 package dev.exe.bucketcapture.capture
 
 import android.app.*
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import dev.exe.bucketcapture.CaptureApplication
 import dev.exe.bucketcapture.MainActivity
 import dev.exe.bucketcapture.R
@@ -17,14 +21,21 @@ class CaptureService : Service() {
     private lateinit var audio: AudioCapture
     private lateinit var location: LocationCapture
     private lateinit var live: LiveTranscriber
+    private lateinit var activities: ActivityMonitor
     private var locationSeal: Job? = null
+    /** Picks up live transcription when the whisper model download lands. */
+    private val modelReady = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) { live.start() }
+    }
     override fun onCreate() {
         super.onCreate(); ensureChannel()
         val app = application as CaptureApplication
         audio = AudioCapture(app.spool, scope, ::showError)
         location = LocationCapture(this, app.spool, scope, ::showError)
         live = LiveTranscriber(this, app.spool, scope)
+        activities = ActivityMonitor(this)
         audio.onSegmentStart = { info -> live.onSegment(info.id, info.startedAtMs) }
+        ContextCompat.registerReceiver(this, modelReady, IntentFilter(LiveTranscriber.MODEL_READY_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED)
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action ?: ACTION_START) {
@@ -42,7 +53,10 @@ class CaptureService : Service() {
                 getSharedPreferences("capture", MODE_PRIVATE).edit().putBoolean("desired", true).apply()
                 val policy = (application as CaptureApplication).policies.currentPolicy()
                 if (policy.audio.enabled) { audio.start(policy.audio); live.start() } else showError("Audio capture is disabled by the capture policy")
-                if (policy.gps.enabled) location.start(policy.gps)
+                if (policy.gps.enabled) {
+                    if (policy.gps.activityRecognition) activities.start()
+                    location.start(policy.gps, activities.current)
+                }
                 locationSeal?.cancel()
                 locationSeal = scope.launch { while (isActive) { delay(15 * 60 * 1000L); (application as CaptureApplication).spool.sealLocations() } }
             }
@@ -55,10 +69,13 @@ class CaptureService : Service() {
         val policy = (application as CaptureApplication).policies.currentPolicy()
         scope.launch {
             if (policy.audio.enabled) { audio.restart(policy.audio); live.start() } else { audio.stop(); live.stop(); showError("Audio capture is disabled by the capture policy") }
-            if (policy.gps.enabled) location.restart(policy.gps) else location.stop()
+            if (policy.gps.enabled) {
+                if (policy.gps.activityRecognition) activities.start() else activities.stop()
+                location.restart(policy.gps, activities.current)
+            } else { location.stop(); activities.stop() }
         }
     }
-    private fun stopCapture() { getSharedPreferences("capture", MODE_PRIVATE).edit().putBoolean("desired", false).apply(); location.stop(); live.stop(); locationSeal?.cancel(); scope.launch { audio.stop(); (application as CaptureApplication).spool.sealLocations(); SyncScheduler.schedule(this@CaptureService); stopSelf() } }
+    private fun stopCapture() { getSharedPreferences("capture", MODE_PRIVATE).edit().putBoolean("desired", false).apply(); location.stop(); live.stop(); activities.stop(); locationSeal?.cancel(); scope.launch { audio.stop(); (application as CaptureApplication).spool.sealLocations(); SyncScheduler.schedule(this@CaptureService); stopSelf() } }
     private fun showError(message: String) { getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(message)) }
     private fun notification(text: String): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
@@ -68,7 +85,7 @@ class CaptureService : Service() {
             .addAction(0, "Sync", service(ACTION_SYNC, 1)).addAction(0, "Stop", service(ACTION_STOP, 2)).build()
     }
     private fun ensureChannel() { getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "Active capture", NotificationManager.IMPORTANCE_LOW)) }
-    override fun onDestroy() { live.stop(); location.stop(); scope.cancel(); super.onDestroy() }
+    override fun onDestroy() { live.stop(); location.stop(); activities.stop(); runCatching { unregisterReceiver(modelReady) }; scope.cancel(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
     companion object { const val ACTION_START = "capture.start"; const val ACTION_STOP = "capture.stop"; const val ACTION_SYNC = "capture.sync"; const val ACTION_REPOLICY = "capture.repolicy"; const val CHANNEL = "capture"; const val NOTIFICATION_ID = 1001 }
 }

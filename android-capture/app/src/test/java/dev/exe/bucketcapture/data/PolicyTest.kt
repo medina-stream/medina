@@ -82,4 +82,22 @@ class PolicyTest {
             server.shutdown()
         }
     }
+
+    @Test fun `gps adaptive fields parse with defaults`() {
+        val policy = parsePolicy(valid)!!
+        // The fixture has no adaptive fields: defaults apply.
+        assertEquals(15, policy.gps.movingIntervalSeconds)
+        assertTrue(policy.gps.activityRecognition)
+        assertTrue(policy.gps.adaptive)
+
+        val withAdaptive = valid.replace(
+            "\"gps\": { \"enabled\": false, \"intervalSeconds\": 60, \"minUpdateDistanceMeters\": 25, \"minAccuracyMeters\": 50 }",
+            "\"gps\": { \"enabled\": true, \"intervalSeconds\": 120, \"movingIntervalSeconds\": 10, \"minUpdateDistanceMeters\": 25, \"minAccuracyMeters\": 50, \"activityRecognition\": false, \"adaptive\": false }"
+        )
+        val parsed = parsePolicy(withAdaptive)!!
+        assertEquals(120, parsed.gps.intervalSeconds)
+        assertEquals(10, parsed.gps.movingIntervalSeconds)
+        assertFalse(parsed.gps.activityRecognition)
+        assertFalse(parsed.gps.adaptive)
+    }
 }

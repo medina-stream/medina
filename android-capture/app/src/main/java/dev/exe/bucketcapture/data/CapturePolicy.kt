@@ -31,11 +31,16 @@ data class PolicyAudio(
 
 data class PolicyGps(
     val enabled: Boolean = true,
-    val intervalSeconds: Int = 30,
+    /** Slow-gear interval (still / unknown activity). */
+    val intervalSeconds: Int = 60,
+    /** Fast-gear interval while the activity classifier reports motion. */
+    val movingIntervalSeconds: Int = 15,
     val minUpdateDistanceMeters: Int = 50,
     val minAccuracyMeters: Int = 100,
+    val activityRecognition: Boolean = true,
+    val adaptive: Boolean = true,
 ) {
-    fun describe() = "every ${intervalSeconds}s · ≥${minUpdateDistanceMeters}m · ≤${minAccuracyMeters}m accuracy"
+    fun describe() = "still ${intervalSeconds}s / moving ${movingIntervalSeconds}s · activity ${if (activityRecognition) "on" else "off"} · ≥${minUpdateDistanceMeters}m · ≤${minAccuracyMeters}m accuracy"
 }
 
 data class PolicyUpload(
@@ -88,10 +93,11 @@ fun parsePolicy(raw: String): CapturePolicy? = runCatching {
     if (channels !in 1..2 || sampleRateHz !in setOf(8000, 16000, 22050, 44100, 48000) ||
         bitrateBps !in 8000..320000 || segmentSeconds !in 60..3600) return null
     val gpsJson = root.optJSONObject("gps") ?: JSONObject()
-    val intervalSeconds = gpsJson.optInt("intervalSeconds", 30)
+    val intervalSeconds = gpsJson.optInt("intervalSeconds", 60)
+    val movingIntervalSeconds = gpsJson.optInt("movingIntervalSeconds", 15)
     val minDistance = gpsJson.optInt("minUpdateDistanceMeters", 50)
     val minAccuracy = gpsJson.optInt("minAccuracyMeters", 100)
-    if (intervalSeconds !in 5..3600 || minDistance !in 0..10000 || minAccuracy !in 1..1000) return null
+    if (intervalSeconds !in 5..3600 || movingIntervalSeconds !in 5..3600 || minDistance !in 0..10000 || minAccuracy !in 1..1000) return null
     val uploadJson = root.optJSONObject("upload") ?: JSONObject()
     CapturePolicy(
         version = version,
@@ -104,8 +110,11 @@ fun parsePolicy(raw: String): CapturePolicy? = runCatching {
         gps = PolicyGps(
             enabled = gpsJson.optBoolean("enabled", true),
             intervalSeconds = intervalSeconds,
+            movingIntervalSeconds = movingIntervalSeconds,
             minUpdateDistanceMeters = minDistance,
             minAccuracyMeters = minAccuracy,
+            activityRecognition = gpsJson.optBoolean("activityRecognition", true),
+            adaptive = gpsJson.optBoolean("adaptive", true),
         ),
         upload = PolicyUpload(
             endpoint = uploadJson.optString("endpoint", ""),

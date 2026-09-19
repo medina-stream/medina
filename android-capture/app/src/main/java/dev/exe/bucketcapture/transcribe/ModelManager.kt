@@ -1,6 +1,7 @@
 package dev.exe.bucketcapture.transcribe
 
 import android.content.Context
+import android.content.Intent
 import androidx.work.*
 import dev.exe.bucketcapture.CaptureApplication
 import kotlinx.coroutines.Dispatchers
@@ -59,6 +60,8 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
             }
             check(tmp.length() > 0) { "Downloaded model is empty" }
             check(tmp.renameTo(target)) { "Could not finalize model file" }
+            // Wake the live tap if capture is running: it waits on this.
+            app.sendBroadcast(Intent(LiveTranscriber.MODEL_READY_ACTION).setPackage(app.packageName))
             Result.success()
         } catch (e: Exception) {
             runCatching { tmp.delete() }

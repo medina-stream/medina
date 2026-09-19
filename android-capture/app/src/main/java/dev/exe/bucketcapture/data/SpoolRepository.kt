@@ -66,6 +66,51 @@ class SpoolRepository(private val context: Context, private val db: CaptureDatab
         SyncScheduler.schedule(context)
     }
     suspend fun addFix(fix: LocationFix) { db.locations().insert(fix); if (db.locations().count() >= 100) sealLocations() }
+    /**
+     * Emit one `location.fix` device event per fix (docs/events-plan.md).
+     * Each fix becomes its own tiny JSON object under `events/<install>/…`
+     * instead of accumulating into sealed location batches, so the server
+     * sees location in ~real time. The activity label rides along so the
+     * server never guesses transport mode from GPS speed.
+     */
+    suspend fun emitLocationEvent(fix: LocationFix, activity: dev.exe.bucketcapture.capture.ActivityReading?) = withContext(Dispatchers.IO) {
+        val id = UUID.randomUUID().toString()
+        val now = Instant.now()
+        val date = DateTimeFormatter.ofPattern("yyyy/MM/dd").withZone(ZoneOffset.UTC).format(now)
+        val stamp = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC).format(now)
+        val key = "${policies.uploadPrefix()}${installationId()}/events/$date/$stamp-$id.json"
+        val dir = File(context.filesDir, "spool/events/$date").apply { mkdirs() }
+        val file = File(dir, "$id.json")
+        val envelope = JSONObject()
+            .put("schemaVersion", 1)
+            .put("id", id)
+            .put("device", installationId())
+            .put("seq", nextEventSeq())
+            .put("at", now.toString())
+            .put("type", "location.fix")
+            .put("payload", JSONObject()
+                .put("lat", fix.latitude)
+                .put("lon", fix.longitude)
+                .put("accuracyM", fix.accuracy)
+                .putOpt("speedMps", fix.speed)
+                .putOpt("bearingDeg", fix.bearing)
+                .put("mock", fix.isMock)
+                .put("activity", JSONObject()
+                    .put("type", activity?.activity?.label ?: "unknown")
+                    .put("confidence", activity?.confidence ?: 0)))
+        file.outputStream().use { it.write(envelope.toString().toByteArray()); it.fd.sync() }
+        db.manifest().insert(UploadItem(id, key, "event", file.absolutePath, "application/json", file.length(), md5(file), System.currentTimeMillis()))
+        // Fresh fix: start moving it now instead of waiting for the next trigger.
+        SyncScheduler.schedule(context)
+    }
+
+    /** Monotonic per-device event sequence, persisted across restarts. */
+    private fun nextEventSeq(): Long {
+        val prefs = context.getSharedPreferences("device-events", Context.MODE_PRIVATE)
+        val next = prefs.getLong("seq", 0L) + 1
+        prefs.edit().putLong("seq", next).apply()
+        return next
+    }
     suspend fun sealLocations() = withContext(Dispatchers.IO) {
         val fixes = db.locations().oldest(100); if (fixes.isEmpty()) return@withContext
         val (id, key, file) = newIdentity("location", "json")
