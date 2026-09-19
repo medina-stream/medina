@@ -5,6 +5,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.work.*
 import dev.exe.bucketcapture.CaptureApplication
+import dev.exe.bucketcapture.transcribe.ModelManager
+import dev.exe.bucketcapture.transcribe.TranscribeWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -37,7 +39,11 @@ object ForegroundSync {
         if (now - prefs.getLong("last_foreground_kick", 0L) < COOLDOWN_MS) return
         prefs.edit().putLong("last_foreground_kick", now).apply()
         // Seal fresh fixes on the way in; the pass below picks the batch up.
-        CoroutineScope(Dispatchers.IO).launch { runCatching { app.spool.sealLocations() } }
+        // Then kick best-effort on-device transcription of the latest segment.
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { app.spool.sealLocations() }
+            runCatching { kickTranscription(app) }
+        }
         val latestOnly = !isUnmetered(app)
         val request = OneTimeWorkRequestBuilder<UploadWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
@@ -52,5 +58,21 @@ object ForegroundSync {
             ?: return false
         val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
         return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    }
+
+    /**
+     * Best-effort local transcription: when the model is on device, transcribe
+     * the latest sealed segment (once per segment); otherwise fetch the model
+     * on unmetered wifi so a later foreground can transcribe.
+     */
+    private suspend fun kickTranscription(app: CaptureApplication) {
+        if (ModelManager.isPresent(app)) {
+            val latest = app.db.manifest().latestAudio() ?: return
+            if (!TranscribeWorker.isTranscribed(app, latest.id)) {
+                TranscribeWorker.schedule(app, latest.id)
+            }
+        } else if (isUnmetered(app)) {
+            ModelManager.scheduleDownload(app)
+        }
     }
 }

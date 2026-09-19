@@ -48,6 +48,9 @@ interface ManifestDao {
     suspend fun pending(limit: Int = 20): List<UploadItem>
     @Query("SELECT * FROM upload_items WHERE state = 'PENDING' ORDER BY createdAt")
     suspend fun pendingAll(): List<UploadItem>
+    @Query("SELECT * FROM upload_items WHERE id = :id LIMIT 1") suspend fun getById(id: String): UploadItem?
+    @Query("SELECT * FROM upload_items WHERE kind = 'audio' ORDER BY createdAt DESC LIMIT 1")
+    suspend fun latestAudio(): UploadItem?
     @Query("SELECT * FROM upload_items ORDER BY createdAt DESC") fun observeAll(): Flow<List<UploadItem>>
     @Query("SELECT COUNT(*) FROM upload_items WHERE state = 'PENDING'") fun pendingCount(): Flow<Int>
     @Query("SELECT COUNT(*) FROM upload_items WHERE localPath = :path") suspend fun countPath(path: String): Int
