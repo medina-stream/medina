@@ -54,6 +54,8 @@ interface ManifestDao {
     @Query("SELECT * FROM upload_items ORDER BY createdAt DESC") fun observeAll(): Flow<List<UploadItem>>
     @Query("SELECT COUNT(*) FROM upload_items WHERE state = 'PENDING'") fun pendingCount(): Flow<Int>
     @Query("SELECT COUNT(*) FROM upload_items WHERE localPath = :path") suspend fun countPath(path: String): Int
+    @Query("UPDATE upload_items SET state = 'PENDING', localPath = :path, byteCount = :bytes, contentMd5 = :md5, createdAt = :now, lastError = NULL, uploadedAt = NULL WHERE id = :id")
+    suspend fun refreshPayload(id: String, path: String, bytes: Long, md5: String, now: Long)
     @Query("UPDATE upload_items SET attemptCount = attemptCount + 1, lastError = :message WHERE id = :id")
     suspend fun failed(id: String, message: String)
     @Query("UPDATE upload_items SET state = 'UPLOADED', uploadedAt = :at, lastError = NULL WHERE id = :id AND state = 'PENDING'")

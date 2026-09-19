@@ -28,6 +28,7 @@ import {
   provenanceKey,
   transcriptKey
 } from "../lifelog/Resources.ts"
+import { promoteLiveTranscript } from "./LocalTranscripts.ts"
 
 const AUDIO_SOURCE_NAME = "audio-drive"
 
@@ -151,6 +152,10 @@ export const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
     dataPath(receiptKey),
     new IngestReceipt({ captureId, ingestedAt: new Date().toISOString() })
   )
+  // A live provisional for this segment (keyed by install + segment UUID in
+  // the object key) becomes the sealed capture's first-look now that the
+  // content-hash capture id is known. No-op for non-capture-bucket files.
+  yield* promoteLiveTranscript(file.id, captureId)
   return "ingested" as const
 })
 

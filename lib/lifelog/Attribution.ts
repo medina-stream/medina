@@ -46,7 +46,11 @@ export const transcribedCaptures = Effect.gen(function*() {
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue
     if (entry.endsWith(".assemblyai.json") || entry.endsWith(".jobs.json")) continue
-    // First-look on-device transcripts live beside the canonical ones.
+    // Live promotion markers are bookkeeping, not transcripts.
+    if (entry.endsWith(".promoted.json")) continue
+    // First-look on-device transcripts live beside the canonical ones, and
+    // live provisionals under live/<install>/<uuid>.json surface as
+    // synthetic live/<install>/<uuid> captures (handled in DayIndex).
     ids.add(entry.replace(/\.ondevice\.json$/, "").replace(/\.json$/, ""))
   }
   return [...ids]

@@ -29,6 +29,36 @@ class SpoolRepository(private val context: Context, private val db: CaptureDatab
         val key = "${policies.uploadPrefix()}${installationId()}/$kind/$date/$stamp-$id.$extension"
         return Triple(id, key, File(directory(kind, now), "$id.$extension"))
     }
+    /**
+     * Identity for a live (provisional) transcript: the object key is stable
+     * per segment (`<segmentUuid>.live.json`) so each 30s tick overwrites the
+     * previous partial instead of accumulating objects. The manifest row id
+     * is likewise stable per segment; see [upsertLiveTranscript].
+     */
+    fun newLiveTranscriptIdentity(segmentUuid: String, now: Instant = Instant.now()): Triple<String, String, File> {
+        val id = "live-$segmentUuid"
+        val date = DateTimeFormatter.ofPattern("yyyy/MM/dd").withZone(ZoneOffset.UTC).format(now)
+        val key = "${policies.uploadPrefix()}${installationId()}/transcript/$date/$segmentUuid.live.json"
+        return Triple(id, key, File(directory("transcript", now), "$id.json"))
+    }
+
+    /**
+     * Insert-or-refresh the live transcript row for a segment. Each tick
+     * replaces the payload and re-pends the row so the new text uploads;
+     * the stable id keeps one row per segment instead of one per tick.
+     */
+    suspend fun upsertLiveTranscript(id: String, key: String, file: File) = withContext(Dispatchers.IO) {
+        require(file.isFile && file.length() > 0) { "Payload is empty" }
+        val now = System.currentTimeMillis()
+        if (db.manifest().getById(id) == null) {
+            db.manifest().insert(UploadItem(id, key, "transcript", file.absolutePath, "application/json", file.length(), md5(file), now))
+        } else {
+            db.manifest().refreshPayload(id, file.absolutePath, file.length(), md5(file), now)
+        }
+        // Fresh partial: start moving it now instead of waiting for the next trigger.
+        SyncScheduler.schedule(context)
+    }
+
     suspend fun enqueue(id: String, key: String, kind: String, file: File, type: String) = withContext(Dispatchers.IO) {
         require(file.isFile && file.length() > 0) { "Payload is empty" }
         db.manifest().insert(UploadItem(id, key, kind, file.absolutePath, type, file.length(), md5(file), System.currentTimeMillis()))
@@ -79,7 +109,7 @@ class SpoolRepository(private val context: Context, private val db: CaptureDatab
         db.manifest().prune(System.currentTimeMillis() - 90L * 24 * 60 * 60 * 1000)
     }
     fun freeBytes() = StatFs(context.filesDir.absolutePath).availableBytes
-    private fun installationId(): String {
+    fun installationId(): String {
         val p = context.getSharedPreferences("identity", Context.MODE_PRIVATE)
         return p.getString("installation_id", null) ?: UUID.randomUUID().toString().also { p.edit().putString("installation_id", it).apply() }
     }

@@ -6,13 +6,20 @@ import dev.exe.bucketcapture.data.PolicyAudio
 import dev.exe.bucketcapture.data.SpoolRepository
 import kotlinx.coroutines.*
 import java.io.File
+import java.time.Instant
 
 class AudioCapture(private val spool: SpoolRepository, private val scope: CoroutineScope, private val onError: (String) -> Unit) {
     private var recorder: MediaRecorder? = null
     private var current: Pending? = null
     private var rollover: Job? = null
     private var config: PolicyAudio = PolicyAudio()
-    private data class Pending(val id: String, val key: String, val partial: File, val final: File)
+    private data class Pending(val id: String, val key: String, val partial: File, val final: File, val startedAtMs: Long)
+
+    /** The segment currently recording, if any. */
+    data class SegmentInfo(val id: String, val startedAtMs: Long)
+    val currentSegment: SegmentInfo? get() = current?.let { SegmentInfo(it.id, it.startedAtMs) }
+    /** Fired synchronously whenever a new segment starts (initial start and every rollover). */
+    var onSegmentStart: ((SegmentInfo) -> Unit)? = null
 
     companion object {
         /**
@@ -31,7 +38,8 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
     suspend fun restart(audio: PolicyAudio) { stop(); start(audio) }
     private fun startSegment() {
         if (spool.freeBytes() < 512L * 1024 * 1024) { onError("Audio stopped: less than 512 MiB free"); return }
-        val (id, key, final) = spool.newIdentity("audio", "m4a")
+        val nowMs = System.currentTimeMillis()
+        val (id, key, final) = spool.newIdentity("audio", "m4a", Instant.ofEpochMilli(nowMs))
         val partial = File(final.parentFile, "$id.recording")
         try {
             @Suppress("DEPRECATION") val r = MediaRecorder().apply {
@@ -41,7 +49,8 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
                 setAudioChannels(config.channels); setAudioSamplingRate(config.sampleRateHz); setAudioEncodingBitRate(config.bitrateBps)
                 setOutputFile(partial.absolutePath); prepare(); start()
             }
-            current = Pending(id, key, partial, final); recorder = r
+            current = Pending(id, key, partial, final, nowMs); recorder = r
+            onSegmentStart?.invoke(SegmentInfo(id, nowMs))
             val segmentMs = config.segmentSeconds * 1000L
             rollover = scope.launch { delay(millisToNextBoundary(System.currentTimeMillis(), segmentMs)); seal(); startSegment() }
         } catch (e: Exception) { recorder?.release(); recorder = null; onError("Audio start failed: ${e.message}") }

@@ -12,7 +12,7 @@ import { sha256 } from "../Hash.ts"
 import { type Corrections, correctionFor, currentAttribution, readCorrections, transcribedCaptures } from "./Attribution.ts"
 import { StartTimeRulesService } from "./StartTimeRules.ts"
 import { homeTimeZone } from "./Time.ts"
-import { dataPath, DayEntry, DayIndex, DAY_INDEX_VERSION, dayIndexKey, localTranscriptKey, Transcript, transcriptKey } from "./Resources.ts"
+import { dataPath, DayEntry, DayIndex, DAY_INDEX_VERSION, dayIndexKey, liveTranscriptKey, localTranscriptKey, parseLiveCaptureId, Transcript, transcriptKey } from "./Resources.ts"
 
 type AttributionEnv = FileSystem.FileSystem | StartTimeRulesService
 
@@ -26,8 +26,27 @@ type AttributionEnv = FileSystem.FileSystem | StartTimeRulesService
  * new correction stales it. The in-process memo makes repeated reads within
  * one process cheap; the file makes them cheap across restarts.
  */
-const dayIndexBasis = Effect.gen(function*() {
-  const captureIds = yield* transcribedCaptures
+/**
+ * A UTC instant as local wall-clock in the home zone, for live provisionals
+ * (which bypass attribution and its estimated-start-time machinery).
+ */
+const wallClockInZone = (isoUtc: string, zone: string): { day: string; startTime: string } => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: zone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(isoUtc))
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? ""
+  const day = `${get("year")}-${get("month")}-${get("day")}`
+  return { day, startTime: `${day}T${get("hour")}:${get("minute")}:${get("second")}` }
+}
+
+const dayIndexBasis = Effect.gen(function*() {  const captureIds = yield* transcribedCaptures
   const zone = yield* homeTimeZone
   const corrections = yield* readCorrections
   const pairs = captureIds.map((captureId) => ({
@@ -50,13 +69,33 @@ const buildDayIndex = Effect.fn("buildDayIndex")(
     zone: string
   ) {
     const days: Record<string, Array<DayEntry>> = {}
+    const usable = (t: Option.Option<Transcript>) =>
+      Option.isSome(t) && t.value.status === "completed" && !!t.value.text?.trim() ? t : null
     for (const { captureId, correctionHash } of pairs) {
+      // Live provisionals (in-progress segments) aren't captures yet: file
+      // them directly from the provisional transcript, keyed by segment UUID.
+      const live = parseLiveCaptureId(captureId)
+      if (live !== null) {
+        const liveKey = liveTranscriptKey(live.installId, live.segmentUuid)
+        const provisional = usable(yield* Files.readJson(Transcript, dataPath(liveKey)))
+        const capturedAt = provisional?.value.capturedAt
+        if (provisional === null || !capturedAt) continue
+        const { day, startTime } = wallClockInZone(capturedAt, zone)
+        const entry = new DayEntry({
+          captureId,
+          transcriptKey: liveKey,
+          startTime,
+          timeZone: zone,
+          channel: "audio",
+          correctionHash: null
+        })
+        days[day] = [...(days[day] ?? []), entry]
+        continue
+      }
       // The vendor transcript wins when it is usable; the on-device
       // first-look fills the gap before it lands (or when the vendor run
       // errored). The entry records which key was used, so a later canonical
       // transcript changes the journal's input hash and regenerates the day.
-      const usable = (t: Option.Option<Transcript>) =>
-        Option.isSome(t) && t.value.status === "completed" && !!t.value.text?.trim() ? t : null
       const canonical = usable(yield* Files.readJson(Transcript, dataPath(transcriptKey(captureId))))
       const firstLook = canonical === null
         ? usable(yield* Files.readJson(Transcript, dataPath(localTranscriptKey(captureId))))

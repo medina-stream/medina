@@ -63,6 +63,39 @@ export const transcriptKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERS
  * back to this so the journal can reflect recent events before the vendor
  * transcription lands. */
 export const localTranscriptKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.ondevice.json`
+/** Provisional live transcript for an in-progress segment, keyed by install
+ * id + segment UUID: the content hash (capture id) isn't known until the
+ * segment seals and its audio is ingested. The day index files these as
+ * synthetic `live/<install>/<uuid>` captures so the journal reflects speech
+ * within about a minute; audio ingest promotes the provisional to the
+ * sealed capture's first-look key. */
+export const liveTranscriptKey = (installId: string, segmentUuid: string) =>
+  `transcript/${TRANSCRIPT_VERSION}/live/${installId}/${segmentUuid}.json`
+/** Marker written when a live provisional is promoted, so a racing partial
+ * uploaded after the seal doesn't resurrect the provisional. */
+export const liveTranscriptPromotedKey = (installId: string, segmentUuid: string) =>
+  `transcript/${TRANSCRIPT_VERSION}/live/${installId}/${segmentUuid}.promoted.json`
+export const LIVE_CAPTURE_PREFIX = "live/"
+/** Parse a synthetic live capture id (`live/<install>/<uuid>`) from the day-index basis. */
+export const parseLiveCaptureId = (captureId: string): { installId: string; segmentUuid: string } | null => {
+  if (!captureId.startsWith(LIVE_CAPTURE_PREFIX)) return null
+  const rest = captureId.slice(LIVE_CAPTURE_PREFIX.length).split("/")
+  const [installId, segmentUuid] = rest
+  if (rest.length !== 2 || !installId || !segmentUuid) return null
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segmentUuid)) return null
+  return { installId, segmentUuid }
+}
+/** Parse a capture-bucket audio object key (`<prefix><install>/audio/YYYY/MM/DD/<utc>-<uuid>.m4a`) into install id + segment UUID. Null for anything else (Drive files, location JSON). */
+export const parseCaptureAudioKey = (objectKey: string): { installId: string; segmentUuid: string } | null => {
+  const parts = objectKey.split("/")
+  const audioIdx = parts.indexOf("audio")
+  if (audioIdx < 1) return null
+  const installId = parts[audioIdx - 1]
+  const file = parts[parts.length - 1] ?? ""
+  const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.m4a$/i.exec(file)
+  if (!installId || !m?.[1]) return null
+  return { installId, segmentUuid: m[1] }
+}
 export const vendorKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.assemblyai.json`
 export const transcriptSearchKey = (inputHash: string) => `search/${TRANSCRIPT_SEARCH_VERSION}/${inputHash}.sqlite`
 /** Completion marker for the resource; the SQLite file itself is published
