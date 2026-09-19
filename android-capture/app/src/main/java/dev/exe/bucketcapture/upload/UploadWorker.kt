@@ -25,7 +25,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val app = applicationContext as CaptureApplication
         val settings = app.policies.bucketSettings()
             ?: return@withContext Result.failure(workDataOf("error" to "No upload credentials: configure the policy URL"))
-        val latestOnly = params.inputData.getBoolean(SyncScheduler.KEY_LATEST_ONLY, false)
+        val latestOnly = inputData.getBoolean(SyncScheduler.KEY_LATEST_ONLY, false)
         val pending = app.db.manifest().pendingAll()
         val items = if (latestOnly) selectForegroundItems(pending) else pending
         for (item in items) {
