@@ -20,11 +20,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -45,6 +48,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 data class HealthSummary(val pending: Int, val uploaded: Int, val errorCount: Int, val lastError: String?)
@@ -76,6 +87,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var testing by mutableStateOf(false); private set
 
     val hostname: String? get() = hostOf(policyUrlField)
+
+    private val _syncing = MutableStateFlow<Set<String>>(emptySet())
+    /** Item ids the user asked to sync now that are still pending upload. */
+    val syncing: StateFlow<Set<String>> = _syncing
+
+    /** Kick an upload pass and track this item until it flips to uploaded (checkmark) or fails. */
+    fun syncNow(context: Context, item: UploadItem) {
+        if (item.state != UploadState.PENDING || item.id in _syncing.value) return
+        _syncing.value = _syncing.value + item.id
+        val attemptAt = item.attemptCount
+        SyncScheduler.schedule(context, explicit = true)
+        viewModelScope.launch {
+            withTimeoutOrNull(120_000) {
+                items.first { list ->
+                    val cur = list.find { it.id == item.id }
+                    cur == null || cur.state == UploadState.UPLOADED || cur.attemptCount > attemptAt
+                }
+            }
+            _syncing.value = _syncing.value - item.id
+        }
+    }
 
     init {
         prefs.registerOnSharedPreferenceChangeListener(prefListener)
@@ -206,7 +238,7 @@ class MainActivity : ComponentActivity() {
         val desired by vm.desired.collectAsStateWithLifecycle()
         val health by vm.health.collectAsStateWithLifecycle()
         val host = remember(vm.policyUrlField) { hostOf(vm.policyUrlField) }
-        var showSyncDialog by remember { mutableStateOf(false) }
+        var showSyncSheet by remember { mutableStateOf(false) }
 
         val (dot, headline, subline) = when (val s = vm.policyState) {
             PolicyState.NotConfigured ->
@@ -252,22 +284,7 @@ class MainActivity : ComponentActivity() {
                 StatusDot(dot)
                 Spacer(Modifier.height(20.dp))
                 headline?.let { Text(it, style = MaterialTheme.typography.headlineSmall) }
-                if (subline != null) {
-                    if (headline != null) Spacer(Modifier.height(4.dp))
-                    Text(subline, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (vm.policyState is PolicyState.Active) {
-                    Spacer(Modifier.height(12.dp))
-                    val inError = health.errorCount > 0
-                    Text(
-                        text = if (inError) "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"}" else "Nominal",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (inError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.clickable { showSyncDialog = true },
-                    )
-                }
-                if (showSyncDialog) SyncStateDialog(vm, onDismiss = { showSyncDialog = false })
-                Spacer(Modifier.height(24.dp))
+                if (headline != null) Spacer(Modifier.height(8.dp))
                 if (configured) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Switch(
@@ -293,9 +310,34 @@ class MainActivity : ComponentActivity() {
                             style = MaterialTheme.typography.titleMedium,
                         )
                     }
+                    Spacer(Modifier.height(8.dp))
                 } else {
                     Button(onClick = onOpenSettings) { Text("Open settings") }
+                    Spacer(Modifier.height(8.dp))
                 }
+                val statusText = when (val s = vm.policyState) {
+                    is PolicyState.Active ->
+                        if (s.staleError != null) "Running on saved settings" else "Connected"
+                    else -> subline
+                }
+                if (statusText != null) {
+                    HomeTapRow(
+                        label = "Status",
+                        value = statusText,
+                        valueColor = MaterialTheme.colorScheme.onSurface,
+                        onClick = { showSyncSheet = true },
+                    )
+                }
+                if (vm.policyState is PolicyState.Active) {
+                    val inError = health.errorCount > 0
+                    HomeTapRow(
+                        label = "Issues",
+                        value = if (inError) "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"}" else "Nominal",
+                        valueColor = if (inError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                        onClick = { showSyncSheet = true },
+                    )
+                }
+                if (showSyncSheet) SyncStateSheet(vm, onDismiss = { showSyncSheet = false })
                 Spacer(Modifier.weight(1f))
             }
         }
@@ -310,53 +352,117 @@ private fun middleEllipsize(s: String, maxChars: Int = 28): String {
     return s.take(head) + "…" + s.takeLast(keep - head)
 }
 
+/** A full-width tappable row on the home screen: small label, value, chevron. */
+@Composable
+private fun HomeTapRow(label: String, value: String, valueColor: Color, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(value, style = MaterialTheme.typography.bodyLarge, color = valueColor)
+        }
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** "Today 14:00–14:15": segment start comes from the UTC stamp in the object key;
+ * end is start + the 15-minute segment length. Falls back to createdAt. */
+private val KEY_STAMP = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
+private fun recordingRange(item: UploadItem): String {
+    val zone = ZoneId.systemDefault()
+    val end = runCatching {
+        val stamp = item.objectKey.substringAfterLast('/').substringBefore('-')
+        ZonedDateTime.of(LocalDateTime.parse(stamp, KEY_STAMP), ZoneOffset.UTC)
+            .withZoneSameInstant(zone)
+    }.getOrElse {
+        ZonedDateTime.ofInstant(Instant.ofEpochMilli(item.createdAt), zone)
+    }
+    val start = end.minusMinutes(15)
+    val day = when (start.toLocalDate()) {
+        LocalDate.now(zone) -> "Today"
+        LocalDate.now(zone).minusDays(1) -> "Yesterday"
+        else -> start.format(DateTimeFormatter.ofPattern("MMM d"))
+    }
+    val tf = DateTimeFormatter.ofPattern("HH:mm")
+    return "$day ${start.format(tf)}–${end.format(tf)}"
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_000_000 -> "%.1fMB".format(bytes / 1_000_000.0)
+    bytes >= 1_000 -> "%.0fKB".format(bytes / 1_000.0)
+    else -> "${bytes}B"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SyncStateDialog(vm: MainViewModel, onDismiss: () -> Unit) {
+private fun SyncStateSheet(vm: MainViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val health by vm.health.collectAsStateWithLifecycle()
     val items by vm.items.collectAsStateWithLifecycle()
+    val syncingIds by vm.syncing.collectAsStateWithLifecycle()
     val inError = health.errorCount > 0
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("Sync state") },
-        text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 32.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Sync state", style = MaterialTheme.typography.titleLarge)
+            Text(
+                text = if (inError) "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"}" else "Nominal",
+                style = MaterialTheme.typography.titleMedium,
+                color = if (inError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                "${health.pending} pending · ${health.uploaded} uploaded · ${health.errorCount} with errors",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            health.lastError?.let {
                 Text(
-                    text = if (inError) "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"}" else "Nominal",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = if (inError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    "Last error: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Text(
-                    "${health.pending} pending · ${health.uploaded} uploaded · ${health.errorCount} with errors",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                health.lastError?.let {
-                    Text(
-                        "Last error: $it",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                OutlinedButton(onClick = { SyncScheduler.schedule(context, true) }) { Text("Sync now") }
-                HorizontalDivider()
-                Text("Recent items", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                items.take(12).forEach { item ->
-                    ListItem(
-                        headlineContent = { Text("${item.kind} · ${item.state.name.lowercase()}") },
-                        supportingContent = {
-                            Text(
-                                item.objectKey + " · attempts: ${item.attemptCount}" + (item.lastError?.let { "\n$it" } ?: ""),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        },
-                    )
-                }
             }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-    )
+            OutlinedButton(onClick = { SyncScheduler.schedule(context, true) }) { Text("Sync now") }
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            Text("Recordings", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+            items.filter { it.kind == "audio" }.take(15).forEach { item ->
+                ListItem(
+                    headlineContent = { Text(recordingRange(item)) },
+                    supportingContent = { Text(formatBytes(item.byteCount)) },
+                    trailingContent = {
+                        when {
+                            item.state == UploadState.UPLOADED -> Icon(
+                                Icons.Filled.Check,
+                                contentDescription = "Synced",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            item.id in syncingIds -> CircularProgressIndicator(
+                                Modifier.size(24.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            else -> TextButton(onClick = { vm.syncNow(context, item) }) {
+                                Text("Sync now")
+                            }
+                        }
+                    },
+                )
+            }
+        }
+    }
 }
