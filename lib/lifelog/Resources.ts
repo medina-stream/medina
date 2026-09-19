@@ -58,6 +58,11 @@ export class Note extends Schema.Class<Note>("Note")({
 }) {}
 
 export const transcriptKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.json`
+/** First-look transcript produced on the capture device (whisper.cpp). The
+ * canonical transcriptKey still wins when it exists; the day index falls
+ * back to this so the journal can reflect recent events before the vendor
+ * transcription lands. */
+export const localTranscriptKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.ondevice.json`
 export const vendorKey = (ingestId: string) => `transcript/${TRANSCRIPT_VERSION}/${ingestId}.assemblyai.json`
 export const transcriptSearchKey = (inputHash: string) => `search/${TRANSCRIPT_SEARCH_VERSION}/${inputHash}.sqlite`
 /** Completion marker for the resource; the SQLite file itself is published
@@ -104,7 +109,7 @@ export class Utterance extends Schema.Class<Utterance>("Utterance")({
 }) {}
 
 export class Transcript extends Schema.Class<Transcript>("Transcript")({
-  provider: Schema.Literal("assemblyai"),
+  provider: Schema.Literals(["assemblyai", "ondevice"]),
   version: Schema.String,
   ingestId: Schema.String,
   inputKey: Schema.String,

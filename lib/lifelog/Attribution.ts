@@ -42,13 +42,14 @@ import {
 export const transcribedCaptures = Effect.gen(function*() {
   const prefix = `transcript/${TRANSCRIPT_VERSION}`
   const entries = yield* Files.listFiles(dataPath(prefix))
-  return entries
-    .filter((entry) =>
-      entry.endsWith(".json") &&
-      !entry.endsWith(".assemblyai.json") &&
-      !entry.endsWith(".jobs.json")
-    )
-    .map((entry) => entry.replace(/\.json$/, ""))
+  const ids = new Set<string>()
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) continue
+    if (entry.endsWith(".assemblyai.json") || entry.endsWith(".jobs.json")) continue
+    // First-look on-device transcripts live beside the canonical ones.
+    ids.add(entry.replace(/\.ondevice\.json$/, "").replace(/\.json$/, ""))
+  }
+  return [...ids]
 })
 
 /** Every correction that exists, by capture id, with the hash of its exact

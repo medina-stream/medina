@@ -46,7 +46,7 @@ import type { Source } from "../lib/Resource.ts"
 import { MedinaAuth, MEDINA_SCOPE } from "../lib/lifelog/Auth.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, devicesPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
-import { archiveSweepSource, audioSource, captureBucketSource, driveAllowlistSource, driveInventorySource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { archiveSweepSource, audioSource, captureBucketSource, driveAllowlistSource, driveInventorySource, localTranscriptSource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 import { CapturePolicyStore, decodePolicy } from "../lib/capture/CapturePolicy.ts"
@@ -761,6 +761,21 @@ const Ingest = Layer.effectDiscard(
           : undefined,
         disabledReason: enabled.has("bucket")
           ? "BUCKET_NAME and BUCKET_ENDPOINT are required"
+          : "disabled by MEDINA_SOURCES"
+      },
+      {
+        // The capture app's on-device first-look transcripts: tiny JSON next
+        // to the audio. Ingest-only, like the capture bucket source.
+        name: "local-transcripts",
+        source: enabled.has("capture") && sourceBucket.configured
+          ? localTranscriptSource(
+              sourceBucket,
+              sourceBucketPrefix,
+              Number.isFinite(sourceBucketLimit) ? sourceBucketLimit : 25
+            )
+          : undefined,
+        disabledReason: enabled.has("capture")
+          ? "SOURCE_BUCKET_NAME and SOURCE_BUCKET_ENDPOINT are required"
           : "disabled by MEDINA_SOURCES"
       },
       {

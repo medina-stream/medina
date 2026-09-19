@@ -38,7 +38,11 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : CoroutineWo
             val pcm = withContext(Dispatchers.IO) { AacDecoder.decode(file) }
             if (pcm.isEmpty()) return@withContext Result.failure(workDataOf("error" to "Decoded audio empty"))
             val result = engine.transcribe(pcm)
-            withContext(Dispatchers.IO) { spoolTranscript(app, item, result) }
+            // The capture id is the sha256 of the audio bytes -- the same
+            // content identity the server ingest derives -- so the pipeline
+            // can file this transcript without downloading the audio.
+            val captureId = withContext(Dispatchers.IO) { sha256(file) }
+            withContext(Dispatchers.IO) { spoolTranscript(app, item, result, captureId) }
             markTranscribed(app, audioId)
             // Fresh transcript: move it now under the same rules as other payloads.
             dev.exe.bucketcapture.upload.SyncScheduler.schedule(app)
@@ -52,6 +56,7 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : CoroutineWo
         app: CaptureApplication,
         audio: dev.exe.bucketcapture.data.UploadItem,
         result: WhisperEngine.Result,
+        captureId: String,
     ) {
         val (id, key, file) = app.spool.newIdentity("transcript", "json")
         val segments = JSONArray()
@@ -60,6 +65,7 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : CoroutineWo
         }
         val payload = JSONObject()
             .put("schemaVersion", 1)
+            .put("captureId", captureId)
             .put("audioId", audio.id)
             .put("audioKey", audio.objectKey)
             .put("capturedAt", Instant.ofEpochMilli(audio.createdAt).toString())
@@ -94,6 +100,20 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : CoroutineWo
                 .build()
             WorkManager.getInstance(context)
                 .enqueueUniqueWork(UNIQUE_PREFIX + audioId, ExistingWorkPolicy.KEEP, request)
+        }
+
+        /** Hex sha256 of a file's bytes. */
+        fun sha256(file: File): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
         }
     }
 }

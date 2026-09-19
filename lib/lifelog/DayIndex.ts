@@ -12,7 +12,7 @@ import { sha256 } from "../Hash.ts"
 import { type Corrections, correctionFor, currentAttribution, readCorrections, transcribedCaptures } from "./Attribution.ts"
 import { StartTimeRulesService } from "./StartTimeRules.ts"
 import { homeTimeZone } from "./Time.ts"
-import { dataPath, DayEntry, DayIndex, DAY_INDEX_VERSION, dayIndexKey, Transcript, transcriptKey } from "./Resources.ts"
+import { dataPath, DayEntry, DayIndex, DAY_INDEX_VERSION, dayIndexKey, localTranscriptKey, Transcript, transcriptKey } from "./Resources.ts"
 
 type AttributionEnv = FileSystem.FileSystem | StartTimeRulesService
 
@@ -51,14 +51,24 @@ const buildDayIndex = Effect.fn("buildDayIndex")(
   ) {
     const days: Record<string, Array<DayEntry>> = {}
     for (const { captureId, correctionHash } of pairs) {
-      const transcript = yield* Files.readJson(Transcript, dataPath(transcriptKey(captureId)))
-      if (Option.isNone(transcript)) continue
-      if (transcript.value.status !== "completed" || !transcript.value.text?.trim()) continue
+      // The vendor transcript wins when it is usable; the on-device
+      // first-look fills the gap before it lands (or when the vendor run
+      // errored). The entry records which key was used, so a later canonical
+      // transcript changes the journal's input hash and regenerates the day.
+      const usable = (t: Option.Option<Transcript>) =>
+        Option.isSome(t) && t.value.status === "completed" && !!t.value.text?.trim() ? t : null
+      const canonical = usable(yield* Files.readJson(Transcript, dataPath(transcriptKey(captureId))))
+      const firstLook = canonical === null
+        ? usable(yield* Files.readJson(Transcript, dataPath(localTranscriptKey(captureId))))
+        : null
+      const transcript = canonical ?? firstLook
+      if (transcript === null) continue
+      const key = canonical !== null ? transcriptKey(captureId) : localTranscriptKey(captureId)
       const { attribution } = yield* currentAttribution(captureId, corrections, zone)
       if (!attribution.day || !attribution.estimatedStartTime || !attribution.timeZone) continue
       const entry = new DayEntry({
         captureId,
-        transcriptKey: transcriptKey(captureId),
+        transcriptKey: key,
         startTime: attribution.estimatedStartTime,
         timeZone: attribution.timeZone,
         channel: attribution.channel,
