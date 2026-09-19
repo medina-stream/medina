@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.StatFs
 import android.util.Base64
 import androidx.room.withTransaction
+import dev.exe.bucketcapture.upload.SyncScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -31,6 +32,8 @@ class SpoolRepository(private val context: Context, private val db: CaptureDatab
     suspend fun enqueue(id: String, key: String, kind: String, file: File, type: String) = withContext(Dispatchers.IO) {
         require(file.isFile && file.length() > 0) { "Payload is empty" }
         db.manifest().insert(UploadItem(id, key, kind, file.absolutePath, type, file.length(), md5(file), System.currentTimeMillis()))
+        // Fresh payload: start moving it now instead of waiting for the next trigger.
+        SyncScheduler.schedule(context)
     }
     suspend fun addFix(fix: LocationFix) { db.locations().insert(fix); if (db.locations().count() >= 100) sealLocations() }
     suspend fun sealLocations() = withContext(Dispatchers.IO) {
@@ -46,6 +49,7 @@ class SpoolRepository(private val context: Context, private val db: CaptureDatab
         check(temp.renameTo(file)) { "Could not finalize location batch" }
         val item = UploadItem(id, key, "location", file.absolutePath, "application/json", file.length(), md5(file), System.currentTimeMillis())
         db.withTransaction { db.manifest().insert(item); db.locations().delete(fixes.map { it.id }) }
+        SyncScheduler.schedule(context)
     }
     suspend fun recover() = withContext(Dispatchers.IO) {
         val root = File(context.filesDir, "spool")

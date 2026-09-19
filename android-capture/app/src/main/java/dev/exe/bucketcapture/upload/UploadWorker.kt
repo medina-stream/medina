@@ -6,17 +6,29 @@ import androidx.work.*
 import dev.exe.bucketcapture.CaptureApplication
 import dev.exe.bucketcapture.capture.CaptureService
 import dev.exe.bucketcapture.data.PolicyFetchResult
+import dev.exe.bucketcapture.data.UploadItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
+
+/** Foreground sync on a metered connection: every pending location batch and
+ * transcript (tiny), plus only the newest audio segment. Pure for testing. */
+fun selectForegroundItems(pending: List<UploadItem>): List<UploadItem> {
+    val small = pending.filter { it.kind == "location" || it.kind == "transcript" }
+    val latestAudio = pending.filter { it.kind == "audio" }.maxByOrNull { it.createdAt }
+    return small + listOfNotNull(latestAudio)
+}
 
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val app = applicationContext as CaptureApplication
         val settings = app.policies.bucketSettings()
             ?: return@withContext Result.failure(workDataOf("error" to "No upload credentials: configure the policy URL"))
-        for (item in app.db.manifest().pending()) {
+        val latestOnly = params.inputData.getBoolean(SyncScheduler.KEY_LATEST_ONLY, false)
+        val pending = app.db.manifest().pendingAll()
+        val items = if (latestOnly) selectForegroundItems(pending) else pending
+        for (item in items) {
             val file = File(item.localPath)
             if (!file.isFile || file.length() != item.byteCount) {
                 app.db.manifest().failed(item.id, "Local payload missing or size changed")
@@ -71,6 +83,7 @@ class PolicyWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 object SyncScheduler {
     private const val UNIQUE = "bucket-upload"
     private const val POLICY_UNIQUE = "capture-policy"
+    const val KEY_LATEST_ONLY = "latestOnly"
     fun schedule(context: Context, explicit: Boolean = false) {
         val app = context.applicationContext as CaptureApplication
         val settings = app.policies.bucketSettings()
