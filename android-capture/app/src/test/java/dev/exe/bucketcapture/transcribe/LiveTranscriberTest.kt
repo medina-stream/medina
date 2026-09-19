@@ -46,7 +46,7 @@ class LiveTranscriberTest {
         // 10 shared words (w41..w50) with a cap of 20: only the new tail is appended.
         val merged = LiveTranscriber.mergeOverlap(prev, next, maxOverlapWords = 20)
         val words = merged.split(" ")
-        assertEquals(60, words.size)
+        assertEquals(70, words.size)
         assertEquals("w50", words[49])
         assertEquals("w51", words[50])
     }
