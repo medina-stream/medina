@@ -114,9 +114,14 @@ const STYLE = `
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   /* The account button floats over the list's top-right corner. The list
-     gets matching top padding so the first row's badge never sits under it. */
+     gets matching top padding so the first row's badge never sits under it.
+     The events button sits just left of it: live activity, one tap away. */
   .accountbutton {
     position: fixed; top: .6rem; right: max(.6rem, calc((100vw - 46rem) / 2));
+    z-index: 2; background: var(--bg); border-color: var(--rule-soft);
+  }
+  .eventsbutton {
+    position: fixed; top: .6rem; right: calc(max(.6rem, calc((100vw - 46rem) / 2)) + var(--tap) + .35rem);
     z-index: 2; background: var(--bg); border-color: var(--rule-soft);
   }
   .iconbutton {
@@ -150,6 +155,8 @@ const STYLE = `
   .live-list li { margin: .2rem 0; }
   .event-time { color: var(--muted); margin-right: .4rem; }
   .event-failing { color: var(--bad); }
+  /* The events sheet is the dedicated live view, so its list gets the room. */
+  .events-list { max-height: 70vh; }
 
   /* Modals. A native dialog gives focus trapping and Esc for free. */
   .modal {
@@ -388,10 +395,16 @@ export const spaHome = () =>
       </header>
       {/* The account button shares the top line with the instance name. */}
       <button type="button" id="account-open" class="iconbutton accountbutton" aria-label="Account and status" aria-haspopup="dialog">
-        <span class="status-dot" id="account-dot"></span>
+        <span className="status-dot" id="account-dot"></span>
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
           <circle cx="12" cy="8" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7" />
           <path d="M4.5 20c0-4.1 3.4-6.4 7.5-6.4s7.5 2.3 7.5 6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+        </svg>
+      </button>
+      {/* Live activity: opens the events sheet. */}
+      <button type="button" id="events-open" class="iconbutton eventsbutton" aria-label="Live events" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+          <path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </button>
       <main id="app">
@@ -416,6 +429,18 @@ export const spaHome = () =>
           </div>
           <h3>Live events</h3>
           <ol id="live-event-list" class="live-list"><li class="empty">Waiting for events…</li></ol>
+        </div>
+      </dialog>
+
+      {/* Events: the live activity sheet. Newest first; filtering and
+          interaction come later. Fed by the same stream as Account's feed. */}
+      <dialog id="events-modal" class="modal" aria-labelledby="events-title">
+        <div class="modal-head">
+          <h2 id="events-title">Events</h2>
+          <button type="button" class="iconbutton" data-close-modal aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body">
+          <ol id="events-list" class="live-list events-list"><li class="empty">Waiting for events…</li></ol>
         </div>
       </dialog>
 

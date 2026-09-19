@@ -889,6 +889,26 @@ const program = Effect.gen(function*() {
   let liveSeenError = false
 
   /**
+   * One line in the events sheet: newest first, capped. Same one-line
+   * summary as the account feed, prepended instead of appended.
+   */
+  const showEventsSheet = (event: RuntimeEvent) => {
+    const list = document.getElementById("events-list")
+    if (list === null) return
+    if (list.children.length === 1 && list.firstElementChild?.classList.contains("empty")) {
+      list.innerHTML = ""
+    }
+    const item = document.createElement("li")
+    if (event.status === "failing" || event.status === "degraded") item.className = "event-failing"
+    const time = Number.isNaN(Date.parse(event.at))
+      ? "now"
+      : new Date(event.at).toLocaleTimeString()
+    item.innerHTML = `<span class="event-time">${escapeHtml(time)}</span>${escapeHtml(event.message)}`
+    list.prepend(item)
+    while (list.children.length > 100) list.lastElementChild?.remove()
+  }
+
+  /**
    * One line in the live feed. `event` is a decoded `RuntimeEvent`, so the
    * fields are known to exist and known to be strings -- no duck-typing.
    */
@@ -922,6 +942,7 @@ const program = Effect.gen(function*() {
     Stream.runForEach(client.StreamEvents({}), (event) =>
       Effect.sync(() => {
         showLiveEvent(event)
+        showEventsSheet(event)
         if (event.day !== null) handleDayEvent(event.day)
       })).pipe(
         Effect.andThen(Effect.fail(new Error("event stream ended"))),
@@ -1152,6 +1173,9 @@ const program = Effect.gen(function*() {
     openModal("account-modal")
     // Refresh on open: the 30s poll may have left it a little stale.
     Effect.runFork(refreshStatus)
+  })
+  document.getElementById("events-open")?.addEventListener("click", () => {
+    openModal("events-modal")
   })
 
   // Registered before the first route load, which awaits an RPC: a row
