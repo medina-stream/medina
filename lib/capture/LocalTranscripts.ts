@@ -83,7 +83,7 @@ export const parsePhoneTranscript = (raw: unknown): PhoneTranscript | null => {
   }
 }
 
-const ingestLocalTranscript = (
+export const ingestLocalTranscript = (
   api: SourceBucketApi,
   item: LocalTranscriptObject
 ): Effect.Effect<"ingested" | "cached" | "skipped", Error, FileSystem.FileSystem> =>
