@@ -34,6 +34,7 @@ const STYLE = `
     --bg: #fdfdfc;
     --surface: #f5f3ef;
     --accent: #2f6f4f;
+    --tl-fill: #2f6fb2;
     --bad: #b93f3f;
     --warn: #b07d1a;
     /* Tap targets: 44px is the accessibility floor on touch. */
@@ -43,6 +44,7 @@ const STYLE = `
     :root {
       --ink: #ececec; --muted: #9a9a9a; --rule: #3a3a3a; --rule-soft: #2c2c2c;
       --bg: #151515; --surface: #1e1e1e; --accent: #6fbf8f; --bad: #e07070; --warn: #d6a94a;
+      --tl-fill: #6aa5e0;
     }
   }
   * { box-sizing: border-box; }
@@ -223,6 +225,14 @@ const STYLE = `
   }
   .vrow-inner p { margin: 0; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .vrow-inner p.preview { color: var(--ink); }
+  /* Per-day coverage timeline: a full-width 24h line, blue where audio was
+     ingested, with quiet inactive ticks at 6am, noon, and 6pm. */
+  .vrow-timeline {
+    position: relative; height: 8px; margin-top: .55rem;
+    border-radius: 999px; background: var(--rule-soft);
+  }
+  .tl-seg { position: absolute; top: 0; bottom: 0; border-radius: 999px; background: var(--tl-fill); }
+  .tl-tick { position: absolute; top: -2px; height: 12px; width: 1px; background: var(--muted); opacity: .45; }
 
   /* Search lives above either primary main view: the days list or a result
      set. The route swaps only the content below this header. */

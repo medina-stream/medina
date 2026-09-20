@@ -733,7 +733,7 @@ const program = Effect.gen(function*() {
     for (const row of sourceRows) {
       if (row.day <= today) byDay.set(row.day, row)
     }
-    const current = byDay.get(today) ?? { day: today, stale: false, preview: "", audioSeconds: 0, summary: "" }
+    const current = byDay.get(today) ?? { day: today, stale: false, preview: "", audioSeconds: 0, coverage: [], summary: "" }
     rows = [current, ...Array.from(byDay.values())
       .filter((row) => row.day < today)
       .sort((left, right) => right.day.localeCompare(left.day))]
@@ -769,6 +769,23 @@ const program = Effect.gen(function*() {
    * journal yet. It becomes the server's row automatically as soon as a
    * ListDays response includes it.
    */
+  /**
+   * The per-row 24h coverage timeline: a full-width line, blue where audio
+   * was ingested, with quiet ticks at 6am, noon, and 6pm. Pure markup —
+   * `coverage` is merged, sorted [startMin, endMin) minute-pairs.
+   */
+  const timelineHtml = (coverage: ReadonlyArray<readonly [number, number]>): string => {
+    const segs = coverage.map(([start, end]) =>
+      `<span class="tl-seg" style="left:${(start / 14.4).toFixed(2)}%;width:${((end - start) / 14.4).toFixed(2)}%"></span>`
+    ).join("")
+    return `<div class="vrow-timeline" aria-hidden="true">` +
+      `<span class="tl-tick" style="left:25%"></span>` +
+      `<span class="tl-tick" style="left:50%"></span>` +
+      `<span class="tl-tick" style="left:75%"></span>` +
+      segs +
+      `</div>`
+  }
+
   const rowHtml = (row: DayRow): string => {
     const audio = audioLabel(row.audioSeconds)
     return `<span class="vrow-title">` +
@@ -779,7 +796,8 @@ const program = Effect.gen(function*() {
       `</span>` +
       (row.preview
         ? `<p class="preview">${escapeHtml(row.preview)}</p>`
-        : `<p class="empty">Nothing recorded.</p>`)
+        : `<p class="empty">Nothing recorded.</p>`) +
+      timelineHtml(row.coverage)
   }
 
   /** Append the next server page, unless one is already in flight. Failures

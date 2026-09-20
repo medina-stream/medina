@@ -60,8 +60,8 @@ describe("journals RPC contract", () => {
 
   test("ListDays rows survive a JSON round-trip, limit/offset intact", () => {
     const rows = [
-      new DayRow({ day: "2026-09-02", stale: false, preview: "A full day.", audioSeconds: 15_600, summary: "A full day.\n\n9:00–10:30 — Home: slow morning." }),
-      new DayRow({ day: "2026-09-01", stale: true, preview: "", audioSeconds: 0, summary: "" })
+      new DayRow({ day: "2026-09-02", stale: false, preview: "A full day.", audioSeconds: 15_600, coverage: [[360, 720], [780, 1080]], summary: "A full day.\n\n9:00–10:30 — Home: slow morning." }),
+      new DayRow({ day: "2026-09-01", stale: true, preview: "", audioSeconds: 0, coverage: [], summary: "" })
     ]
     const json = JSON.parse(JSON.stringify(Schema.encodeSync(ListDays.successSchema)(rows)))
     expect(Schema.decodeUnknownSync(ListDays.successSchema)(json)).toEqual(rows)

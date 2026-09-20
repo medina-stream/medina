@@ -16,7 +16,7 @@ import { pipelineRuntime, RUN_REPORT_KEY, RunReport } from "../Pipeline.ts"
 import { currentDayIndex } from "./DayIndex.ts"
 import { journalResource } from "./Journal.ts"
 import { DayRow, ListDays } from "./JournalApi.ts"
-import { dataPath, Journal, JOURNAL_VERSION, Transcript } from "./Resources.ts"
+import { dataPath, DayEntry, Journal, JOURNAL_VERSION, Transcript } from "./Resources.ts"
 
 const JOURNAL_PREFIX = `journal/${JOURNAL_VERSION}`
 
@@ -94,13 +94,14 @@ export const previewText = (report: string): string => {
 }
 
 /** One virtual-table row: the day, its freshness, its preview, how
- * much audio the day has, and the full report so the detail view opens
- * without a second request. */
+ * much audio the day has, the day-local coverage behind the 24h timeline,
+ * and the full report so the detail view opens without a second request. */
 export interface DayPreview {
   readonly day: string
   readonly stale: boolean
   readonly preview: string
   readonly audioSeconds: number
+  readonly coverage: ReadonlyArray<readonly [number, number]>
   readonly summary: string
 }
 
@@ -119,11 +120,78 @@ const audioSecondsFor = (transcripts: ReadonlyArray<Transcript>) =>
   }, 0)
 
 /**
+ * Minutes since local midnight for a day-index entry's start, in the
+ * entry's own zone. Regular captures store a UTC instant; live
+ * provisionals store an already-local wall clock. Pure — safe to test.
+ */
+export const startMinutesInZone = (startTime: string, timeZone: string): number => {
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(startTime)) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(new Date(startTime))
+    const get = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? 0)
+    return get("hour") * 60 + get("minute") + get("second") / 60
+  }
+  const match = startTime.match(/T(\d{2}):(\d{2})(?::(\d{2}))?/)
+  if (!match) return 0
+  return Number(match[1]) * 60 + Number(match[2]) + Number(match[3] ?? 0) / 60
+}
+
+/**
+ * Merge day-local coverage segments: sort, then fold overlaps and
+ * near-adjacent stretches (clock-aligned 15-minute captures touch at the
+ * boundary, with a little slack for drift). Pure — safe to test.
+ */
+export const mergeCoverage = (
+  segments: ReadonlyArray<readonly [number, number]>
+): Array<[number, number]> => {
+  const merged: Array<[number, number]> = []
+  for (const [start, end] of [...segments].sort((a, b) => a[0] - b[0])) {
+    const last = merged[merged.length - 1]
+    if (last !== undefined && start <= last[1] + 2) {
+      last[1] = Math.max(last[1], end)
+    } else {
+      merged.push([start, end])
+    }
+  }
+  return merged
+}
+
+/**
+ * Day-local audio coverage for one day's index entries: each entry's
+ * attributed start (in its own zone) plus the transcript's recorded
+ * duration, clamped to the day and merged. Same duration rule as
+ * `audioSecondsFor` — the last utterance's end — so the timeline and the
+ * audio label always agree.
+ */
+const coverageForDay = (entries: ReadonlyArray<DayEntry>) =>
+  Effect.forEach(
+    entries,
+    (entry) =>
+      Effect.map(Files.readJson(Transcript, dataPath(entry.transcriptKey)), (transcript) => {
+        if (Option.isNone(transcript)) return null
+        const endMs = transcript.value.utterances.reduce((max, utterance) => Math.max(max, utterance.endMs), 0)
+        if (endMs <= 0) return null
+        const start = startMinutesInZone(entry.startTime, entry.timeZone)
+        const end = Math.min(1440, start + endMs / 60000)
+        return end > start ? ([Math.round(start), Math.round(end)] as [number, number]) : null
+      }),
+    { concurrency: 8 }
+  ).pipe(
+    Effect.map((segments) => mergeCoverage(segments.flatMap((segment) => segment === null ? [] : [segment])))
+  )
+
+/**
  * The days to render, newest first, with previews. Selection reuses
  * `currentJournals`, so rows agree with the full views exactly.
  */
 const currentDayPreviews = Effect.gen(function*() {
   const views: ReadonlyArray<JournalView> = yield* currentJournals
+  const index = yield* currentDayIndex
   // Transcript reads are concurrent and happen inside the previews memo, so
   // this costs one pass per refresh rather than one per request.
   return yield* Effect.forEach(views, (view) =>
@@ -140,7 +208,8 @@ const currentDayPreviews = Effect.gen(function*() {
         summary: view.journal.report,
         audioSeconds: Math.round(audioSecondsFor(
           transcripts.flatMap((transcript) => Option.isSome(transcript) ? [transcript.value] : [])
-        ))
+        )),
+        coverage: yield* coverageForDay(index.days[view.journal.day] ?? [])
       } satisfies DayPreview
     }), { concurrency: 4 })
 }).pipe(Effect.withSpan("views.dayPreviews"))
@@ -167,7 +236,7 @@ const previewsMemo: PreviewsMemo = { value: null, expiresAt: 0, refreshing: fals
  * Versioned in the name: the file is schema-decoded, so adding a field
  * makes older snapshots fail to decode and recompute. Bumping the name
  * keeps that from looking like a read error and leaves the old file inert. */
-const PREVIEWS_SNAPSHOT = dataPath("views/days-v4.json")
+const PREVIEWS_SNAPSHOT = dataPath("views/days-v5.json")
 
 const storePreviews = (value: ReadonlyArray<DayPreview>, now: number) => {
   previewsMemo.value = value
@@ -210,6 +279,7 @@ const readSnapshot: Effect.Effect<ReadonlyArray<DayPreview> | null, never, FileS
               stale: row.stale,
               preview: row.preview,
               audioSeconds: row.audioSeconds,
+              coverage: row.coverage,
               summary: row.summary
             }))
         )

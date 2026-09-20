@@ -29,6 +29,13 @@ export class JournalEntry extends Schema.Class<JournalEntry>("JournalEntry")({
 }) {}
 
 /**
+ * One [startMin, endMin) pair, in minutes since local midnight, marking a
+ * stretch of the day with ingested audio behind it.
+ */
+export const CoverageSegment = Schema.Tuple([Schema.Number, Schema.Number])
+export type CoverageSegment = typeof CoverageSegment.Type
+
+/**
  * One row of the days table: identity, freshness, a truncated report
  * preview, and the full report. The preview is what the table shows, so
  * scrolling needs no per-day requests; the full report rides along so the
@@ -42,6 +49,9 @@ export class DayRow extends Schema.Class<DayRow>("DayRow")({
   preview: Schema.String,
   /** Seconds of recorded audio behind this day's journal. */
   audioSeconds: Schema.Number,
+  /** Day-local audio coverage driving the per-row 24h timeline: merged,
+   * sorted [startMin, endMin) minute-pairs since local midnight. */
+  coverage: Schema.Array(CoverageSegment),
   /** The full generated report for the day, as the detail view renders it. */
   summary: Schema.String
 }) {}
