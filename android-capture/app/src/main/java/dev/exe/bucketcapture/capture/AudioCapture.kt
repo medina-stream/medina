@@ -18,6 +18,12 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
     /** The segment currently recording, if any. */
     data class SegmentInfo(val id: String, val startedAtMs: Long)
     val currentSegment: SegmentInfo? get() = current?.let { SegmentInfo(it.id, it.startedAtMs) }
+
+    /**
+     * Peak mic amplitude (0..32767) since the last call, or 0 when not
+     * recording. Read-only: safe to poll from the UI for a live level meter.
+     */
+    fun currentAmplitude(): Int = runCatching { recorder?.maxAmplitude ?: 0 }.getOrDefault(0)
     /** Fired synchronously whenever a new segment starts (initial start and every rollover). */
     var onSegmentStart: ((SegmentInfo) -> Unit)? = null
 

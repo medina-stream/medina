@@ -15,6 +15,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -27,8 +28,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.startForegroundService
@@ -42,9 +47,12 @@ import dev.exe.bucketcapture.data.UploadItem
 import dev.exe.bucketcapture.data.UploadState
 import dev.exe.bucketcapture.ui.DotState
 import dev.exe.bucketcapture.ui.StatusDot
+import dev.exe.bucketcapture.ui.lastSyncedText
+import dev.exe.bucketcapture.ui.normalizeAmplitude
 import dev.exe.bucketcapture.ui.theme.BucketCaptureTheme
 import dev.exe.bucketcapture.upload.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -72,6 +80,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             lastError = errored.maxByOrNull { it.createdAt }?.lastError,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HealthSummary(0, 0, 0, null))
+
+    /** Newest bucket-confirmed upload across all spooled items; drives "Last synced …". */
+    val lastSyncedAt: StateFlow<Long?> = items.map { list -> list.mapNotNull { it.uploadedAt }.maxOrNull() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     private val prefs = app.getSharedPreferences("capture", Context.MODE_PRIVATE)
     private val _desired = MutableStateFlow(prefs.getBoolean("desired", false))
@@ -315,6 +327,7 @@ class MainActivity : ComponentActivity() {
                     Button(onClick = onOpenSettings) { Text("Open settings") }
                     Spacer(Modifier.height(8.dp))
                 }
+                LiveCaptureBlock()
                 val statusText = when (val s = vm.policyState) {
                     is PolicyState.Active ->
                         if (s.staleError != null) "Running on saved settings" else "Connected"
@@ -334,6 +347,15 @@ class MainActivity : ComponentActivity() {
                         label = "Issues",
                         value = if (inError) "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"}" else "Nominal",
                         valueColor = if (inError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                        onClick = { showSyncSheet = true },
+                    )
+                    val lastSyncedAt by vm.lastSyncedAt.collectAsStateWithLifecycle()
+                    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+                    LaunchedEffect(Unit) { while (true) { delay(30_000); nowMs = System.currentTimeMillis() } }
+                    HomeTapRow(
+                        label = "Last synced",
+                        value = lastSyncedText(nowMs, lastSyncedAt),
+                        valueColor = MaterialTheme.colorScheme.onSurface,
                         onClick = { showSyncSheet = true },
                     )
                 }
@@ -463,6 +485,88 @@ private fun SyncStateSheet(vm: MainViewModel, onDismiss: () -> Unit) {
                     },
                 )
             }
+        }
+    }
+}
+
+private const val WAVEFORM_BARS = 28
+private const val WAVEFORM_POLL_MS = 200L
+
+/**
+ * Live "it's capturing right now" feedback. If the on-device live
+ * transcriber is actually producing text, the latest line wins; otherwise
+ * a real level meter driven by the recorder's peak amplitude. Renders
+ * nothing when the service isn't recording — never placeholder data.
+ */
+@Composable
+private fun LiveCaptureBlock() {
+    var capturing by remember { mutableStateOf(false) }
+    var levels by remember { mutableStateOf(listOf<Float>()) }
+    var liveLine by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        var lastActiveMs = 0L
+        while (true) {
+            val audio = CaptureTelemetry.audio
+            val now = System.currentTimeMillis()
+            if (audio?.currentSegment != null) {
+                lastActiveMs = now
+                levels = (levels + normalizeAmplitude(audio.currentAmplitude())).takeLast(WAVEFORM_BARS)
+            }
+            capturing = now - lastActiveMs < 2_000
+            if (!capturing && levels.isNotEmpty()) levels = emptyList()
+            liveLine = CaptureTelemetry.liveTranscriptLine
+            delay(WAVEFORM_POLL_MS)
+        }
+    }
+    if (!capturing && liveLine.isBlank()) return
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+        if (liveLine.isNotBlank()) {
+            Text(
+                "Hearing now",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                liveLine,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        } else {
+            Text(
+                "Capturing now",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            WaveformStrip(levels)
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+/** Scrolling peak-history strip; newest bar on the right. A 2dp baseline
+ * tick shows the meter is alive even in silence. */
+@Composable
+private fun WaveformStrip(levels: List<Float>) {
+    val color = MaterialTheme.colorScheme.primary
+    Canvas(Modifier.fillMaxWidth().height(44.dp)) {
+        val n = WAVEFORM_BARS
+        val gap = 3.dp.toPx()
+        val barW = (size.width - gap * (n - 1)) / n
+        val visible = levels.takeLast(n)
+        val offset = n - visible.size
+        for (i in 0 until n) {
+            val level = visible.getOrNull(i - offset) ?: 0f
+            val baseline = 2.dp.toPx()
+            val h = (baseline + level * (size.height - baseline)).coerceAtMost(size.height)
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(i * (barW + gap), size.height - h),
+                size = Size(barW, h),
+                cornerRadius = CornerRadius(barW / 2, barW / 2),
+            )
         }
     }
 }

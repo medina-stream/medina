@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import dev.exe.bucketcapture.CaptureTelemetry
 import dev.exe.bucketcapture.data.SpoolRepository
 import kotlinx.coroutines.*
 import org.json.JSONArray
@@ -61,6 +62,7 @@ class LiveTranscriber(
             lastUploadedText = null
             updateSeq = 0
         }
+        CaptureTelemetry.liveTranscriptLine = ""
         synchronized(ringLock) { ringStart = 0; ringCount = 0; totalSamples = 0 }
     }
 
@@ -106,6 +108,7 @@ class LiveTranscriber(
             lastUploadedText = null
             updateSeq = 0
         }
+        CaptureTelemetry.liveTranscriptLine = ""
         synchronized(ringLock) { ringStart = 0; ringCount = 0; totalSamples = 0 }
     }
 
@@ -155,6 +158,7 @@ class LiveTranscriber(
                 }
             }
             accumulatedText = merged
+            CaptureTelemetry.liveTranscriptLine = merged
             updateSeq += 1
             seq = updateSeq
             segments = accumulatedSegments.toList()
