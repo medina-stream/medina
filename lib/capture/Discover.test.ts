@@ -30,8 +30,8 @@ const object = (key: string, etag: string): BucketObject => ({
 })
 
 // The stub returns the whole listing regardless of limit, like the real
-// bucket layer (which pages the full prefix, sorts oldest-first, then
-// slices): the oldest objects come first.
+// bucket layer (which pages the full prefix, sorts newest-first, then
+// slices): the newest objects come first.
 const stubApi = (objects: ReadonlyArray<BucketObject>): SourceBucketApi =>
   ({
     configured: true,
@@ -94,6 +94,15 @@ describe("discoverFresh", () => {
     const objects = [object("p-a.m4a", "etag-pa"), object("p-b.m4a", "etag-pb"), object("p-c.m4a", "etag-pc")]
     const fresh = await discover(objects, 2)
     expect(fresh.map((o) => o.key)).toEqual(["p-a.m4a", "p-b.m4a"])
+  })
+
+  test("takes the newest unreceipted objects first (ingest priority)", async () => {
+    // The bucket layer lists newest-first; discovery takes from the front,
+    // so newer captures win the per-pass window while older ones wait.
+    const objects = [object("new.m4a", "etag-new"), object("mid.m4a", "etag-mid"), object("old.m4a", "etag-old")]
+    await writeReceipt(SOURCE, "new.m4a", "etag-new")
+    const fresh = await discover(objects, 1)
+    expect(fresh.map((o) => o.key)).toEqual(["mid.m4a"])
   })
 
   test("drops items that fail the ingestable predicate", async () => {

@@ -2,9 +2,14 @@
  * Discovery for the bucket-backed ingest sources (capture audio, device
  * events, on-device transcripts).
  *
- * Every pass lists the whole source-bucket prefix (oldest-first, as the
+ * Every pass lists the whole source-bucket prefix (newest-first, as the
  * bucket layer sorts), drops whatever already has an ingest receipt, and
- * takes the per-pass work bound off the front.
+ * takes the per-pass work bound off the front. Ingest priority is newest
+ * data first: newer captures are almost always more valuable. This is safe
+ * against the 2026-09-18 starvation mode -- that stall came from slicing a
+ * fixed window off the top of the listing *before* filtering receipted
+ * objects. With the receipt filter first, the window always advances past
+ * receipted objects, so newest-first ordering can't strand older ones.
  *
  * Why the receipt filter lives here: the ingest loop is receipt-guarded and
  * idempotent, so a pass only ever needs the next *un-ingested* objects. A
@@ -40,7 +45,7 @@ export const discoverFresh = <T>(
 ): Effect.Effect<ReadonlyArray<T>, Error, FileSystem.FileSystem> =>
   Effect.gen(function*() {
     if (limit <= 0) return []
-    // The bucket layer pages the whole prefix and sorts oldest-first
+    // The bucket layer pages the whole prefix and sorts newest-first
     // regardless of limit, so ask for everything: the receipt filter needs
     // to see the full backlog, and the slice below is the per-pass bound.
     const items = toObjects(yield* api.list(prefix, Number.MAX_SAFE_INTEGER))

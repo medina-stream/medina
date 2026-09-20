@@ -146,11 +146,12 @@ const s3ReadApi = (
         continuationToken = response.NextContinuationToken
       } while (continuationToken !== undefined)
       return objects
-        // Oldest-first: ingest is receipt-guarded and idempotent, so each
-        // pass takes the next un-ingested objects and a backlog always
-        // drains. Newest-first would starve everything past the limit
-        // window once the newest objects are ingested.
-        .sort((a, b) => (a.lastModified ?? "").localeCompare(b.lastModified ?? ""))
+        // Newest-first: ingest priority is newest data first -- newer
+        // captures are almost always more valuable. This can't starve older
+        // objects the way the old fixed-window sort did: discovery filters
+        // receipted objects before the per-pass slice, so the window always
+        // advances and a backlog always drains.
+        .sort((a, b) => (b.lastModified ?? "").localeCompare(a.lastModified ?? ""))
         .slice(0, limit)
     },
     catch: asError
