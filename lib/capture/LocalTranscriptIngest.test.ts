@@ -66,9 +66,13 @@ describe("local transcript ingest", () => {
     expect(stored.value.utterances[0]?.endMs).toBe(4200)
     expect(stored.value.inputKey).toBe("install-1/audio/2026/09/19/x.m4a")
 
+    // Receipted objects are filtered at discovery (the 2026-09-18 stall
+    // fix): the second pass discovers nothing instead of re-discovering the
+    // receipted transcript as cached.
     const second = await run(source.ingest)
+    expect(second.discovered).toBe(0)
     expect(second.ingested).toBe(0)
-    expect(second.cached).toBe(1)
+    expect(second.cached).toBe(0)
   })
 
   test("skips (with receipt) a transcript that fails validation", async () => {

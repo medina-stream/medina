@@ -12,11 +12,11 @@
  * validation probe objects under `probe/`, location JSON -- is skipped
  * before any download.
  */
-import * as Effect from "effect/Effect"
 import type * as FileSystem from "effect/FileSystem"
 import type { BucketObject, SourceBucketApi } from "../Bucket.ts"
 import type { Source } from "../Resource.ts"
 import { recordingObjectSource, type RecordingObject } from "./Audio.ts"
+import { discoverFresh } from "./Discover.ts"
 
 export const CAPTURE_BUCKET_SOURCE_NAME = "capture-bucket"
 
@@ -55,6 +55,16 @@ export const captureBucketSource = (
 ): Source<FileSystem.FileSystem> =>
   recordingObjectSource(
     CAPTURE_BUCKET_SOURCE_NAME,
-    api.list(prefix, limit).pipe(Effect.map(captureBucketObjects)),
+    discoverFresh(
+      api,
+      CAPTURE_BUCKET_SOURCE_NAME,
+      prefix,
+      limit,
+      captureBucketObjects,
+      (file) => ({ key: file.id, version: file.checksum ?? file.modifiedTime }),
+      // Non-audio keys are skipped at ingest without a receipt, so they
+      // would occupy the window forever: drop them at discovery instead.
+      (file) => file.mimeType.startsWith("audio/")
+    ),
     (file) => api.download(file.id)
   )

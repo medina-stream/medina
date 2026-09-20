@@ -69,8 +69,11 @@ describe("device event ingest", () => {
     expect(latest.eventSeq).toBe(42)
     expect(latest.at).toBe("2026-09-19T00:30:00.000Z")
 
+    // Receipted objects are filtered at discovery (the 2026-09-18 stall
+    // fix), so the second pass finds nothing new instead of re-discovering
+    // the receipted event as cached.
     const second = await run(source.ingest)
-    expect(second.discovered).toBe(1)
+    expect(second.discovered).toBe(0)
     expect(second.ingested).toBe(0)
   })
 

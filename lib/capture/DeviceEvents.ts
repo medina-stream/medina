@@ -21,6 +21,7 @@ import * as Files from "../Files.ts"
 import type { BucketObject, SourceBucketApi } from "../Bucket.ts"
 import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
+import { discoverFresh } from "./Discover.ts"
 import { dataPath, IngestReceipt, ingestReceiptKey } from "../lifelog/Resources.ts"
 
 export const DEVICE_EVENTS_SOURCE_NAME = "device-events"
@@ -194,7 +195,14 @@ export const deviceEventsSource = (
 ): Source<FileSystem.FileSystem> =>
   makeItemSource({
     name: DEVICE_EVENTS_SOURCE_NAME,
-    discover: api.list(prefix, limit).pipe(Effect.map(deviceEventObjects)),
+    discover: discoverFresh(
+      api,
+      DEVICE_EVENTS_SOURCE_NAME,
+      prefix,
+      limit,
+      deviceEventObjects,
+      (item) => item
+    ),
     ingest: (item) => ingestDeviceEvent(api, item),
     label: (item) => item.key,
     concurrency: "unbounded"

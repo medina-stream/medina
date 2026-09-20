@@ -20,6 +20,7 @@ import * as Files from "../Files.ts"
 import type { BucketObject, SourceBucketApi } from "../Bucket.ts"
 import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
+import { discoverFresh } from "./Discover.ts"
 import {
   dataPath,
   IngestReceipt,
@@ -278,7 +279,14 @@ export const localTranscriptSource = (
 ): Source<FileSystem.FileSystem> =>
   makeItemSource({
     name: LOCAL_TRANSCRIPT_SOURCE_NAME,
-    discover: api.list(prefix, limit).pipe(Effect.map(transcriptObjects)),
+    discover: discoverFresh(
+      api,
+      LOCAL_TRANSCRIPT_SOURCE_NAME,
+      prefix,
+      limit,
+      transcriptObjects,
+      (item) => item
+    ),
     ingest: (item) => ingestLocalTranscript(api, item),
     label: (item) => item.key,
     concurrency: "unbounded"
