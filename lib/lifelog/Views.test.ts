@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mergeCoverage, PREVIEW_CHARS, previewText, startMinutesInZone } from "./Views.ts"
+import { dayMinutesInZone, mergeCoverage, PREVIEW_CHARS, previewText, startMinutesInZone } from "./Views.ts"
 
 describe("previewText", () => {
   test("short reports pass through untouched", () => {
@@ -59,5 +59,26 @@ describe("mergeCoverage", () => {
 
   test("empty input stays empty", () => {
     expect(mergeCoverage([])).toEqual([])
+  })
+
+  test("sub-five-second rollover gaps render as continuous", () => {
+    // A 4-second gap between consecutive captures merges into one span.
+    expect(mergeCoverage([[0, 15], [15 + 4 / 60, 30]])).toEqual([[0, 30]])
+  })
+})
+
+describe("dayMinutesInZone", () => {
+  test("UTC instant maps to local day and minutes", () => {
+    expect(dayMinutesInZone("2026-09-16T07:00:00Z", "America/Los_Angeles")).toEqual({
+      day: "2026-09-16",
+      minutes: 0
+    })
+  })
+
+  test("local day differs from UTC date near midnight", () => {
+    expect(dayMinutesInZone("2026-09-16T06:30:00Z", "America/Los_Angeles")).toEqual({
+      day: "2026-09-15",
+      minutes: 23 * 60 + 30
+    })
   })
 })
