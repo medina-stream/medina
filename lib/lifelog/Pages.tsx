@@ -184,6 +184,13 @@ const STYLE = `
   mark.day-match.current { outline: 2px solid var(--accent); outline-offset: 1px; }
   .modal-body { padding: 1rem 1.1rem 1.5rem; overflow-y: auto; max-height: calc(85vh - 4rem); }
   .modal-body h3 { margin-top: 1.25rem; }
+    .day-map-wrap { margin: 0 0 1rem; }
+    .day-map { height: 300px; border-radius: 12px; overflow: hidden; background: #e2e8f0; }
+    .place-chip {
+      display: inline-block; margin-left: 0.5rem; padding: 0.1rem 0.55rem;
+      font-size: 0.72rem; font-weight: 600; line-height: 1.5; border-radius: 999px;
+      background: #eef2ff; color: #3730a3; vertical-align: middle; white-space: nowrap;
+    }
   @media (max-width: 34rem) {
     /* Full-bleed sheet on a phone: more room, and a familiar shape. */
     .modal {

@@ -23,6 +23,7 @@ import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
 import { discoverFresh } from "./Discover.ts"
 import { dataPath, IngestReceipt, ingestReceiptKey } from "../lifelog/Resources.ts"
+import { gpsInboxWrite } from "../lifelog/Gps.ts"
 
 export const DEVICE_EVENTS_SOURCE_NAME = "device-events"
 
@@ -176,6 +177,29 @@ const routeEvent = (event: DeviceEvent): Effect.Effect<void, Error, FileSystem.F
           updatedAt: new Date().toISOString()
         }
         yield* Files.writeJson(dataPath(latestLocationKey(event.device)), latest)
+        // Day path: the same fix feeds the GPS inbox, which the hourly
+        // gps-compact folds into day partitions. gpsDay() unions inbox and
+        // partitions, so the fix is on the day path within about a minute.
+        // Mock fixes were rejected above; coordinates were validated by
+        // parseLocationFixPayload.
+        yield* gpsInboxWrite([{
+          source: `capture/${event.device}`,
+          ts: new Date(event.at),
+          lat: fix.lat,
+          lon: fix.lon,
+          speed: fix.speedMps,
+          alt: null,
+          acc: fix.accuracyM,
+          batt: null,
+          raw: JSON.stringify({
+            id: event.id,
+            device: event.device,
+            seq: event.seq,
+            at: event.at,
+            type: event.type,
+            payload: event.payload
+          })
+        }])
         return
       }
       default:

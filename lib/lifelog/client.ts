@@ -1109,6 +1109,158 @@ const program = Effect.gen(function*() {
    * without refetching. Closing rewrites the hash, which is what makes the
    * back button close the modal rather than leave the page.
    */
+  // --- day path: map + per-span place labels -------------------------------
+  // The day's GPS path, drawn with Mapbox GL at the top of the day view,
+  // plus a named-place chip on each `## HH:MM–HH:MM` chunk whose fixes sit
+  // mostly inside a known place. Both degrade silently: no token or no
+  // fixes means no map, unmatched spans stay unlabeled.
+  interface DayGpsFix {
+    readonly ts: string
+    readonly lat: number
+    readonly lon: number
+  }
+
+  const MAPBOX_GL_VERSION = "3.15.0"
+
+  const fetchJson = <T>(url: string): Promise<T> =>
+    fetch(url, { headers: { accept: "application/json" } }).then((response) => {
+      if (!response.ok) throw new Error(`${url}: ${response.status}`)
+      return response.json() as Promise<T>
+    })
+
+  let mapboxGlLoading: Promise<void> | null = null
+  const loadMapboxGl = (): Promise<void> => {
+    if ((window as unknown as { mapboxgl?: unknown }).mapboxgl) return Promise.resolve()
+    if (mapboxGlLoading) return mapboxGlLoading
+    mapboxGlLoading = new Promise<void>((resolve, reject) => {
+      const css = document.createElement("link")
+      css.rel = "stylesheet"
+      css.href = `https://api.mapbox.com/mapbox-gl-js/v${MAPBOX_GL_VERSION}/mapbox-gl.css`
+      document.head.appendChild(css)
+      const script = document.createElement("script")
+      script.src = `https://api.mapbox.com/mapbox-gl-js/v${MAPBOX_GL_VERSION}/mapbox-gl.js`
+      script.onload = () => resolve()
+      script.onerror = () => reject(new Error("mapbox gl failed to load"))
+      document.head.appendChild(script)
+    })
+    return mapboxGlLoading
+  }
+
+  const renderDayPathMap = (container: HTMLElement, fixes: ReadonlyArray<DayGpsFix>, token: string): void => {
+    const mapboxgl = (window as unknown as { mapboxgl: any }).mapboxgl
+    mapboxgl.accessToken = token
+    const coords = fixes.map((fix) => [fix.lon, fix.lat])
+    const bounds = new mapboxgl.LngLatBounds()
+    for (const coord of coords) bounds.extend(coord)
+    const map = new mapboxgl.Map({
+      container,
+      style: "mapbox://styles/mapbox/streets-v12",
+      bounds,
+      fitBoundsOptions: { padding: 36 },
+      projection: "mercator",
+      attributionControl: { compact: true }
+    })
+    map.on("load", () => {
+      map.addSource("day-path", {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          properties: {},
+          geometry: { type: "LineString", coordinates: coords }
+        }
+      })
+      map.addLayer({
+        id: "day-path-line",
+        type: "line",
+        source: "day-path",
+        paint: { "line-color": "#1d4ed8", "line-width": 4, "line-opacity": 0.85 }
+      })
+      const first = coords[0]!
+      const last = coords[coords.length - 1]!
+      new mapboxgl.Marker({ color: "#16a34a" }).setLngLat(first).addTo(map)
+      if (coords.length > 1) new mapboxgl.Marker({ color: "#dc2626" }).setLngLat(last).addTo(map)
+      map.fitBounds(bounds, { padding: 36 })
+    })
+    container.closest("dialog")?.addEventListener("close", () => map.remove(), { once: true })
+  }
+
+  const haversineMeters = (aLat: number, aLon: number, bLat: number, bLon: number): number => {
+    const rad = (deg: number) => (deg * Math.PI) / 180
+    const dLat = rad(bLat - aLat)
+    const dLon = rad(bLon - aLon)
+    const h = Math.sin(dLat / 2) ** 2 +
+      Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLon / 2) ** 2
+    return 2 * 6_371_000 * Math.asin(Math.sqrt(h))
+  }
+
+  /**
+   * Fetch the day's path, the Mapbox token, and the named places, then —
+   * if the user is still on this day — mount the path map at the top of
+   * the day view and chip each chunk heading with its majority place.
+   */
+  const enrichDayWithLocation = (day: string, body: HTMLElement): Effect.Effect<void> =>
+    Effect.gen(function*() {
+      const gps = yield* Effect.tryPromise(
+        () => fetchJson<{ fixes: Array<DayGpsFix> }>(`/api/days/${encodeURIComponent(day)}/gps`)
+      ).pipe(Effect.orElseSucceed(() => ({ fixes: [] as Array<DayGpsFix> })))
+      const tokenRes = yield* Effect.tryPromise(
+        () => fetchJson<{ token: string | null }>("/api/map-token")
+      ).pipe(Effect.orElseSucceed(() => ({ token: null as string | null })))
+      const places = yield* client.ListPlaces({}).pipe(
+        Effect.orElseSucceed(() => [] as ReadonlyArray<Place>)
+      )
+      if (routeDay(location.hash) !== day) return
+      // Map first: it goes at the top of the view.
+      if (tokenRes.token && gps.fixes.length > 0) {
+        const section = document.createElement("section")
+        section.className = "day-map-wrap"
+        section.innerHTML = `<div class="day-map" role="img" aria-label="Map of the day's path"></div>`
+        body.prepend(section)
+        const container = section.firstElementChild as HTMLElement
+        yield* Effect.tryPromise(() => loadMapboxGl()).pipe(
+          Effect.flatMap(() => Effect.sync(() => {
+            if (routeDay(location.hash) === day && container.isConnected) {
+              renderDayPathMap(container, gps.fixes, tokenRes.token!)
+            }
+          })),
+          Effect.orElseSucceed(() => { section.remove() })
+        )
+      }
+      // Per-span place chips.
+      if (gps.fixes.length === 0 || places.length === 0) return
+      const headings = Array.from(body.querySelectorAll("h3"))
+      const starts = headings.map((heading) => {
+        const button = heading.querySelector("button.transcript-jump[data-jump-clock]")
+        const clock = button?.getAttribute("data-jump-clock")
+        const match = clock ? /^(\d{1,2}):(\d{2})$/.exec(clock) : null
+        return match ? Number(match[1]) * 60 + Number(match[2]) : null
+      })
+      headings.forEach((heading, index) => {
+        const startMin = starts[index]
+        if (startMin === null || startMin === undefined) return
+        const endMin = starts.slice(index + 1).find((m): m is number => m !== null && m !== undefined) ?? 24 * 60
+        const inWindow = gps.fixes.filter((fix) => {
+          const date = new Date(fix.ts)
+          const minute = date.getHours() * 60 + date.getMinutes()
+          return minute >= startMin && minute < endMin
+        })
+        if (inWindow.length < 2) return
+        let best: { name: string; count: number } | null = null
+        for (const place of places) {
+          const count = inWindow.filter((fix) =>
+            haversineMeters(fix.lat, fix.lon, place.lat, place.lon) <= place.radiusMeters
+          ).length
+          if (count >= 2 && count / inWindow.length >= 0.5 && (!best || count > best.count)) {
+            best = { name: place.name, count }
+          }
+        }
+        if (best && !heading.querySelector(".place-chip")) {
+          const anchor = heading.querySelector("button.transcript-jump")
+          if (anchor) anchor.insertAdjacentHTML("afterend", ` <span class="place-chip">${escapeHtml(best.name)}</span>`)
+        }
+      })
+    })
+
   const showDay = (day: string): Effect.Effect<void, ApiError | RpcClientError> =>
     Effect.gen(function*() {
       if (table === null) showTable()
@@ -1141,6 +1293,7 @@ const program = Effect.gen(function*() {
         body.innerHTML = renderDay(report, transcripts)
         wireTranscriptJumps(body)
         wireDaySearch(body, daySearchQuery(location.hash))
+        yield* enrichDayWithLocation(day, body)
         if (journal === null) {
           const route = location.hash
           yield* Effect.sleep("10 seconds").pipe(
@@ -1158,6 +1311,7 @@ const program = Effect.gen(function*() {
       body.innerHTML = renderDay(embedded, transcripts)
       wireTranscriptJumps(body)
       wireDaySearch(body, daySearchQuery(location.hash))
+      yield* enrichDayWithLocation(day, body)
     })
 
   const loadRoute = (): Effect.Effect<void> =>

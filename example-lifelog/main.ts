@@ -34,6 +34,7 @@ import { TelemetryLive } from "../lib/runtime/Telemetry.ts"
 import { refreshDayPreviews } from "../lib/lifelog/Views.ts"
 import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
 import { gpsCompactSource, gpsDay, gpsInboxWrite, locationSummary, parseGpsBody } from "../lib/lifelog/Gps.ts"
+import { gpsLocalDay } from "../lib/lifelog/GpsPath.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
 import * as Bucket from "../lib/Bucket.ts"
 import * as R2TempCreds from "../lib/R2TempCreds.ts"
@@ -615,6 +616,36 @@ one-line download above is the zero-install form.
           headers: { "cache-control": cacheControl }
         })
       })
+    )
+    // Day path for the journal view: the local day's fixes, ordered, so
+    // the day-summary map draws the path without knowing about UTC
+    // partitions. Same store as /gps/:day; the merge lives in GpsPath.
+    yield* router.add(
+      "GET",
+      "/api/days/:day/gps",
+      Effect.gen(function*() {
+        const day = parseDayId((yield* HttpRouter.params).day ?? "")
+        if (day === null) {
+          return HttpServerResponse.text("not a day: use 020260907 or 2026-09-07", { status: 400 })
+        }
+        const fixes = yield* Effect.orDie(gpsLocalDay(day))
+        const today = yield* todayDay
+        const cacheControl = day < today ? "private, max-age=3600" : "private, max-age=60"
+        return HttpServerResponse.jsonUnsafe({ day, count: fixes.length, fixes }, {
+          headers: { "cache-control": cacheControl }
+        })
+      })
+    )
+    // The Mapbox token for the day-path map, served to the gated UI.
+    // Null when MAPBOX_TOKEN is unset; the UI skips the map instead of
+    // breaking. Never cached: a fresh token takes effect immediately.
+    yield* router.add(
+      "GET",
+      "/api/map-token",
+      Effect.succeed(HttpServerResponse.jsonUnsafe(
+        { token: process.env.MAPBOX_TOKEN ?? null },
+        { headers: { "cache-control": "no-store" } }
+      ))
     )
     yield* router.add(
       "GET",
