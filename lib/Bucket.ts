@@ -90,7 +90,7 @@ const readS3Connection = (
   Effect.gen(function*() {
     const optional = (name: string) =>
       Effect.map(
-        Config.option(Config.string(`${prefix}_${name}`)),
+        Config.option(Config.String(`${prefix}_${name}`)),
         (value) => Option.getOrNull(value)?.trim() || null
       )
     // Keyless is a real configuration: an edge-signing endpoint (e.g. an
@@ -105,7 +105,7 @@ const readS3Connection = (
       accessKeyId: (yield* optional("ACCESS_KEY_ID")) ?? "edge-injected",
       secretAccessKey: (yield* optional("SECRET_ACCESS_KEY")) ?? "edge-injected",
       region: (yield* optional("REGION")) ?? regionDefault,
-      forcePathStyle: yield* Config.boolean(`${prefix}_FORCE_PATH_STYLE`).pipe(Config.withDefault(true))
+      forcePathStyle: yield* Config.Boolean(`${prefix}_FORCE_PATH_STYLE`).pipe(Config.withDefault(true))
     }
   })
 

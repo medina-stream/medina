@@ -13,7 +13,7 @@
 import * as Effect from "effect/Effect"
 import * as Option from "effect/Option"
 import * as Stream from "effect/Stream"
-import type * as Headers from "effect/unstable/http/Headers"
+import type * as Headers from "effect/http/Headers"
 import { dayEvent, eventHub } from "../RuntimeEvents.ts"
 import { dayHub, publishDay } from "./DayEvents.ts"
 import { journalCachedForDay } from "./Journal.ts"

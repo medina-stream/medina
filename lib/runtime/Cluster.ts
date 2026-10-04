@@ -21,8 +21,8 @@ import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
-import * as SingleRunner from "effect/unstable/cluster/SingleRunner"
-import * as ClusterWorkflowEngine from "effect/unstable/cluster/ClusterWorkflowEngine"
+import * as SingleRunner from "effect/cluster/SingleRunner"
+import * as ClusterWorkflowEngine from "effect/cluster/ClusterWorkflowEngine"
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient"
 import * as PgClient from "@effect/sql-pg/PgClient"
 import * as ExeWirePg from "../ExeWirePg.ts"
@@ -44,13 +44,13 @@ import { dirname } from "node:path"
  * the prerequisite for multi-runner sharding.
  */
 const SqlLive = Layer.unwrap(Effect.gen(function*() {
-  const url = yield* Config.option(Config.string("CLUSTER_DATABASE_URL"))
+  const url = yield* Config.option(Config.String("CLUSTER_DATABASE_URL"))
   if (url._tag === "Some" && url.value.trim() !== "") {
     const sslOff = (process.env.CLUSTER_PG_SSL ?? "").toLowerCase()
     const ssl = sslOff === "false" || sslOff === "disable" || sslOff === "0" ? undefined : true
     return PgClient.layer({ url: Redacted.make(url.value.trim()), ...(ssl === undefined ? {} : { ssl }) })
   }
-  const wireHost = yield* Config.option(Config.string("CLUSTER_PG_WIRE_HOST"))
+  const wireHost = yield* Config.option(Config.String("CLUSTER_PG_WIRE_HOST"))
   if (wireHost._tag === "Some" && wireHost.value.trim() !== "") {
     const wirePort = Number(process.env.CLUSTER_PG_WIRE_PORT ?? "5432")
     return ExeWirePg.layer({ host: wireHost.value.trim(), port: wirePort })

@@ -10,20 +10,20 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
-import * as HttpRouter from "effect/unstable/http/HttpRouter"
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest"
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
+import * as HttpRouter from "effect/http/HttpRouter"
+import * as HttpServerRequest from "effect/http/HttpServerRequest"
+import * as HttpServerResponse from "effect/http/HttpServerResponse"
 import * as OpenAiClient from "@effect/ai-openai/OpenAiClient"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
-import type * as LanguageModel from "effect/unstable/ai/LanguageModel"
-import type { WorkflowEngine } from "effect/unstable/workflow/WorkflowEngine"
+import type * as LanguageModel from "effect/ai/LanguageModel"
+import type { WorkflowEngine } from "effect/workflow/WorkflowEngine"
 import { ClusterLive, WorkflowEngineLive } from "../lib/runtime/Cluster.ts"
 import { JournalWorkflowLayer, NotesWorkflowLayer } from "./Lifelog.ts"
 import * as Redacted from "effect/Redacted"
 import * as Option from "effect/Option"
 import * as FileSystem from "effect/FileSystem"
-import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
-import * as RpcServer from "effect/unstable/rpc/RpcServer"
+import * as RpcSerialization from "effect/rpc/RpcSerialization"
+import * as RpcServer from "effect/rpc/RpcServer"
 import { JournalsGroup } from "../lib/lifelog/JournalApi.ts"
 import { parseDayId } from "../lib/lifelog/DayLabels.ts"
 import { StartTimeRulesService } from "../lib/lifelog/StartTimeRules.ts"
@@ -105,7 +105,7 @@ const writeAccess = Effect.gen(function*() {
     const delegated = auth.authorize(delegatedToken)
     if (delegated) return { login: `delegation:${delegated.clientName}`, allowed: true, reason: "", status: 200 as const }
   }
-  const owner = (Option.getOrNull(yield* Config.option(Config.string("INGEST_OWNER"))) ?? "").trim()
+  const owner = (Option.getOrNull(yield* Config.option(Config.String("INGEST_OWNER"))) ?? "").trim()
   if (!owner) {
     return {
       login: null,
@@ -136,7 +136,7 @@ const canWrite = (headers: Record<string, string | undefined>) =>
   Effect.gen(function*() {
     const delegatedToken = bearerToken(headers)
     if (delegatedToken && auth.authorize(delegatedToken)) return { allowed: true, reason: "" }
-    const owner = (Option.getOrNull(yield* Config.option(Config.string("INGEST_OWNER"))) ?? "").trim()
+    const owner = (Option.getOrNull(yield* Config.option(Config.String("INGEST_OWNER"))) ?? "").trim()
     if (!owner) {
       yield* Effect.log("write refused: INGEST_OWNER is not configured, so no one may write")
       return {
@@ -724,7 +724,7 @@ const Ingest = Layer.effectDiscard(
     )
     const folderId = process.env.GDRIVE_FOLDER_ID?.trim()
     const tokenUrl = process.env.GOOGLE_TOKEN_URL?.trim()
-    const latest = yield* Config.int("SOURCE_LATEST").pipe(Config.withDefault(25))
+    const latest = yield* Config.Int("SOURCE_LATEST").pipe(Config.withDefault(25))
     const notesDir = process.env.NOTES_REPO_DIR?.trim()
     const notesUrl = process.env.NOTES_REPO_URL?.trim()
     const notesRef = process.env.NOTES_REPO_REF?.trim() || "HEAD"
@@ -923,11 +923,11 @@ const DaySync = Layer.effectDiscard(
 /** The journal language model: OpenAI Responses API via the exe.dev relay. */
 const LlmLive = Layer.unwrap(
   Effect.gen(function*() {
-    const apiUrl = (yield* Config.string("JOURNAL_LLM_API_URL").pipe(
+    const apiUrl = (yield* Config.String("JOURNAL_LLM_API_URL").pipe(
       Config.withDefault("https://api.openai.com/v1")
     )).replace(/\/$/, "")
-    const model = yield* Config.string("JOURNAL_LLM_MODEL").pipe(Config.withDefault("gpt-5.5"))
-    const apiKey = yield* Config.string("JOURNAL_LLM_API_KEY").pipe(Config.withDefault(""))
+    const model = yield* Config.String("JOURNAL_LLM_MODEL").pipe(Config.withDefault("gpt-5.5"))
+    const apiKey = yield* Config.String("JOURNAL_LLM_API_KEY").pipe(Config.withDefault(""))
     return OpenAiLanguageModel.layer({ model, config: { reasoning: { effort: "low" } } }).pipe(
       Layer.provide(OpenAiClient.layer({ apiUrl, ...(apiKey ? { apiKey: Redacted.make(apiKey) } : {}) }))
     )

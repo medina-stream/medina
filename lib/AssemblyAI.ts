@@ -4,11 +4,11 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
-import * as HttpBody from "effect/unstable/http/HttpBody"
-import * as HttpClient from "effect/unstable/http/HttpClient"
-import * as HttpClientError from "effect/unstable/http/HttpClientError"
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest"
-import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse"
+import * as HttpBody from "effect/http/HttpBody"
+import * as HttpClient from "effect/http/HttpClient"
+import * as HttpClientError from "effect/http/HttpClientError"
+import * as HttpClientRequest from "effect/http/HttpClientRequest"
+import * as HttpClientResponse from "effect/http/HttpClientResponse"
 import { VendorTranscript } from "./transcribe/VendorTranscript.ts"
 import type { TranscriptAudio, TranscriptProvider, TranscriptResult } from "./transcribe/Transcriber.ts"
 
@@ -26,12 +26,12 @@ export class AssemblyAI extends Context.Service<AssemblyAI, TranscriptProvider>(
 
 export const layer: Layer.Layer<AssemblyAI, Config.ConfigError, HttpClient.HttpClient> = Layer.effect(AssemblyAI)(
   Effect.gen(function*() {
-    const baseUrl = (yield* Config.string("ASSEMBLYAI_API_URL").pipe(
+    const baseUrl = (yield* Config.String("ASSEMBLYAI_API_URL").pipe(
       Config.withDefault("https://api.assemblyai.com")
     )).replace(/\/$/, "")
-    const apiKey = yield* Config.string("ASSEMBLYAI_API_KEY").pipe(Config.withDefault(""))
-    const prompt = yield* Config.string("ASSEMBLYAI_PROMPT").pipe(Config.withDefault(""))
-    const speakerNames = (yield* Config.string("ASSEMBLYAI_SPEAKER_NAMES").pipe(Config.withDefault("")))
+    const apiKey = yield* Config.String("ASSEMBLYAI_API_KEY").pipe(Config.withDefault(""))
+    const prompt = yield* Config.String("ASSEMBLYAI_PROMPT").pipe(Config.withDefault(""))
+    const speakerNames = (yield* Config.String("ASSEMBLYAI_SPEAKER_NAMES").pipe(Config.withDefault("")))
       .split(",")
       .map((name) => name.trim())
       .filter(Boolean)

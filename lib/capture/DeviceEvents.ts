@@ -184,7 +184,7 @@ const routeEvent = (event: DeviceEvent): Effect.Effect<void, Error, FileSystem.F
         // parseLocationFixPayload.
         yield* gpsInboxWrite([{
           source: `capture/${event.device}`,
-          ts: new Date(event.at),
+          ts: event.at,
           lat: fix.lat,
           lon: fix.lon,
           speed: fix.speedMps,

@@ -27,9 +27,9 @@ import * as Fiber from "effect/Fiber"
 import * as Layer from "effect/Layer"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
-import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient"
-import * as RpcClient from "effect/unstable/rpc/RpcClient"
-import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
+import * as FetchHttpClient from "effect/http/FetchHttpClient"
+import * as RpcClient from "effect/rpc/RpcClient"
+import * as RpcSerialization from "effect/rpc/RpcSerialization"
 import { RuntimeEvent } from "../RuntimeEvents.ts"
 import { audioLabel, dayId, parseDayId, relativeDay } from "./DayLabels.ts"
 import { utteranceClock } from "./LocalTime.ts"
@@ -39,7 +39,7 @@ import { MAP_COVER, MAP_ZOOM, mapTiles, nudgeLatLon, TILE_SIZE } from "./Maps.ts
 import type { DayRow, DayTranscript, PipelineStatus, ResourceStatus, SourceStatus, StageStatus, TranscriptSearchHit } from "./JournalApi.ts"
 import type { ApiError } from "./JournalApi.ts"
 import type { PlaceCandidate } from "./Places.ts"
-import type { RpcClientError } from "effect/unstable/rpc/RpcClientError"
+import type { RpcClientError } from "effect/rpc/RpcClientError"
 
 const RpcLive = RpcClient.layerProtocolHttp({ url: "/rpc" }).pipe(
   Layer.provide(FetchHttpClient.layer),

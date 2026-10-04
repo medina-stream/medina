@@ -7,11 +7,11 @@
  */
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as HttpClient from "effect/unstable/http/HttpClient"
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest"
-import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient"
-import * as RpcClient from "effect/unstable/rpc/RpcClient"
-import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
+import * as HttpClient from "effect/http/HttpClient"
+import * as HttpClientRequest from "effect/http/HttpClientRequest"
+import * as FetchHttpClient from "effect/http/FetchHttpClient"
+import * as RpcClient from "effect/rpc/RpcClient"
+import * as RpcSerialization from "effect/rpc/RpcSerialization"
 import { JournalsGroup } from "../lib/lifelog/JournalApi.ts"
 
 const rawArgs = process.argv.slice(2)

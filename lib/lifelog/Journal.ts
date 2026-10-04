@@ -12,11 +12,11 @@ import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
-import * as LanguageModel from "effect/unstable/ai/LanguageModel"
+import * as LanguageModel from "effect/ai/LanguageModel"
 import * as OpenAiLanguageModel from "@effect/ai-openai/OpenAiLanguageModel"
-import * as Workflow from "effect/unstable/workflow/Workflow"
-import { WorkflowEngine } from "effect/unstable/workflow/WorkflowEngine"
-import * as Activity from "effect/unstable/workflow/Activity"
+import * as Workflow from "effect/workflow/Workflow"
+import { WorkflowEngine } from "effect/workflow/WorkflowEngine"
+import * as Activity from "effect/workflow/Activity"
 import * as Files from "../Files.ts"
 import type { Resource } from "../Resource.ts"
 import { sha256 } from "../Hash.ts"
@@ -39,7 +39,7 @@ const MAX_BATCH_CHARS = 90_000
  *
  * Unset means "same as the journal model".
  */
-const notesModel = Config.string("JOURNAL_LLM_NOTES_MODEL").pipe(Config.option)
+const notesModel = Config.String("JOURNAL_LLM_NOTES_MODEL").pipe(Config.option)
 
 /**
  * One final answer from the language model. A reasoning-only response with no
@@ -581,7 +581,7 @@ export const JournalWorkflowLayer = JournalWorkflow.toLayer(Effect.fn(function*(
       day,
       inputHash: key.split("/").at(-1)!.replace(/\.json$/, ""),
       transcriptKeys: inputKeys,
-      model: yield* Config.string("JOURNAL_LLM_MODEL").pipe(Config.withDefault(null), Effect.orDie),
+      model: yield* Config.String("JOURNAL_LLM_MODEL").pipe(Config.withDefault(null), Effect.orDie),
       generatedAt: new Date().toISOString(),
       status: "completed",
       report

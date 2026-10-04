@@ -62,7 +62,7 @@ const NOT_CONFIGURED =
 export const layer: Layer.Layer<R2TempCreds, Config.ConfigError> = Layer.effect(R2TempCreds)(
   Effect.gen(function*() {
     const optional = (name: string) =>
-      Effect.map(Config.option(Config.string(name)), (value) => Option.getOrNull(value)?.trim() || null)
+      Effect.map(Config.option(Config.String(name)), (value) => Option.getOrNull(value)?.trim() || null)
     const apiUrl = ((yield* optional("CLOUDFLARE_API_URL")) ?? "https://cloudflare.int.exe.xyz").replace(/\/$/, "")
     const accountId = yield* optional("R2_ACCOUNT_ID")
     const parentAccessKeyId = yield* optional("R2_PARENT_ACCESS_KEY_ID")

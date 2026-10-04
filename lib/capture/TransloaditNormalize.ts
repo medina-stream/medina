@@ -94,7 +94,7 @@ export class TransloaditNormalize extends Context.Service<TransloaditNormalize, 
 }>()("medina/TransloaditNormalize") {}
 
 const optional = (name: string) =>
-  Effect.map(Config.option(Config.string(name)), (value) => Option.getOrNull(value)?.trim() || null)
+  Effect.map(Config.option(Config.String(name)), (value) => Option.getOrNull(value)?.trim() || null)
 
 const terminal = (ok: string | undefined) =>
   !["ASSEMBLY_UPLOADING", "ASSEMBLY_EXECUTING", "ASSEMBLY_REPLAYING"].includes(ok ?? "")

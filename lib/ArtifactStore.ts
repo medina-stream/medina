@@ -52,5 +52,5 @@ export const layer = (root: string): Layer.Layer<ArtifactStore, never, FileSyste
   }))
 
 export const layerFromConfig = Layer.unwrap(
-  Effect.map(Config.string("DATA_DIR").pipe(Config.withDefault("data/artifacts")), layer)
+  Effect.map(Config.String("DATA_DIR").pipe(Config.withDefault("data/artifacts")), layer)
 )

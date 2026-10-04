@@ -12,8 +12,7 @@ see `Medina Themes.md` in the notes repo for background.
 
 ## Stack
 
-- [Effect v4 (RC)](https://effect.website/)
-  - The Effect v4 sources should be cloned alongside this repo at `../effect` for API reference (the RC differs from both v3 and the published docs in places).
+- [Effect v4](https://effect.website/)
 - Bun
 - DuckDB
 - Any writable filesystem locally; Archil is an optional cloud deployment choice

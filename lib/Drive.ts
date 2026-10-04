@@ -9,9 +9,9 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
-import * as HttpClient from "effect/unstable/http/HttpClient"
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest"
-import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse"
+import * as HttpClient from "effect/http/HttpClient"
+import * as HttpClientRequest from "effect/http/HttpClientRequest"
+import * as HttpClientResponse from "effect/http/HttpClientResponse"
 
 export class DriveFile extends Schema.Class<DriveFile>("DriveFile")({
   id: Schema.String,
@@ -65,7 +65,7 @@ export class Drive extends Context.Service<Drive, {
 
 export const layer: Layer.Layer<Drive, Config.ConfigError, HttpClient.HttpClient> = Layer.effect(Drive)(
   Effect.gen(function*() {
-    const tokenUrl = yield* Config.string("GOOGLE_TOKEN_URL").pipe(Config.withDefault("http://127.0.0.1/disabled-google-token"))
+    const tokenUrl = yield* Config.String("GOOGLE_TOKEN_URL").pipe(Config.withDefault("http://127.0.0.1/disabled-google-token"))
     const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient)
     const asError = (cause: unknown) => new Error("Google Drive request failed", { cause })
 

@@ -2,7 +2,7 @@ import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as HttpClient from "effect/unstable/http/HttpClient"
+import * as HttpClient from "effect/http/HttpClient"
 import type { TranscriptAudio, TranscriptProvider } from "./Transcriber.ts"
 
 /** Version tag for comparison-harness output. Production transcripts keep
@@ -53,12 +53,12 @@ export class MuseVoice extends Context.Service<MuseVoice, TranscriptProvider>()(
  */
 export const layer: Layer.Layer<MuseVoice, Config.ConfigError, HttpClient.HttpClient> = Layer.effect(MuseVoice)(
   Effect.gen(function*() {
-    const baseUrl = (yield* Config.string("MUSE_VOICE_API_URL").pipe(
+    const baseUrl = (yield* Config.String("MUSE_VOICE_API_URL").pipe(
       Config.withDefault("https://api.meta.ai")
     )).replace(/\/$/, "")
     // Required on purpose: fail at layer build, not on the first request. The
     // binding itself gets wired into the real request once the wire format lands.
-    yield* Config.string("MODEL_API_KEY")
+    yield* Config.String("MODEL_API_KEY")
 
     const wireFormatError = () => new Error(
       "Muse Voice one-shot wire format not yet verified: the exact request body and " +

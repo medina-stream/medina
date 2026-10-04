@@ -5,7 +5,7 @@ import * as Option from "effect/Option"
 
 /** The zone used to interpret zone-less evidence and request labels. A
  * capture's own believed IANA zone always takes precedence. */
-export const homeTimeZone = Config.string("HOME_TZ").pipe(Config.withDefault("UTC"))
+export const homeTimeZone = Config.String("HOME_TZ").pipe(Config.withDefault("UTC"))
 
 /**
  * A development window: when set, only the last N days are enumerated
@@ -16,7 +16,7 @@ export const homeTimeZone = Config.string("HOME_TZ").pipe(Config.withDefault("UT
  * the pipeline does ahead of time, never what the record can answer. Unset
  * (production) means no window at all.
  */
-export const eagerWindowDays = Config.int("EAGER_WINDOW_DAYS").pipe(Config.option)
+export const eagerWindowDays = Config.Int("EAGER_WINDOW_DAYS").pipe(Config.option)
 
 /** The oldest day worth materializing ahead of demand, if a window is set. */
 export const eagerSinceDay = Effect.gen(function*() {
