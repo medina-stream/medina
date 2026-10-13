@@ -526,38 +526,52 @@ export const JournalWorkflowLayer = JournalWorkflow.toLayer(Effect.fn(function*(
   // LLM notes pass runs once per transcript set and is cached on disk. Here
   // we read the cached notes, so a movement change re-journals using the
   // same notes — paying only the report call, not N notes calls.
+  // Absence is explicit here: no transcripts means no notes Activity at
+  // all. When transcripts exist, a notes failure (LLM outage, missing
+  // file) fails the workflow instead of journaling without the evidence;
+  // the hourly attempt window makes that retryable on the next pass.
+  // `notesForDay` itself returns null only for a transcript-less day,
+  // which this guard already excludes.
   const cachedNotes = inputs.length > 0
     ? yield* Activity.make({
       name: "notes",
       success: Schema.NullOr(NotesLlm),
-      execute: notesForDay(day).pipe(Effect.catchCause(() => Effect.succeed(null)))
+      execute: Effect.orDie(notesForDay(day))
     })
     : null
   const notes = cachedNotes?.notes ?? []
   // Movement is fetched inside an Activity because it influences the final
-  // LLM input. The selected basis is part of the workflow key; an unavailable
-  // or superseded selection contributes no timeline to this execution.
+  // LLM input. The selected basis is part of the workflow key; a superseded
+  // selection contributes no timeline to this execution.
+  // Absence is explicit here: no movement basis means no movement
+  // Activity at all. With a basis, a movement failure (DuckDB, missing
+  // partitions) fails the workflow instead of journaling without it. A
+  // superseded basis (hash no longer matches this execution's key) is a
+  // typed non-match, not a failure: it contributes no timeline, and the
+  // next pass re-keys the journal to the current basis.
   const movementTimeline = movementBasisHash
     ? yield* Activity.make({
       name: "movement",
       success: Schema.String,
-      execute: movementForDay(day).pipe(
-        Effect.map((movement) => movement.basisHash === movementBasisHash ? renderMovementTimeline(movement) : ""),
-        Effect.catchCause(() => Effect.succeed(""))
-      )
+      execute: Effect.orDie(movementForDay(day).pipe(
+        Effect.map((movement) => movement.basisHash === movementBasisHash ? renderMovementTimeline(movement) : "")
+      ))
     })
     : ""
   // The day's own written note, when there is one. It is first-person
   // evidence the person wrote themselves, so it outranks anything inferred
   // from audio -- but it is still evidence, not instructions.
+  // Absence is explicit here: no note hash means no note Activity at
+  // all. With a hash, a read failure fails the workflow; `noteForDay`
+  // returning None (no note file) or a superseded blob hash is a typed
+  // non-match, not a failure, and contributes no note text.
   const written = noteHash
     ? yield* Activity.make({
       name: "note",
       success: Schema.String,
-      execute: noteForDay(day).pipe(
-        Effect.map((note) => Option.isSome(note) && note.value.blobSha === noteHash ? note.value.text.trim() : ""),
-        Effect.catchCause(() => Effect.succeed(""))
-      )
+      execute: Effect.orDie(noteForDay(day).pipe(
+        Effect.map((note) => Option.isSome(note) && note.value.blobSha === noteHash ? note.value.text.trim() : "")
+      ))
     })
     : ""
 
