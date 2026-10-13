@@ -1,6 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
+import * as Option from "effect/Option"
+import * as Semaphore from "effect/Semaphore"
 
 /**
  * Small, durable delegation registry. Tokens are opaque and only their SHA-256
@@ -8,8 +11,25 @@ import { dirname, join } from "node:path"
  *
  * This deliberately has one permission today: `medina`. Splitting it into
  * narrower scopes later changes policy, not the approval/token protocol.
+ *
+ * All operations are Effects over `FileSystem`: no synchronous filesystem
+ * work on the request path. State is cached in memory and reloaded only
+ * when the file's mtime changes, writes are serialized per store, expired
+ * entries are pruned on write, and `lastUsedAt` is persisted at most hourly.
+ * Corrupt or unreadable state fails with `AuthStoreError`, never a sync throw.
  */
 export const MEDINA_SCOPE = "medina"
+
+/** How often `lastUsedAt` may be persisted for a token. */
+export const LAST_USED_FLUSH_MS = 60 * 60_000
+
+export class AuthStoreError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message)
+    this.name = "AuthStoreError"
+    if (cause !== undefined) this.cause = cause
+  }
+}
 
 export interface DelegationRequest {
   readonly id: string
@@ -50,122 +70,200 @@ const sameDigest = (left: string, right: string) => {
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
+const prune = (state: State, at = Date.now()): State => ({
+  version: 1,
+  requests: state.requests.filter((request) => Date.parse(request.expiresAt) > at),
+  tokens: state.tokens.filter((token) => Date.parse(token.expiresAt) > at)
+})
+
+type Fs = FileSystem.FileSystem
+const asStoreError = (file: string) => (cause: unknown): AuthStoreError =>
+  cause instanceof AuthStoreError ? cause : new AuthStoreError(`delegation registry ${file} is unreadable or corrupt`, cause)
+
 export class MedinaAuth {
   readonly #file: string
   readonly #requestTtlMs: number
   readonly #tokenTtlMs: number
+  readonly #lastUsedFlushMs: number
+  readonly #gate = Semaphore.makeUnsafe(1)
+  #cache: { readonly state: State; readonly mtimeMs: number | null } | null = null
 
-  constructor(options: { readonly directory: string, readonly requestTtlMs?: number, readonly tokenTtlMs?: number }) {
+  constructor(options: {
+    readonly directory: string
+    readonly requestTtlMs?: number
+    readonly tokenTtlMs?: number
+    readonly lastUsedFlushMs?: number
+  }) {
     this.#file = join(options.directory, "delegations.json")
     this.#requestTtlMs = options.requestTtlMs ?? 10 * 60_000
     this.#tokenTtlMs = options.tokenTtlMs ?? 60 * 60_000
+    this.#lastUsedFlushMs = options.lastUsedFlushMs ?? LAST_USED_FLUSH_MS
   }
 
-  #read(): State {
-    try {
-      const parsed = JSON.parse(readFileSync(this.#file, "utf8")) as State
-      if (parsed.version !== 1 || !Array.isArray(parsed.requests) || !Array.isArray(parsed.tokens)) throw new Error("unsupported delegation registry")
+  #read(): Effect.Effect<State, AuthStoreError, Fs> {
+    const self = this
+    const file = self.#file
+    return Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      if (!(yield* fs.exists(file))) {
+        self.#cache = { state: emptyState(), mtimeMs: null }
+        return emptyState()
+      }
+      const info = yield* fs.stat(file)
+      const mtimeMs = Option.match(info.mtime, { onNone: () => null, onSome: (date: Date) => date.getTime() })
+      if (self.#cache !== null && self.#cache.mtimeMs !== null && self.#cache.mtimeMs === mtimeMs) return self.#cache.state
+      const text = yield* fs.readFileString(file)
+      let parsed: State
+      try {
+        parsed = JSON.parse(text) as State
+        if (parsed.version !== 1 || !Array.isArray(parsed.requests) || !Array.isArray(parsed.tokens)) {
+          throw new Error("unsupported delegation registry")
+        }
+      } catch (cause) {
+        return yield* Effect.fail(new AuthStoreError(`delegation registry ${file} is corrupt`, cause))
+      }
+      self.#cache = { state: parsed, mtimeMs }
       return parsed
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyState()
-      throw error
-    }
+    }).pipe(Effect.mapError(asStoreError(file)))
   }
 
-  #write(state: State) {
-    mkdirSync(dirname(this.#file), { recursive: true, mode: 0o700 })
-    const temporary = `${this.#file}.${process.pid}.${identifier()}.tmp`
-    writeFileSync(temporary, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 })
-    renameSync(temporary, this.#file)
+  #write(state: State): Effect.Effect<void, AuthStoreError, Fs> {
+    const self = this
+    const file = self.#file
+    return Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const pruned = prune(state)
+      yield* fs.makeDirectory(dirname(file), { recursive: true, mode: 0o700 })
+      const temporary = `${file}.${process.pid}.${identifier()}.tmp`
+      yield* fs.writeFileString(temporary, JSON.stringify(pruned, null, 2) + "\n", { mode: 0o600 })
+      yield* fs.rename(temporary, file)
+      // Refresh the cache from the file we just wrote; its mtime is the key.
+      const info = yield* fs.stat(file).pipe(Effect.option)
+      self.#cache = {
+        state: pruned,
+        mtimeMs: Option.isSome(info)
+          ? Option.match(info.value.mtime, { onNone: () => null, onSome: (date: Date) => date.getTime() })
+          : null
+      }
+    }).pipe(Effect.mapError(asStoreError(file)))
   }
 
-  createRequest(clientName: string): DelegationRequest {
-    const clean = clientName.trim().replace(/\s+/g, " ").slice(0, 120)
-    if (!clean) throw new Error("client_name is required")
-    const createdAt = now()
-    const request: DelegationRequest = {
-      id: identifier(), clientName: clean, createdAt,
-      expiresAt: new Date(Date.now() + this.#requestTtlMs).toISOString(),
-      status: "pending", approvedAt: null, approvedBy: null
-    }
-    const state = this.#read()
-    this.#write({ ...state, requests: [...state.requests, request] })
-    return request
+  createRequest(clientName: string): Effect.Effect<DelegationRequest, AuthStoreError, Fs> {
+    const self = this
+    return self.#gate.withPermit(Effect.gen(function*() {
+      const clean = clientName.trim().replace(/\s+/g, " ").slice(0, 120)
+      if (!clean) return yield* Effect.fail(new AuthStoreError("client_name is required"))
+      const createdAt = now()
+      const request: DelegationRequest = {
+        id: identifier(), clientName: clean, createdAt,
+        expiresAt: new Date(Date.now() + self.#requestTtlMs).toISOString(),
+        status: "pending", approvedAt: null, approvedBy: null
+      }
+      const state = yield* self.#read()
+      yield* self.#write({ ...state, requests: [...state.requests, request] })
+      return request
+    }))
   }
 
-  getRequest(id: string): DelegationRequest | null {
-    return this.#read().requests.find((request) => request.id === id) ?? null
+  getRequest(id: string): Effect.Effect<DelegationRequest | null, AuthStoreError, Fs> {
+    const self = this
+    return self.#gate.withPermit(Effect.map(self.#read(), (state) =>
+      state.requests.find((request) => request.id === id) ?? null
+    ))
   }
 
-  approve(id: string, login: string): DelegationRequest | null {
-    const state = this.#read()
-    const current = state.requests.find((request) => request.id === id)
-    if (!current || current.status !== "pending" || Date.parse(current.expiresAt) <= Date.now()) return null
-    const approved: DelegationRequest = { ...current, status: "approved", approvedAt: now(), approvedBy: login }
-    this.#write({ ...state, requests: state.requests.map((request) => request.id === id ? approved : request) })
-    return approved
+  approve(id: string, login: string): Effect.Effect<DelegationRequest | null, AuthStoreError, Fs> {
+    const self = this
+    return self.#decide(id, login, "approved")
   }
 
-  deny(id: string, login: string): DelegationRequest | null {
-    const state = this.#read()
-    const current = state.requests.find((request) => request.id === id)
-    if (!current || current.status !== "pending") return null
-    const denied: DelegationRequest = { ...current, status: "denied", approvedAt: now(), approvedBy: login }
-    this.#write({ ...state, requests: state.requests.map((request) => request.id === id ? denied : request) })
-    return denied
+  deny(id: string, login: string): Effect.Effect<DelegationRequest | null, AuthStoreError, Fs> {
+    const self = this
+    return self.#decide(id, login, "denied")
   }
 
-  redeem(id: string): { readonly token: string, readonly expiresAt: string } | "pending" | "denied" | "expired" | "missing" {
-    const state = this.#read()
-    const request = state.requests.find((entry) => entry.id === id)
-    if (!request) return "missing"
-    if (request.status === "pending") return Date.parse(request.expiresAt) > Date.now() ? "pending" : "expired"
-    if (request.status === "denied") return "denied"
-    if (request.status !== "approved") return "missing"
-    const token = tokenValue()
-    const expiresAt = new Date(Date.now() + this.#tokenTtlMs).toISOString()
-    const entry: StoredToken = {
-      id: identifier(), requestId: request.id, clientName: request.clientName, hash: digest(token),
-      createdAt: now(), expiresAt, revokedAt: null, lastUsedAt: null
-    }
-    // A request is redeemable once: another poll must not mint another token.
-    const redeemed: DelegationRequest = { ...request, status: "redeemed" }
-    this.#write({
-      ...state,
-      requests: state.requests.map((item) => item.id === request.id ? redeemed : item),
-      tokens: [...state.tokens, entry]
-    })
-    return { token, expiresAt }
+  #decide(id: string, login: string, status: "approved" | "denied"): Effect.Effect<DelegationRequest | null, AuthStoreError, Fs> {
+    const self = this
+    return self.#gate.withPermit(Effect.gen(function*() {
+      const state = yield* self.#read()
+      const current = state.requests.find((request) => request.id === id)
+      if (!current || current.status !== "pending" || Date.parse(current.expiresAt) <= Date.now()) return null
+      const decided: DelegationRequest = { ...current, status, approvedAt: now(), approvedBy: login }
+      yield* self.#write({ ...state, requests: state.requests.map((request) => request.id === id ? decided : request) })
+      return decided
+    }))
   }
 
-  authorize(token: string): { readonly clientName: string, readonly tokenId: string } | null {
-    const state = this.#read()
-    const hash = digest(token)
-    const entry = state.tokens.find((candidate) => sameDigest(candidate.hash, hash))
-    if (!entry || entry.revokedAt || Date.parse(entry.expiresAt) <= Date.now()) return null
-    const updated: StoredToken = { ...entry, lastUsedAt: now() }
-    this.#write({ ...state, tokens: state.tokens.map((candidate) => candidate.id === entry.id ? updated : candidate) })
-    return { clientName: entry.clientName, tokenId: entry.id }
+  redeem(id: string): Effect.Effect<{ readonly token: string; readonly expiresAt: string } | "pending" | "denied" | "expired" | "missing", AuthStoreError, Fs> {
+    const self = this
+    return self.#gate.withPermit(Effect.gen(function*() {
+      const state = yield* self.#read()
+      const request = state.requests.find((entry) => entry.id === id)
+      if (!request) return "missing" as const
+      if (request.status === "pending") return Date.parse(request.expiresAt) > Date.now() ? "pending" as const : "expired" as const
+      if (request.status === "denied") return "denied" as const
+      if (request.status !== "approved") return "missing" as const
+      const token = tokenValue()
+      const expiresAt = new Date(Date.now() + self.#tokenTtlMs).toISOString()
+      const entry: StoredToken = {
+        id: identifier(), requestId: request.id, clientName: request.clientName, hash: digest(token),
+        createdAt: now(), expiresAt, revokedAt: null, lastUsedAt: null
+      }
+      // A request is redeemable once: another poll must not mint another token.
+      const redeemed: DelegationRequest = { ...request, status: "redeemed" }
+      yield* self.#write({
+        ...state,
+        requests: state.requests.map((item) => item.id === request.id ? redeemed : item),
+        tokens: [...state.tokens, entry]
+      })
+      return { token, expiresAt }
+    }))
   }
 
-  listTokens(): ReadonlyArray<Omit<StoredToken, "hash">> {
-    return this.#read().tokens.map(({ hash: _hash, ...token }) => token)
+  authorize(token: string): Effect.Effect<{ readonly clientName: string; readonly tokenId: string } | null, AuthStoreError, Fs> {
+    const self = this
+    return self.#gate.withPermit(Effect.gen(function*() {
+      const state = yield* self.#read()
+      const hash = digest(token)
+      const entry = state.tokens.find((candidate) => sameDigest(candidate.hash, hash))
+      if (!entry || entry.revokedAt || Date.parse(entry.expiresAt) <= Date.now()) return null
+      // Debounced: only persist lastUsedAt when the stored stamp is stale.
+      const lastUsedMs = entry.lastUsedAt === null ? null : Date.parse(entry.lastUsedAt)
+      if (lastUsedMs === null || Date.now() - lastUsedMs >= self.#lastUsedFlushMs) {
+        const updated: StoredToken = { ...entry, lastUsedAt: now() }
+        yield* self.#write({ ...state, tokens: state.tokens.map((candidate) => candidate.id === entry.id ? updated : candidate) })
+      }
+      return { clientName: entry.clientName, tokenId: entry.id }
+    }))
   }
 
-  revokeId(id: string): boolean {
-    const state = this.#read()
-    const entry = state.tokens.find((candidate) => candidate.id === id)
-    if (!entry || entry.revokedAt) return false
-    this.#write({ ...state, tokens: state.tokens.map((candidate) => candidate.id === id ? { ...candidate, revokedAt: now() } : candidate) })
-    return true
+  listTokens(): Effect.Effect<ReadonlyArray<Omit<StoredToken, "hash">>, AuthStoreError, Fs> {
+    const self = this
+    return self.#gate.withPermit(Effect.map(self.#read(), (state) =>
+      state.tokens.map(({ hash: _hash, ...token }) => token)
+    ))
   }
 
-  revoke(token: string): boolean {
-    const state = this.#read()
-    const hash = digest(token)
-    const entry = state.tokens.find((candidate) => sameDigest(candidate.hash, hash))
-    if (!entry || entry.revokedAt) return false
-    this.#write({ ...state, tokens: state.tokens.map((candidate) => candidate.id === entry.id ? { ...candidate, revokedAt: now() } : candidate) })
-    return true
+  revokeId(id: string): Effect.Effect<boolean, AuthStoreError, Fs> {
+    const self = this
+    return self.#gate.withPermit(Effect.gen(function*() {
+      const state = yield* self.#read()
+      const entry = state.tokens.find((candidate) => candidate.id === id)
+      if (!entry || entry.revokedAt) return false
+      yield* self.#write({ ...state, tokens: state.tokens.map((candidate) => candidate.id === id ? { ...candidate, revokedAt: now() } : candidate) })
+      return true
+    }))
+  }
+
+  revoke(token: string): Effect.Effect<boolean, AuthStoreError, Fs> {
+    const self = this
+    return self.#gate.withPermit(Effect.gen(function*() {
+      const state = yield* self.#read()
+      const hash = digest(token)
+      const entry = state.tokens.find((candidate) => sameDigest(candidate.hash, hash))
+      if (!entry || entry.revokedAt) return false
+      yield* self.#write({ ...state, tokens: state.tokens.map((candidate) => candidate.id === entry.id ? { ...candidate, revokedAt: now() } : candidate) })
+      return true
+    }))
   }
 }

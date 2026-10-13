@@ -76,7 +76,9 @@ const fullAccess = Effect.gen(function*() {
   const request = yield* HttpServerRequest.HttpServerRequest
   const token = bearerToken(request.headers)
   if (token) {
-    const delegated = auth.authorize(token)
+    // A corrupt/unreadable registry fails closed: no delegation, but the
+    // Tailscale/loopback paths below still apply.
+    const delegated = yield* auth.authorize(token).pipe(Effect.catchCause(() => Effect.succeed(null)))
     if (delegated) return { actor: `delegation:${delegated.clientName}`, delegated: true }
   }
   const address = Option.getOrNull(request.remoteAddress)
@@ -102,7 +104,7 @@ const writeAccess = Effect.gen(function*() {
   const request = yield* HttpServerRequest.HttpServerRequest
   const delegatedToken = bearerToken(request.headers)
   if (delegatedToken) {
-    const delegated = auth.authorize(delegatedToken)
+    const delegated = yield* auth.authorize(delegatedToken).pipe(Effect.catchCause(() => Effect.succeed(null)))
     if (delegated) return { login: `delegation:${delegated.clientName}`, allowed: true, reason: "", status: 200 as const }
   }
   const owner = (Option.getOrNull(yield* Config.option(Config.String("INGEST_OWNER"))) ?? "").trim()
@@ -135,7 +137,7 @@ const writeAccess = Effect.gen(function*() {
 const canWrite = (headers: Record<string, string | undefined>) =>
   Effect.gen(function*() {
     const delegatedToken = bearerToken(headers)
-    if (delegatedToken && auth.authorize(delegatedToken)) return { allowed: true, reason: "" }
+    if (delegatedToken && (yield* auth.authorize(delegatedToken).pipe(Effect.catchCause(() => Effect.succeed(null))))) return { allowed: true, reason: "" }
     const owner = (Option.getOrNull(yield* Config.option(Config.String("INGEST_OWNER"))) ?? "").trim()
     if (!owner) {
       yield* Effect.log("write refused: INGEST_OWNER is not configured, so no one may write")
@@ -309,18 +311,16 @@ one-line download above is the zero-install form.
       const request = yield* HttpServerRequest.HttpServerRequest
       const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
       const clientName = typeof body === "object" && body !== null && "client_name" in body && typeof body.client_name === "string" ? body.client_name : ""
-      try {
-        const pending = auth.createRequest(clientName)
-        return HttpServerResponse.jsonUnsafe({ request_id: pending.id, scope: MEDINA_SCOPE, expires_at: pending.expiresAt, approval_url: `${requestOrigin(request)}/auth/approve/${pending.id}` }, { status: 201, headers: { "cache-control": "no-store" } })
-      } catch (error) {
-        return HttpServerResponse.jsonUnsafe({ error: error instanceof Error ? error.message : "invalid request" }, { status: 400 })
-      }
+      return yield* auth.createRequest(clientName).pipe(Effect.match({
+        onFailure: (error) => HttpServerResponse.jsonUnsafe({ error: error.message }, { status: 400 }),
+        onSuccess: (pending) => HttpServerResponse.jsonUnsafe({ request_id: pending.id, scope: MEDINA_SCOPE, expires_at: pending.expiresAt, approval_url: `${requestOrigin(request)}/auth/approve/${pending.id}` }, { status: 201, headers: { "cache-control": "no-store" } })
+      }))
     }))
     yield* router.add("GET", "/auth/approve/:id", Effect.gen(function*() {
       const login = yield* approvalAccess
       if (!login) return HttpServerResponse.text("Approval requires the configured owner over Tailscale.", { status: 403 })
       const id = (yield* HttpRouter.params).id ?? ""
-      const pending = auth.getRequest(id)
+      const pending = yield* auth.getRequest(id).pipe(Effect.orDie)
       if (!pending || pending.status !== "pending" || Date.parse(pending.expiresAt) <= Date.now()) return HttpServerResponse.text("This delegation request is missing or expired.", { status: 404 })
       const escapedName = pending.clientName.replace(/[&<>'\"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", "\"": "&quot;" })[c]!)
       return HttpServerResponse.text(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approve Medina access</title><main><h1>Approve Medina access?</h1><p><strong>${escapedName}</strong> is requesting <code>medina</code> — full access to Medina.</p><p>Approving creates a one-hour bearer token. You can revoke it later.</p><form method="post"><button name="decision" value="approve">Allow</button> <button name="decision" value="deny">Deny</button></form><p>Owner: ${login}</p></main>`, { contentType: "text/html", headers: { "cache-control": "no-store" } })
@@ -331,7 +331,7 @@ one-line download above is the zero-install form.
       const request = yield* HttpServerRequest.HttpServerRequest
       const form = new URLSearchParams(new TextDecoder().decode(yield* Effect.orDie(request.arrayBuffer)))
       const id = (yield* HttpRouter.params).id ?? ""
-      const result = form.get("decision") === "approve" ? auth.approve(id, login) : auth.deny(id, login)
+      const result = yield* (form.get("decision") === "approve" ? auth.approve(id, login) : auth.deny(id, login)).pipe(Effect.orDie)
       if (!result) return HttpServerResponse.text("This delegation request is missing, expired, or already decided.", { status: 404 })
       yield* Effect.log(`delegation ${result.status}: ${result.clientName} by ${login}`)
       return HttpServerResponse.text(`<!doctype html><title>Medina delegation</title><p>${result.status === "approved" ? "Access approved. Muse may now obtain its token." : "Access denied."}</p>`, { contentType: "text/html", headers: { "cache-control": "no-store" } })
@@ -339,7 +339,7 @@ one-line download above is the zero-install form.
     yield* router.add("GET", "/auth/delegations", Effect.gen(function*() {
       const login = yield* approvalAccess
       if (!login) return HttpServerResponse.text("Viewing delegations requires the configured owner over Tailscale.", { status: 403 })
-      const rows = auth.listTokens().map((token) => `<tr><td>${token.clientName.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)}</td><td><code>${token.id}</code></td><td>${token.expiresAt}</td><td>${token.revokedAt ?? "active"}</td><td><form method="post"><input type="hidden" name="id" value="${token.id}"><button>Revoke</button></form></td></tr>`).join("") || "<tr><td colspan=5>No delegated tokens.</td></tr>"
+      const rows = (yield* auth.listTokens().pipe(Effect.orDie)).map((token) => `<tr><td>${token.clientName.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)}</td><td><code>${token.id}</code></td><td>${token.expiresAt}</td><td>${token.revokedAt ?? "active"}</td><td><form method="post"><input type="hidden" name="id" value="${token.id}"><button>Revoke</button></form></td></tr>`).join("") || "<tr><td colspan=5>No delegated tokens.</td></tr>"
       return HttpServerResponse.text(`<!doctype html><title>Medina delegations</title><h1>Medina delegations</h1><p>Owner: ${login}</p><table><thead><tr><th>Agent</th><th>ID</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`, { contentType: "text/html", headers: { "cache-control": "no-store" } })
     }))
     yield* router.add("POST", "/auth/delegations", Effect.gen(function*() {
@@ -347,7 +347,7 @@ one-line download above is the zero-install form.
       if (!login) return HttpServerResponse.text("Revoking delegations requires the configured owner over Tailscale.", { status: 403 })
       const request = yield* HttpServerRequest.HttpServerRequest
       const form = new URLSearchParams(new TextDecoder().decode(yield* Effect.orDie(request.arrayBuffer)))
-      const revoked = auth.revokeId(form.get("id") ?? "")
+      const revoked = yield* auth.revokeId(form.get("id") ?? "").pipe(Effect.orDie)
       if (revoked) yield* Effect.log(`delegation revoked by ${login}`)
       return HttpServerResponse.redirect("/auth/delegations", { status: 303 })
     }))
@@ -357,7 +357,7 @@ one-line download above is the zero-install form.
       const requestId = typeof body === "object" && body !== null && "request_id" in body && typeof body.request_id === "string" ? body.request_id : ""
       const grant = typeof body === "object" && body !== null && "grant_type" in body && typeof body.grant_type === "string" ? body.grant_type : ""
       if (grant !== "urn:medina:delegation" || !requestId) return HttpServerResponse.jsonUnsafe({ error: "invalid_request" }, { status: 400 })
-      const redeemed = auth.redeem(requestId)
+      const redeemed = yield* auth.redeem(requestId).pipe(Effect.orDie)
       if (typeof redeemed === "object") return HttpServerResponse.jsonUnsafe({ access_token: redeemed.token, token_type: "Bearer", expires_in: Math.round((Date.parse(redeemed.expiresAt) - Date.now()) / 1000), scope: MEDINA_SCOPE }, { headers: { "cache-control": "no-store" } })
       return HttpServerResponse.jsonUnsafe({ error: redeemed === "pending" ? "authorization_pending" : "invalid_grant" }, { status: redeemed === "pending" ? 428 : 400, headers: { "cache-control": "no-store" } })
     }))
@@ -366,7 +366,7 @@ one-line download above is the zero-install form.
       const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
       const token = typeof body === "object" && body !== null && "token" in body && typeof body.token === "string" ? body.token : bearerToken(request.headers)
       if (!token) return HttpServerResponse.jsonUnsafe({ error: "invalid_request" }, { status: 400 })
-      auth.revoke(token)
+      yield* auth.revoke(token).pipe(Effect.orDie)
       return HttpServerResponse.empty({ status: 204, headers: { "cache-control": "no-store" } })
     }))
 
@@ -377,24 +377,28 @@ one-line download above is the zero-install form.
     // revocation, and policy edits stay behind the full-access gate.
     yield* router.add("GET", "/api/capture-policy/:token", Effect.gen(function*() {
       const token = (yield* HttpRouter.params).token ?? ""
-      if (!capturePolicy.verifyToken(token)) return HttpServerResponse.jsonUnsafe({ error: "not_found" }, { status: 404 })
-      return HttpServerResponse.jsonUnsafe(capturePolicy.readPolicy(), { headers: { "cache-control": "no-store" } })
+      // Fail closed on a corrupt registry: the capability is not verified.
+      const verified = yield* capturePolicy.verifyToken(token).pipe(Effect.catchCause(() => Effect.succeed(false)))
+      if (!verified) return HttpServerResponse.jsonUnsafe({ error: "not_found" }, { status: 404 })
+      const policy = yield* capturePolicy.readPolicy().pipe(Effect.catchCause(() => Effect.succeed(null)))
+      if (!policy) return HttpServerResponse.jsonUnsafe({ error: "policy_unavailable" }, { status: 500 })
+      return HttpServerResponse.jsonUnsafe(policy, { headers: { "cache-control": "no-store" } })
     }))
     yield* router.add("POST", "/api/capture-policy/tokens", Effect.gen(function*() {
       const request = yield* HttpServerRequest.HttpServerRequest
       const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
       const label = typeof body === "object" && body !== null && "label" in body && typeof body.label === "string" ? body.label : ""
-      const issued = capturePolicy.issueToken(label)
+      const issued = yield* capturePolicy.issueToken(label).pipe(Effect.orDie)
       const url = `${requestOrigin(request)}/api/capture-policy/${issued.token}`
       yield* Effect.log(`capture policy token issued: ${issued.id}`)
       return HttpServerResponse.jsonUnsafe({ id: issued.id, token: issued.token, url }, { status: 201, headers: { "cache-control": "no-store" } })
     }))
     yield* router.add("GET", "/api/capture-policy/tokens", Effect.gen(function*() {
-      return HttpServerResponse.jsonUnsafe({ tokens: capturePolicy.listTokens() }, { headers: { "cache-control": "no-store" } })
+      return HttpServerResponse.jsonUnsafe({ tokens: yield* capturePolicy.listTokens().pipe(Effect.orDie) }, { headers: { "cache-control": "no-store" } })
     }))
     yield* router.add("POST", "/api/capture-policy/tokens/:id/revoke", Effect.gen(function*() {
       const id = (yield* HttpRouter.params).id ?? ""
-      const revoked = capturePolicy.revokeToken(id)
+      const revoked = yield* capturePolicy.revokeToken(id).pipe(Effect.orDie)
       if (revoked) yield* Effect.log(`capture policy token revoked: ${id}`)
       return revoked
         ? HttpServerResponse.empty({ status: 204, headers: { "cache-control": "no-store" } })
@@ -405,7 +409,7 @@ one-line download above is the zero-install form.
       const body = yield* jsonBody(request).pipe(Effect.match({ onFailure: () => null, onSuccess: (value) => value }))
       const policy = decodePolicy(body)
       if (!policy) return HttpServerResponse.jsonUnsafe({ error: "invalid_policy" }, { status: 400 })
-      capturePolicy.writePolicy(policy)
+      yield* capturePolicy.writePolicy(policy).pipe(Effect.orDie)
       yield* Effect.log(`capture policy updated: version ${policy.version}`)
       return HttpServerResponse.jsonUnsafe(policy, { headers: { "cache-control": "no-store" } })
     }))

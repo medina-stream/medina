@@ -16,6 +16,8 @@
  */
 import { spawnSync } from "node:child_process"
 import { createInterface } from "node:readline"
+import { BunFileSystem } from "@effect/platform-bun"
+import * as Effect from "effect/Effect"
 import { CapturePolicyStore, CapturePolicyUpload, decodePolicy } from "../lib/capture/CapturePolicy.ts"
 import { dataPath } from "../lib/lifelog/Resources.ts"
 
@@ -68,7 +70,9 @@ const main = async () => {
   if (!process.stdin.isTTY) throw new Error("run this interactively: secrets are prompted on the terminal, never piped")
 
   const store = new CapturePolicyStore({ directory: dataPath("capture-policy") })
-  const current = store.readPolicy()
+  const runStore = <A, E>(effect: Effect.Effect<A, E, import("effect/FileSystem").FileSystem>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(BunFileSystem.layer)))
+  const current = await runStore(store.readPolicy())
 
   const endpoint = (options.endpoint as string | undefined) ??
     (process.env.R2_ACCOUNT_ID ? `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : "") ??
@@ -91,7 +95,7 @@ const main = async () => {
     upload: new CapturePolicyUpload({ endpoint, bucket, region, prefix, accessKeyId, secretAccessKey, unmeteredOnly })
   })
   if (!updated) throw new Error("the merged policy failed validation; nothing was written")
-  store.writePolicy(updated)
+  await runStore(store.writePolicy(updated))
   console.log(`policy v${updated.version} written: upload credentials live, effective immediately`)
 }
 
