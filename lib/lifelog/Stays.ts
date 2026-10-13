@@ -34,6 +34,78 @@ const median = (values: ReadonlyArray<number>) => {
   return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2
 }
 
+/**
+ * Incremental median over a stream: two heaps keep the lower and upper
+ * halves balanced, so `add` is O(log n) and `median` is O(1) — where the
+ * old per-point sorted copy made a long stay O(n^2 log n).
+ */
+export class RunningMedian {
+  // Max-heap (lower half) and min-heap (upper half); sizes differ by <= 1,
+  // with the lower half holding the extra element when the count is odd.
+  private low: Array<number> = []
+  private high: Array<number> = []
+
+  private static siftUp(heap: Array<number>, index: number, before: (a: number, b: number) => boolean) {
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2)
+      if (!before(heap[index]!, heap[parent]!)) return
+      ;[heap[index], heap[parent]] = [heap[parent]!, heap[index]!]
+      index = parent
+    }
+  }
+
+  private static siftDown(heap: Array<number>, index: number, before: (a: number, b: number) => boolean) {
+    for (;;) {
+      const left = index * 2 + 1
+      const right = left + 1
+      let best = index
+      if (left < heap.length && before(heap[left]!, heap[best]!)) best = left
+      if (right < heap.length && before(heap[right]!, heap[best]!)) best = right
+      if (best === index) return
+      ;[heap[index], heap[best]] = [heap[best]!, heap[index]!]
+      index = best
+    }
+  }
+
+  private static push(heap: Array<number>, value: number, before: (a: number, b: number) => boolean) {
+    heap.push(value)
+    RunningMedian.siftUp(heap, heap.length - 1, before)
+  }
+
+  private static pop(heap: Array<number>, before: (a: number, b: number) => boolean): number {
+    const top = heap[0]!
+    const last = heap.pop()!
+    if (heap.length > 0) {
+      heap[0] = last
+      RunningMedian.siftDown(heap, 0, before)
+    }
+    return top
+  }
+
+  add(value: number) {
+    const beforeLow = (a: number, b: number) => a > b
+    const beforeHigh = (a: number, b: number) => a < b
+    if (this.low.length === 0 || value <= this.low[0]!) RunningMedian.push(this.low, value, beforeLow)
+    else RunningMedian.push(this.high, value, beforeHigh)
+    if (this.low.length > this.high.length + 1) {
+      RunningMedian.push(this.high, RunningMedian.pop(this.low, beforeLow), beforeHigh)
+    } else if (this.high.length > this.low.length) {
+      RunningMedian.push(this.low, RunningMedian.pop(this.high, beforeHigh), beforeLow)
+    }
+  }
+
+  median(): number {
+    if (this.low.length === 0) return Number.NaN
+    return this.low.length > this.high.length
+      ? this.low[0]!
+      : (this.low[0]! + this.high[0]!) / 2
+  }
+
+  get size() {
+    return this.low.length + this.high.length
+  }
+}
+
 const percentile90 = (values: ReadonlyArray<number>) => {
   const sorted = [...values].sort((a, b) => a - b)
   return sorted[Math.ceil(0.9 * sorted.length) - 1] ?? 0
@@ -54,23 +126,83 @@ const finishStay = (members: ReadonlyArray<StayPoint>): StayRow => {
   }
 }
 
+/**
+ * Incremental stay detector: feed points in chronological order, collect
+ * finished stays from `finish()`. The cluster center is the running
+ * median (O(log n) per point), and only the open cluster is retained —
+ * so detection can stream one UTC-day partition at a time, carrying the
+ * open cluster across midnight, without holding the GPS history.
+ */
+export class StayDetector {
+  private members: Array<StayPoint> = []
+  private latMedian = new RunningMedian()
+  private lonMedian = new RunningMedian()
+  private readonly radiusM: number
+
+  constructor(radiusM = DEFAULT_STAY_RADIUS_M) {
+    this.radiusM = radiusM
+  }
+
+  add(point: StayPoint): StayRow | null {
+    let finished: StayRow | null = null
+    if (this.members.length > 0) {
+      const center = { lat: this.latMedian.median(), lon: this.lonMedian.median() }
+      if (haversineMeters(center, point) > this.radiusM) {
+        finished = finishStay(this.members)
+        this.members = []
+        this.latMedian = new RunningMedian()
+        this.lonMedian = new RunningMedian()
+      }
+    }
+    this.members.push(point)
+    this.latMedian.add(point.lat)
+    this.lonMedian.add(point.lon)
+    return finished
+  }
+
+  finish(): Array<StayRow> {
+    if (this.members.length === 0) return []
+    const stay = finishStay(this.members)
+    this.members = []
+    this.latMedian = new RunningMedian()
+    this.lonMedian = new RunningMedian()
+    return [stay]
+  }
+}
+
 /** Sequential temporal stay detection over globally ordered observations. */
 export const detectStays = (input: ReadonlyArray<StayPoint>, radiusM = DEFAULT_STAY_RADIUS_M): ReadonlyArray<StayRow> => {
   const points = [...input].sort((a, b) => a.ts.localeCompare(b.ts))
-  if (points.length === 0) return []
+  const detector = new StayDetector(radiusM)
   const stays: Array<StayRow> = []
-  let members: Array<StayPoint> = []
   for (const point of points) {
-    if (members.length > 0) {
-      const center = { lat: median(members.map((member) => member.lat)), lon: median(members.map((member) => member.lon)) }
-      if (haversineMeters(center, point) > radiusM) {
-        stays.push(finishStay(members))
-        members = []
-      }
-    }
-    members.push(point)
+    const finished = detector.add(point)
+    if (finished !== null) stays.push(finished)
   }
-  stays.push(finishStay(members))
+  stays.push(...detector.finish())
+  return stays
+}
+
+/**
+ * Stay detection partitioned by UTC day: each chunk is one day's points,
+ * and the open cluster carries over into the next day (a stay is still
+ * partitioned by its first point's day, and a cross-midnight stay stays
+ * whole). Equivalent to `detectStays` over the concatenated days.
+ */
+export const detectStaysByDay = (
+  days: ReadonlyArray<ReadonlyArray<StayPoint>>,
+  radiusM = DEFAULT_STAY_RADIUS_M
+): ReadonlyArray<StayRow> => {
+  const detector = new StayDetector(radiusM)
+  const stays: Array<StayRow> = []
+  for (const dayPoints of days) {
+    const points = [...dayPoints].sort((a, b) => a.ts.localeCompare(b.ts))
+    for (const point of points) {
+      const finished = detector.add(point)
+      if (finished !== null) stays.push(finished)
+    }
+  }
+  stays.push(...detector.finish())
   return stays
 }
 
@@ -170,14 +302,28 @@ export const staysBasisHash = Effect.gen(function*() {
 const materializeStays = (basisHash: string) => Effect.gen(function*() {
   const fs = yield* FileSystem.FileSystem
   const partitions = yield* pointPartitions
-  const paths = partitions.map(({ relative }) => dataPath(`${POINTS_ROOT}/${relative}`))
-  const pointsJson = paths.length === 0 ? "[]" : yield* duckdb(
-    `SELECT DISTINCT ON (source, ts, lat, lon)
-       strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%S.%g') || 'Z' AS ts, lat, lon
-     FROM read_parquet([${paths.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)
-     ORDER BY ts, source, lat, lon`
-  )
-  const stays = detectStays(JSON.parse(pointsJson || "[]"), radius())
+  // One UTC-day partition at a time, in day order: only that day's points
+  // (plus the open cluster carried over from the previous day) are in
+  // memory, never the whole GPS history as one JSON string. Partitions
+  // are disjoint by ts day, so per-partition de-duplication matches the
+  // old whole-corpus DISTINCT ON.
+  const detector = new StayDetector(radius())
+  const stays: Array<StayRow> = []
+  for (const { relative } of partitions) {
+    const path = dataPath(`${POINTS_ROOT}/${relative}`)
+    const pointsJson = yield* duckdb(
+      `SELECT DISTINCT ON (source, ts, lat, lon)
+         strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%S.%g') || 'Z' AS ts, lat, lon
+       FROM read_parquet(${quote(path)}, union_by_name=true, hive_partitioning=false)
+       ORDER BY ts, source, lat, lon`
+    )
+    const dayPoints = JSON.parse(pointsJson || "[]") as Array<StayPoint>
+    for (const point of dayPoints) {
+      const finished = detector.add(point)
+      if (finished !== null) stays.push(finished)
+    }
+  }
+  stays.push(...detector.finish())
   const work = `${tmpdir()}/medina-stays-${Date.now()}-${Math.random().toString(36).slice(2)}`
   const ndjson = `${work}/stays.ndjson`
   const staging = `${work}/staging`
