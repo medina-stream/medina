@@ -460,6 +460,7 @@ export const mergeChunkTranscripts = (
  */
 export const transcribeMediaCapture = (captureId: string) =>
   Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
     const bucket = yield* Bucket
     const r2 = yield* R2TempCreds
     const assemblyai = yield* AssemblyAI
@@ -471,6 +472,16 @@ export const transcribeMediaCapture = (captureId: string) =>
     )
     if (manifest === null) return yield* Effect.fail(new Error(`manifest vanished for ${captureId}`))
     if (manifest.chunks.length === 0) return yield* Effect.fail(new Error(`empty media manifest for ${captureId}`))
+
+    // A canonical transcript left by a pre-fix run may be an error record.
+    // It is not evidence: clear it up front so the capture is invisible to
+    // the day index until a completed transcript lands, and so discovery
+    // (which keys off transcript absence) keeps it retryable.
+    const canonicalPath = dataPath(transcriptKey(captureId))
+    const stale = yield* Files.readJson(Transcript, canonicalPath)
+    if (Option.isSome(stale) && stale.value.status === "error") {
+      yield* fs.remove(canonicalPath, { force: true })
+    }
 
     const receiptPath = dataPath(transcriptJobsKey(captureId))
     const existing = yield* Files.readJson(TranscriptJobReceipt, receiptPath)
@@ -570,14 +581,27 @@ export const transcribeMediaCapture = (captureId: string) =>
     const filename = Option.isSome(provenance) ? provenance.value.records[0]?.filename ?? null : null
     const capturedAt = filename === null ? null : filenameWallClock(filename)
 
+    // The vendor receipt is always kept for debugging, error or not.
     yield* Files.writeJson(dataPath(vendorKey(captureId)), {
       chunked: true,
       chunks: results.map((result) => result.raw)
     })
-    yield* Files.writeJson(
-      dataPath(transcriptKey(captureId)),
-      mergeChunkTranscripts(captureId, manifest, capturedAt, parts)
-    )
+    const merged = mergeChunkTranscripts(captureId, manifest, capturedAt, parts)
+    if (merged.status === "error") {
+      // Do not write the canonical transcript: its existence is what
+      // discovery and the day index key off, so an error record would
+      // strand the capture forever. Drop the jobs receipt too — the
+      // errored AssemblyAI ids are terminal, so the next pass must
+      // resubmit fresh jobs rather than poll them again — and fail, so
+      // the pipeline records the failure instead of counting a success.
+      // The hourly pass is the retry, with its cadence as the backoff.
+      yield* fs.remove(receiptPath, { force: true })
+      yield* fs.remove(canonicalPath, { force: true })
+      return yield* Effect.fail(new Error(
+        `AssemblyAI transcription failed for ${captureId}: ${merged.error ?? "unknown error"}`
+      ))
+    }
+    yield* Files.writeJson(canonicalPath, merged)
     return "ingested" as const
   })
 
@@ -592,7 +616,15 @@ export const mediaTranscribeSource: Source<
     const pending: Array<string> = []
     for (const manifest of manifests) {
       const captureId = manifest.slice(0, -".json".length)
-      if (!(yield* fs.exists(dataPath(transcriptKey(captureId))))) pending.push(captureId)
+      const canonicalPath = dataPath(transcriptKey(captureId))
+      if (!(yield* fs.exists(canonicalPath))) {
+        pending.push(captureId)
+        continue
+      }
+      // Legacy error transcripts (written before error records stopped
+      // being canonical) are retryable too; a completed one is settled.
+      const stored = yield* Files.readJson(Transcript, canonicalPath)
+      if (Option.isSome(stored) && stored.value.status === "error") pending.push(captureId)
     }
     return pending
   }),

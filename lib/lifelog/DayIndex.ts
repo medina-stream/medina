@@ -46,38 +46,68 @@ const wallClockInZone = (isoUtc: string, zone: string): { day: string; startTime
   return { day, startTime: `${day}T${get("hour")}:${get("minute")}:${get("second")}` }
 }
 
-const dayIndexBasis = Effect.gen(function*() {  const captureIds = yield* transcribedCaptures
+const usableTranscript = (t: Option.Option<Transcript>) =>
+  Option.isSome(t) && t.value.status === "completed" && !!t.value.text?.trim() ? t : null
+
+/**
+ * Which transcript key (if any) makes a capture usable for the index: the
+ * canonical vendor transcript wins, the on-device first-look fills the gap
+ * before it lands (or when the vendor run has not completed). This is the
+ * same selection `buildDayIndex` files the capture under.
+ */
+const selectedTranscriptKey = (captureId: string) =>
+  Effect.gen(function*() {
+    const live = parseLiveCaptureId(captureId)
+    if (live !== null) {
+      const key = liveTranscriptKey(live.installId, live.segmentUuid)
+      return usableTranscript(yield* Files.readJson(Transcript, dataPath(key))) !== null ? key : null
+    }
+    const canonical = yield* Files.readJson(Transcript, dataPath(transcriptKey(captureId)))
+    if (usableTranscript(canonical) !== null) return transcriptKey(captureId)
+    const firstLook = yield* Files.readJson(Transcript, dataPath(localTranscriptKey(captureId)))
+    return usableTranscript(firstLook) !== null ? localTranscriptKey(captureId) : null
+  })
+
+const dayIndexBasis = Effect.gen(function*() {
+  const captureIds = yield* transcribedCaptures
   const zone = yield* homeTimeZone
   const corrections = yield* readCorrections
-  const pairs = captureIds.map((captureId) => ({
-    captureId,
-    correctionHash: correctionFor(corrections, captureId).hash
-  }))
+  // The selected transcript key participates, not just the capture id:
+  // a canonical transcript can now replace an error/absent state at the
+  // same path when a failed transcription is retried, and a first-look
+  // can later be superseded by the canonical transcript. Without it the
+  // basis (and thus the index file) would be identical before and after
+  // the fix landed, and the index built while the capture was unusable
+  // would be served forever.
+  const pairs = yield* Effect.forEach(captureIds, (captureId) =>
+    Effect.map(selectedTranscriptKey(captureId), (transcriptKey) => ({
+      captureId,
+      correctionHash: correctionFor(corrections, captureId).hash,
+      transcriptKey
+    })), { concurrency: 8 })
   // The home zone participates: changing it re-attributes zone-less captures,
   // so the index (and downstream journals) must re-derive.
   const inputHash = sha256(
-    [DAY_INDEX_VERSION, zone, ...pairs.map((pair) => `${pair.captureId}:${pair.correctionHash ?? ""}`)].join("\n")
+    [DAY_INDEX_VERSION, zone, ...pairs.map((pair) => `${pair.captureId}:${pair.correctionHash ?? ""}:${pair.transcriptKey ?? ""}`)].join("\n")
   )
   return { pairs, inputHash, corrections, zone }
 })
 
 const buildDayIndex = Effect.fn("buildDayIndex")(
   function*(
-    pairs: ReadonlyArray<{ captureId: string; correctionHash: string | null }>,
+    pairs: ReadonlyArray<{ captureId: string; correctionHash: string | null; transcriptKey: string | null }>,
     inputHash: string,
     corrections: Corrections,
     zone: string
   ) {
     const days: Record<string, Array<DayEntry>> = {}
-    const usable = (t: Option.Option<Transcript>) =>
-      Option.isSome(t) && t.value.status === "completed" && !!t.value.text?.trim() ? t : null
-    for (const { captureId, correctionHash } of pairs) {
+    for (const { captureId, correctionHash, transcriptKey: selectedKey } of pairs) {
       // Live provisionals (in-progress segments) aren't captures yet: file
       // them directly from the provisional transcript, keyed by segment UUID.
       const live = parseLiveCaptureId(captureId)
       if (live !== null) {
         const liveKey = liveTranscriptKey(live.installId, live.segmentUuid)
-        const provisional = usable(yield* Files.readJson(Transcript, dataPath(liveKey)))
+        const provisional = usableTranscript(yield* Files.readJson(Transcript, dataPath(liveKey)))
         const capturedAt = provisional?.value.capturedAt
         if (provisional === null || !capturedAt) continue
         const { day, startTime } = wallClockInZone(capturedAt, zone)
@@ -94,15 +124,11 @@ const buildDayIndex = Effect.fn("buildDayIndex")(
       }
       // The vendor transcript wins when it is usable; the on-device
       // first-look fills the gap before it lands (or when the vendor run
-      // errored). The entry records which key was used, so a later canonical
-      // transcript changes the journal's input hash and regenerates the day.
-      const canonical = usable(yield* Files.readJson(Transcript, dataPath(transcriptKey(captureId))))
-      const firstLook = canonical === null
-        ? usable(yield* Files.readJson(Transcript, dataPath(localTranscriptKey(captureId))))
-        : null
-      const transcript = canonical ?? firstLook
-      if (transcript === null) continue
-      const key = canonical !== null ? transcriptKey(captureId) : localTranscriptKey(captureId)
+      // has not completed). The basis already selected the key, and the
+      // entry records it, so a later canonical transcript changes both
+      // this index's key and the journal's input hash.
+      if (selectedKey === null) continue
+      const key = selectedKey
       const { attribution } = yield* currentAttribution(captureId, corrections, zone)
       if (!attribution.day || !attribution.estimatedStartTime || !attribution.timeZone) continue
       const entry = new DayEntry({
