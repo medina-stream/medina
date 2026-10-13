@@ -8,6 +8,7 @@ import { sha256 } from "../Hash.ts"
 import type { Source, SourceReport } from "../Resource.ts"
 import { dataPath } from "./Resources.ts"
 import { duckdb, haversineMeters, quote } from "./Gps.ts"
+import { cachedFileHash, cachedFileHashes, flushFileHashes } from "./FileHashes.ts"
 
 export const STAYS_VERSION = "stays-v1"
 export const DEFAULT_STAY_RADIUS_M = 150
@@ -88,11 +89,9 @@ const radius = () => {
 }
 
 const pointPartitions = Effect.gen(function*() {
-  const fs = yield* FileSystem.FileSystem
   const files = (yield* Files.listFiles(dataPath(POINTS_ROOT))).filter((path) => /^day=\d{4}-\d{2}-\d{2}\/points\.parquet$/.test(path))
-  const hashes: Array<{ relative: string; hash: string }> = []
-  for (const relative of files) hashes.push({ relative, hash: sha256(yield* fs.readFile(dataPath(`${POINTS_ROOT}/${relative}`))) })
-  return hashes
+  const hashes = yield* cachedFileHashes(files.map((relative) => dataPath(`${POINTS_ROOT}/${relative}`)))
+  return files.map((relative, index) => ({ relative, hash: hashes[index]! }))
 })
 
 /** The UTC-day partitions that can hold stays overlapping the local day
@@ -117,13 +116,15 @@ const stayCandidateDays = (start: number, end: number) => {
 const stayPartitionsFor = (start: number, end: number) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
-    const hashes: Array<{ relative: string; hash: string }> = []
+    const present: Array<{ relative: string; path: string }> = []
     for (const day of stayCandidateDays(start, end)) {
       const relative = `day=${day}/stays.parquet`
       const path = dataPath(`${STAYS_ROOT}/${relative}`)
-      if (yield* fs.exists(path)) hashes.push({ relative, hash: sha256(yield* fs.readFile(path)) })
+      if (yield* fs.exists(path)) present.push({ relative, path })
     }
-    return hashes
+    const hashes = yield* Effect.forEach(present, ({ path }) => cachedFileHash(path), { concurrency: 4 })
+    yield* flushFileHashes
+    return present.map(({ relative }, index) => ({ relative, hash: hashes[index]! }))
   })
 
 /** A per-day stays basis hash: covers only the stay partitions that can

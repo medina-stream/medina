@@ -100,46 +100,50 @@ const buildDayIndex = Effect.fn("buildDayIndex")(
     corrections: Corrections,
     zone: string
   ) {
-    const days: Record<string, Array<DayEntry>> = {}
-    for (const { captureId, correctionHash, transcriptKey: selectedKey } of pairs) {
-      // Live provisionals (in-progress segments) aren't captures yet: file
-      // them directly from the provisional transcript, keyed by segment UUID.
-      const live = parseLiveCaptureId(captureId)
-      if (live !== null) {
-        const liveKey = liveTranscriptKey(live.installId, live.segmentUuid)
-        const provisional = usableTranscript(yield* Files.readJson(Transcript, dataPath(liveKey)))
-        const capturedAt = provisional?.value.capturedAt
-        if (provisional === null || !capturedAt) continue
-        const { day, startTime } = wallClockInZone(capturedAt, zone)
-        const entry = new DayEntry({
+    // Per-capture work (transcript read + attribution probe/materialize)
+    // is independent, so it runs concurrently; grouping and the per-day
+    // sort below keep the written index identical to the sequential pass.
+    const placed = yield* Effect.forEach(pairs, ({ captureId, correctionHash, transcriptKey: selectedKey }) =>
+      Effect.gen(function*() {
+        // Live provisionals (in-progress segments) aren't captures yet: file
+        // them directly from the provisional transcript, keyed by segment UUID.
+        const live = parseLiveCaptureId(captureId)
+        if (live !== null) {
+          const liveKey = liveTranscriptKey(live.installId, live.segmentUuid)
+          const provisional = usableTranscript(yield* Files.readJson(Transcript, dataPath(liveKey)))
+          const capturedAt = provisional?.value.capturedAt
+          if (provisional === null || !capturedAt) return null
+          const { day, startTime } = wallClockInZone(capturedAt, zone)
+          return { day, entry: new DayEntry({
+            captureId,
+            transcriptKey: liveKey,
+            startTime,
+            timeZone: zone,
+            channel: "audio",
+            correctionHash: null
+          }) }
+        }
+        // The vendor transcript wins when it is usable; the on-device
+        // first-look fills the gap before it lands (or when the vendor run
+        // has not completed). The basis already selected the key, and the
+        // entry records it, so a later canonical transcript changes both
+        // this index's key and the journal's input hash.
+        if (selectedKey === null) return null
+        const { attribution } = yield* currentAttribution(captureId, corrections, zone)
+        if (!attribution.day || !attribution.estimatedStartTime || !attribution.timeZone) return null
+        return { day: attribution.day, entry: new DayEntry({
           captureId,
-          transcriptKey: liveKey,
-          startTime,
-          timeZone: zone,
-          channel: "audio",
-          correctionHash: null
-        })
-        days[day] = [...(days[day] ?? []), entry]
-        continue
-      }
-      // The vendor transcript wins when it is usable; the on-device
-      // first-look fills the gap before it lands (or when the vendor run
-      // has not completed). The basis already selected the key, and the
-      // entry records it, so a later canonical transcript changes both
-      // this index's key and the journal's input hash.
-      if (selectedKey === null) continue
-      const key = selectedKey
-      const { attribution } = yield* currentAttribution(captureId, corrections, zone)
-      if (!attribution.day || !attribution.estimatedStartTime || !attribution.timeZone) continue
-      const entry = new DayEntry({
-        captureId,
-        transcriptKey: key,
-        startTime: attribution.estimatedStartTime,
-        timeZone: attribution.timeZone,
-        channel: attribution.channel,
-        correctionHash
-      })
-      days[attribution.day] = [...(days[attribution.day] ?? []), entry]
+          transcriptKey: selectedKey,
+          startTime: attribution.estimatedStartTime,
+          timeZone: attribution.timeZone,
+          channel: attribution.channel,
+          correctionHash
+        }) }
+      }), { concurrency: 8 })
+    const days: Record<string, Array<DayEntry>> = {}
+    for (const item of placed) {
+      if (item === null) continue
+      days[item.day] = [...(days[item.day] ?? []), item.entry]
     }
     for (const entries of Object.values(days)) {
       entries.sort((a, b) => a.startTime.localeCompare(b.startTime))
