@@ -12,7 +12,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import * as Files from "../Files.ts"
-import { pipelineRuntime, RUN_REPORT_KEY, RunReport } from "../Pipeline.ts"
+import { pipelineRuntime, pipelineRuntimeFor, RUN_REPORT_KEY, runReportKey, RunReport } from "../Pipeline.ts"
 import { currentDayIndex } from "./DayIndex.ts"
 import { journalResource } from "./Journal.ts"
 import { DayRow, ListDays } from "./JournalApi.ts"
@@ -42,6 +42,17 @@ export const pipelineStatus = Effect.gen(function*() {
   const lastRun = yield* Files.readJson(RunReport, dataPath(RUN_REPORT_KEY)).pipe(
     Effect.orElseSucceed(() => Option.none<RunReport>())
   )
+  const inventoryRuntime = pipelineRuntimeFor("inventory")
+  const inventoryRun = yield* Files.readJson(RunReport, dataPath(runReportKey("inventory"))).pipe(
+    Effect.orElseSucceed(() => Option.none<RunReport>())
+  )
+  const loopTiming = (runtime: typeof pipelineRuntime, run: Option.Option<RunReport>) => ({
+    running: runtime.running,
+    currentStartedAt: runtime.currentStartedAt,
+    lastStartedAt: Option.isSome(run) ? run.value.startedAt : null,
+    lastFinishedAt: Option.isSome(run) ? run.value.finishedAt : runtime.lastFinishedAt,
+    nextRunAt: runtime.nextRunAt
+  })
   const byDay = yield* journalKeysByDay
   const index = yield* currentDayIndex
   const instances = yield* journalResource.instances
@@ -58,12 +69,12 @@ export const pipelineStatus = Effect.gen(function*() {
       startedAt: pipelineRuntime.processStartedAt,
       status: "ready" as const
     },
-    pipeline: {
-      running: pipelineRuntime.running,
-      currentStartedAt: pipelineRuntime.currentStartedAt,
-      lastStartedAt: Option.isSome(lastRun) ? lastRun.value.startedAt : null,
-      lastFinishedAt: Option.isSome(lastRun) ? lastRun.value.finishedAt : pipelineRuntime.lastFinishedAt,
-      nextRunAt: pipelineRuntime.nextRunAt
+    pipeline: loopTiming(pipelineRuntime, lastRun),
+    // Per-loop health: `pipeline`/`lastRun` above stay the ingest loop for
+    // existing consumers; `loops` keeps inventory from masking it (and back).
+    loops: {
+      ingest: { ...loopTiming(pipelineRuntime, lastRun), lastRun: Option.getOrNull(lastRun) },
+      inventory: { ...loopTiming(inventoryRuntime, inventoryRun), lastRun: Option.getOrNull(inventoryRun) }
     },
     lastRun: Option.getOrNull(lastRun),
     days,

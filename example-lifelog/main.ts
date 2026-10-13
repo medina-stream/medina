@@ -870,7 +870,8 @@ const Ingest = Layer.effectDiscard(
         // Order matters: notes are extraction from audio (stable across movement
         // changes), movement enriches journals, and the journal reads both.
         [attributionResource, dayIndexResource, transcriptSearchResource, movementResource, notesResource, journalResource],
-        dataPath
+        dataPath,
+        { name: "ingest", cadenceMs: 60_000 }
       ).pipe(
         Effect.catchCause((cause) => Effect.logError("pipeline run failed", cause))
       ),
@@ -893,7 +894,8 @@ const Ingest = Layer.effectDiscard(
       inventorySources,
       [],
       [],
-      dataPath
+      dataPath,
+      { name: "inventory", cadenceMs: 60 * 60_000 }
     ).pipe(
       Effect.catchCause((cause) => Effect.logError("inventory pipeline run failed", cause)),
       Effect.repeat(Schedule.spaced("1 hour")),

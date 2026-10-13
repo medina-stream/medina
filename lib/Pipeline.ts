@@ -55,34 +55,80 @@ export interface PipelineSource<R> {
 }
 
 export const RUN_REPORT_KEY = "runs/latest.json"
-export const runHistoryKey = (startedAt: string) =>
-  `runs/history/${startedAt.replace(/[:.]/g, "-")}.json`
 
-/** Process-local state complements the durable last-run report. */
-export const pipelineRuntime: {
+/** Latest-report key for a named loop. The ingest loop keeps the historical
+ * `runs/latest.json` so existing readers keep working; every other loop gets
+ * its own key and cannot overwrite it. */
+export const runReportKey = (name = "ingest") =>
+  name === "ingest" ? RUN_REPORT_KEY : `runs/${name}/latest.json`
+
+export const runHistoryKey = (startedAt: string, name = "ingest") => {
+  const file = `${startedAt.replace(/[:.]/g, "-")}.json`
+  return name === "ingest" ? `runs/history/${file}` : `runs/${name}/history/${file}`
+}
+
+/** Process-local state complements the durable last-run report. One instance
+ * per loop: concurrent loops must never share `running`/`nextRunAt`. */
+export interface PipelineRuntime {
   readonly processStartedAt: string
   running: boolean
   currentStartedAt: string | null
   lastFinishedAt: string | null
   nextRunAt: string | null
-} = {
+}
+
+export const makePipelineRuntime = (): PipelineRuntime => ({
   processStartedAt: new Date().toISOString(),
   running: false,
   currentStartedAt: null,
   lastFinishedAt: null,
   nextRunAt: null
+})
+
+/** The ingest loop's runtime (historical global, kept for `/status`). */
+export const pipelineRuntime: PipelineRuntime = makePipelineRuntime()
+
+/** Every named loop's runtime, keyed by loop name. */
+export const pipelineRuntimes = new Map<string, PipelineRuntime>([["ingest", pipelineRuntime]])
+
+export const pipelineRuntimeFor = (name: string): PipelineRuntime => {
+  const existing = pipelineRuntimes.get(name)
+  if (existing) return existing
+  const created = makePipelineRuntime()
+  pipelineRuntimes.set(name, created)
+  return created
+}
+
+export interface PipelineOptions {
+  /** Loop identity: selects the runtime, report key, and history prefix. */
+  readonly name?: string
+  /** Repeat cadence for this loop; `nextRunAt` is finishedAt + cadence. */
+  readonly cadenceMs?: number
+  /** Explicit runtime (mainly for tests); defaults to the named loop's. */
+  readonly runtime?: PipelineRuntime
 }
 
 export const runPipeline = <R>(
   sources: ReadonlyArray<PipelineSource<R>>,
   stages: ReadonlyArray<Source<R>>,
   resources: ReadonlyArray<Resource<R>>,
-  dataPath: (key: string) => string
-) =>
-  Effect.gen(function*() {
+  dataPath: (key: string) => string,
+  options?: PipelineOptions
+) => {
+  const name = options?.name ?? "ingest"
+  const cadenceMs = options?.cadenceMs ?? 60 * 60 * 1000
+  const runtime = options?.runtime ?? pipelineRuntimeFor(name)
+  return Effect.gen(function*() {
+    // Re-entrancy guard: `Schedule.spaced` cannot overlap itself, but a
+    // second caller (or a future scheduler) must not run two passes of the
+    // same loop at once. Check-and-set is atomic here: no yield in between.
+    if (runtime.running) {
+      yield* Effect.logWarning(`pipeline '${name}' skipped: a pass is already running`)
+      return
+    }
     const startedAt = new Date().toISOString()
-    pipelineRuntime.running = true
-    pipelineRuntime.currentStartedAt = startedAt
+    runtime.running = true
+    runtime.currentStartedAt = startedAt
     yield* publishEvent({ type: "pipeline", status: "running", message: "Pipeline pass started" })
     const failures: Array<{ stage: string; item: string; error: string }> = []
     const fail = (stage: string, item: string) => (cause: unknown) => {
@@ -265,10 +311,10 @@ export const runPipeline = <R>(
       materialized,
       failures
     })
-    yield* Files.writeJson(dataPath(RUN_REPORT_KEY), report)
-    yield* Files.writeJson(dataPath(runHistoryKey(startedAt)), report)
-    pipelineRuntime.lastFinishedAt = finishedAt
-    pipelineRuntime.nextRunAt = new Date(Date.parse(finishedAt) + 60 * 60 * 1000).toISOString()
+    yield* Files.writeJson(dataPath(runReportKey(name)), report)
+    yield* Files.writeJson(dataPath(runHistoryKey(startedAt, name)), report)
+    runtime.lastFinishedAt = finishedAt
+    runtime.nextRunAt = new Date(Date.parse(finishedAt) + cadenceMs).toISOString()
     yield* publishEvent({
       type: "pipeline",
       status: failures.length === 0 ? "complete" : "degraded",
@@ -276,7 +322,8 @@ export const runPipeline = <R>(
     })
   }).pipe(
     Effect.ensuring(Effect.sync(() => {
-      pipelineRuntime.running = false
-      pipelineRuntime.currentStartedAt = null
+      runtime.running = false
+      runtime.currentStartedAt = null
     }))
   )
+}
