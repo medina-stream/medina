@@ -59,6 +59,20 @@ export interface BucketApi {
 
 export class Bucket extends Context.Service<Bucket, BucketApi>()("medina/Bucket") {}
 
+/**
+ * The `limit` newest objects, newest-first (ingest priority: newer
+ * captures are almost always more valuable). Pure — safe to test.
+ */
+export const topNewest = (
+  objects: ReadonlyArray<BucketObject>,
+  limit: number
+): ReadonlyArray<BucketObject> =>
+  limit <= 0
+    ? []
+    : [...objects]
+      .sort((a, b) => (b.lastModified ?? "").localeCompare(a.lastModified ?? ""))
+      .slice(0, limit)
+
 const NOT_CONFIGURED = "bucket is not configured: set BUCKET_NAME and BUCKET_ENDPOINT "
   + "(plus BUCKET_ACCESS_KEY_ID/BUCKET_SECRET_ACCESS_KEY unless the endpoint "
   + "signs at the network edge, like an exe.dev s3 integration)"
@@ -128,7 +142,12 @@ const s3ReadApi = (
   list: (prefix, limit) => Effect.tryPromise({
     try: async () => {
       if (limit <= 0) return []
-      const objects: Array<BucketObject> = []
+      // Bounded newest-first selection: S3 returns keys lexicographically,
+      // so finding the newest still means paging the prefix — but only the
+      // current top-`limit` is retained (re-truncated per page), never the
+      // whole prefix materialized, sorted, and only then sliced. Callers
+      // that pass a bounded limit (discovery now does) pay bounded memory.
+      let objects: ReadonlyArray<BucketObject> = []
       let continuationToken: string | undefined
       do {
         const response = await client.send(new ListObjectsV2Command({
@@ -137,22 +156,16 @@ const s3ReadApi = (
           MaxKeys: 1000,
           ...(continuationToken === undefined ? {} : { ContinuationToken: continuationToken })
         }))
-        objects.push(...(response.Contents ?? []).flatMap((object) => object.Key === undefined ? [] : [{
+        const page = (response.Contents ?? []).flatMap((object) => object.Key === undefined ? [] : [{
           key: object.Key,
           size: object.Size ?? null,
           etag: object.ETag?.replace(/^"|"$/g, "") ?? null,
           lastModified: object.LastModified?.toISOString() ?? null
-        }]))
+        }])
+        objects = topNewest([...objects, ...page], limit)
         continuationToken = response.NextContinuationToken
       } while (continuationToken !== undefined)
       return objects
-        // Newest-first: ingest priority is newest data first -- newer
-        // captures are almost always more valuable. This can't starve older
-        // objects the way the old fixed-window sort did: discovery filters
-        // receipted objects before the per-pass slice, so the window always
-        // advances and a backlog always drains.
-        .sort((a, b) => (b.lastModified ?? "").localeCompare(a.lastModified ?? ""))
-        .slice(0, limit)
     },
     catch: asError
   }),
@@ -346,15 +359,17 @@ const memoryReadApi = (
 ): Pick<BucketApi, "list" | "download" | "head"> => ({
   list: (prefix, limit) =>
     Effect.sync(() =>
-      [...store.entries()]
-        .filter(([key]) => key.startsWith(prefix))
-        .slice(0, Math.max(0, limit))
-        .map(([key, value]) => ({
-          key,
-          size: value.bytes.length,
-          etag: md5Hex(value.bytes),
-          lastModified: null
-        }))
+      topNewest(
+        [...store.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .map(([key, value]) => ({
+            key,
+            size: value.bytes.length,
+            etag: md5Hex(value.bytes),
+            lastModified: null
+          })),
+        limit
+      )
     ),
   download: (key) => {
     const entry = store.get(key)
