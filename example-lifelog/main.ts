@@ -36,6 +36,7 @@ import { Tailscale, layer as tailscaleLayer } from "../lib/Tailscale.ts"
 import { gpsCompactSource, gpsDay, gpsInboxWrite, locationSummary, parseGpsBody } from "../lib/lifelog/Gps.ts"
 import { gpsLocalDay } from "../lib/lifelog/GpsPath.ts"
 import * as AssemblyAI from "../lib/AssemblyAI.ts"
+import * as ArtifactStore from "../lib/ArtifactStore.ts"
 import * as Bucket from "../lib/Bucket.ts"
 import * as R2TempCreds from "../lib/R2TempCreds.ts"
 import * as TransloaditNormalize from "../lib/capture/TransloaditNormalize.ts"
@@ -995,6 +996,11 @@ const Services = Layer.mergeAll(
   Drive.layer,
   Bucket.layer,
   Bucket.sourceLayer,
+  // The artifact store (ARTIFACT_STORE=local|bucket): Files.ts helpers
+  // route artifact IO through it, so this one provision is the whole
+  // persistence cutover — local directory today, bucket + DO index when
+  // the config flips.
+  ArtifactStore.layerFromConfig,
   R2TempCreds.layer,
   TransloaditNormalize.layer.pipe(Layer.provide(R2TempCreds.layer)),
   AssemblyAI.layer,

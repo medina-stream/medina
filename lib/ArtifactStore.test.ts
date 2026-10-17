@@ -10,7 +10,9 @@ import { join } from "node:path"
 import {
   ArtifactStore,
   artifactPath,
+  bucketFromConfig,
   key,
+  layerFromConfig,
   makeBucket,
   makeIndexClient,
   makeLocal,
@@ -227,6 +229,44 @@ describe("index client (HTTP)", () => {
       transport: async () => new Response("unauthorized", { status: 401 })
     })
     await expect(run(client.list(""))).rejects.toThrow("401")
+  })
+})
+
+describe("config selection (layerFromConfig)", () => {
+  const withMode = async (mode: string | undefined, body: () => Promise<void>) => {
+    const previous = process.env.ARTIFACT_STORE
+    if (mode === undefined) delete process.env.ARTIFACT_STORE
+    else process.env.ARTIFACT_STORE = mode
+    try {
+      await body()
+    } finally {
+      if (previous === undefined) delete process.env.ARTIFACT_STORE
+      else process.env.ARTIFACT_STORE = previous
+    }
+  }
+
+  test("default is the local store over DATA_DIR, serving the Files seam end to end", async () => {
+    await withMode(undefined, async () => {
+      const layers = Layer.mergeAll(
+        BunFileSystem.layer,
+        layerFromConfig.pipe(Layer.provide(BunFileSystem.layer))
+      )
+      const probe = dataPath("artifact-seam-config/probe.json")
+      await Effect.runPromise(Files.writeJson(probe, { via: "config" }).pipe(Effect.provide(layers)))
+      const read = await Effect.runPromise(
+        Files.readJson(Schema.Struct({ via: Schema.String }), probe).pipe(Effect.provide(layers))
+      )
+      expect(read).toEqual(Option.some({ via: "config" }))
+      await Effect.runPromise(Files.remove(probe).pipe(Effect.provide(layers)))
+    })
+  })
+
+  test("the bucket branch without bucket config builds a store that fails with instructions", async () => {
+    // Tested through bucketFromConfig: layerFromConfig reads its config
+    // once when the layer is built (the app builds Services once at
+    // boot), so the shared layer const cannot be mode-flipped per test.
+    const { store } = await Effect.runPromise(bucketFromConfig)
+    await expect(run(store.getText("anything.json"))).rejects.toThrow("ARTIFACT_STORE=bucket")
   })
 })
 
