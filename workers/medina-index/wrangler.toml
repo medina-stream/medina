@@ -1,0 +1,14 @@
+name = "medina-index"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+# The index is a single Durable Object: one registry for the whole
+# artifact bucket, serialized writes, SQLite storage. The Medina server
+# reaches it over HTTPS with a bearer token (the INDEX_API_TOKEN secret —
+# set it with `wrangler secret put INDEX_API_TOKEN`, never in this file).
+[durable_objects]
+bindings = [{ name = "INDEX", class_name = "MedinaIndex" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MedinaIndex"]
