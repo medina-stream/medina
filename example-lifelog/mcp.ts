@@ -54,6 +54,27 @@ server.registerTool(
 )
 
 server.registerTool(
+  "get_day_transcripts",
+  {
+    title: "Get a day's transcripts",
+    description: "Get the full transcript evidence for one civil day: every recording with its turns (speaker, text, millisecond offsets into the recording), exactly as the server's GetDayTranscripts RPC provides them. Returned whole however large the day is — truncate on the client side if needed; the utterance count is noted in the result.",
+    inputSchema: z.object({
+      day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "use YYYY-MM-DD")
+        .describe("Civil day in the lifelog's configured time zone, for example 2026-09-08")
+    })
+  },
+  async ({ day }) => {
+    const recordings = await client.getDayTranscripts(day)
+    const utteranceCount = recordings.reduce((count, recording) => count + recording.turns.length, 0)
+    const result = { day, utteranceCount, recordings }
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      structuredContent: result
+    }
+  }
+)
+
+server.registerTool(
   "list_stars",
   {
     title: "List a day's stars",

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { type LifelogStar, makeLifelogMcpClient } from "./Mcp.ts"
+import { type LifelogDayTranscript, type LifelogStar, makeLifelogMcpClient } from "./Mcp.ts"
 
 const journal = (day: string, report = "Walked by the bay.\n\n## 9:00–10:00 — Outside\nWalked.") => ({
   version: "journal-v12",
@@ -90,5 +90,48 @@ describe("lifelog MCP client", () => {
     await expect(client.listStars("2026-09-02")).resolves.toEqual([])
     await expect(client.getStar("gone")).resolves.toBeNull()
     expect(requested).toEqual(["/stars/020260901", "/star/abc", "/stars/020260902", "/star/gone"])
+  })
+
+  test("reads a day's transcripts through the GetDayTranscripts RPC", async () => {
+    const recordings: LifelogDayTranscript[] = [{
+      captureId: "capture-1",
+      startTime: "2026-09-01T16:00:00",
+      timeZone: "America/Los_Angeles",
+      turns: [
+        { speaker: null, startMs: 0, endMs: 2400, text: "star the last 5 minutes" },
+        { speaker: "speaker_B", startMs: 3000, endMs: 5100, text: "did it file?" }
+      ]
+    }]
+    const sent: Array<{ path: string; body: unknown }> = []
+    const client = makeLifelogMcpClient({
+      baseUrl: "http://lifelog.test",
+      fetch: async (input, init) => {
+        const path = new URL(input.toString()).pathname
+        const line = String(init?.body ?? "").trim()
+        const message = line ? JSON.parse(line) as { _tag: string; id: number; tag: string; payload: { day: string } } : null
+        sent.push({ path, body: message })
+        if (path !== "/rpc" || message?.tag !== "GetDayTranscripts") {
+          return new Response("not found", { status: 404 })
+        }
+        if (message.payload.day === "2026-09-03") {
+          const failure = {
+            _tag: "Exit",
+            requestId: message.id,
+            exit: { _tag: "Failure", cause: [{ _tag: "Fail", error: { message: "no such day" } }] }
+          }
+          return new Response(`${JSON.stringify(failure)}\n`, { headers: { "content-type": "application/ndjson" } })
+        }
+        const success = { _tag: "Exit", requestId: message.id, exit: { _tag: "Success", value: recordings } }
+        return new Response(`${JSON.stringify(success)}\n`, { headers: { "content-type": "application/ndjson" } })
+      }
+    })
+
+    await expect(client.getDayTranscripts("2026-09-01")).resolves.toEqual(recordings)
+    expect(sent).toEqual([{
+      path: "/rpc",
+      body: { _tag: "Request", id: 0, tag: "GetDayTranscripts", payload: { day: "2026-09-01" }, headers: [] }
+    }])
+    await expect(client.getDayTranscripts("2026-09-03")).rejects.toThrow("no such day")
+    await expect(client.getDayTranscripts("09/01/2026")).rejects.toThrow("day must be YYYY-MM-DD")
   })
 })

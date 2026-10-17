@@ -24,6 +24,23 @@ export interface LifelogDayReport {
   readonly report: string
 }
 
+/** One transcript turn, exactly as the GetDayTranscripts RPC provides it:
+ * offsets are milliseconds into the recording named by its parent. */
+export interface LifelogTranscriptTurn {
+  readonly speaker: string | null
+  readonly startMs: number
+  readonly endMs: number
+  readonly text: string
+}
+
+/** One recording's transcript for a day, as GetDayTranscripts returns it. */
+export interface LifelogDayTranscript {
+  readonly captureId: string
+  readonly startTime: string
+  readonly timeZone: string
+  readonly turns: readonly LifelogTranscriptTurn[]
+}
+
 /** One authored star, as the server's star endpoints return the record. */
 export interface LifelogStar {
   readonly id: string
@@ -155,6 +172,74 @@ export const makeLifelogMcpClient = (options: LifelogMcpClientOptions = {}) => {
         throw new Error(`lifelog returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`)
       }
       return await response.json() as LifelogStar[]
+    },
+
+    /**
+     * The day's transcripts via the server's GetDayTranscripts RPC: every
+     * recording for the day with its turns (speaker, text, offsets), in
+     * the RPC's own shape — nothing flattened or dropped, however large
+     * the day is; callers truncate if they must. The RPC is read-only and
+     * normalized, so this triggers no transcription and no LLM work.
+     *
+     * The call speaks the RPC's NDJSON framing directly over the injected
+     * fetch (one request line out, one terminal Exit line back), the same
+     * wire the typed client produces — this module stays free of the RPC
+     * runtime so tests can fake the transport.
+     */
+    async getDayTranscripts(day: string): Promise<readonly LifelogDayTranscript[]> {
+      const parsed = parseDayId(day)
+      if (parsed === null) throw new Error("day must be YYYY-MM-DD")
+      const url = new URL("/rpc", origin)
+      const requestLine = JSON.stringify({
+        _tag: "Request",
+        id: 0,
+        tag: "GetDayTranscripts",
+        payload: { day },
+        headers: []
+      })
+      let response: Response
+      try {
+        response = await request(url, {
+          method: "POST",
+          headers: { "content-type": "application/ndjson", accept: "application/ndjson" },
+          body: `${requestLine}\n`
+        })
+      } catch (error) {
+        throw new Error(`could not reach lifelog at ${origin.origin}: ${String(error)}`)
+      }
+      if (!response.ok) {
+        const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 240)
+        throw new Error(`lifelog returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`)
+      }
+      type RpcMessage = {
+        readonly _tag?: string
+        readonly requestId?: unknown
+        readonly exit?: {
+          readonly _tag?: string
+          readonly value?: unknown
+          readonly cause?: ReadonlyArray<{ readonly _tag?: string; readonly error?: { readonly message?: unknown } }>
+        }
+        readonly defect?: unknown
+      }
+      for (const line of (await response.text()).split("\n")) {
+        if (!line.trim()) continue
+        let message: RpcMessage
+        try {
+          message = JSON.parse(line) as RpcMessage
+        } catch {
+          continue
+        }
+        if (message._tag === "Defect") {
+          throw new Error(`lifelog GetDayTranscripts failed: ${String(message.defect)}`)
+        }
+        if (message._tag !== "Exit" || message.requestId !== 0) continue
+        const exit = message.exit
+        if (exit?._tag === "Success") return exit.value as readonly LifelogDayTranscript[]
+        const failure = exit?.cause?.find((entry) => entry._tag === "Fail")
+        const reason = typeof failure?.error?.message === "string" ? failure.error.message : "unknown RPC failure"
+        throw new Error(`lifelog GetDayTranscripts failed: ${reason}`)
+      }
+      throw new Error("lifelog GetDayTranscripts returned no result")
     },
 
     /** One authored star by id, or null when there is none (any more). */
