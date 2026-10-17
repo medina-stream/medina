@@ -53,4 +53,47 @@ server.registerTool(
   }
 )
 
+server.registerTool(
+  "list_stars",
+  {
+    title: "List a day's stars",
+    description: "List the authored stars (named time intervals) overlapping one civil day in the lifelog's configured time zone, oldest first. Stars are ephemeral by default — an absent star may have expired, not never existed.",
+    inputSchema: z.object({
+      day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "use YYYY-MM-DD")
+        .describe("Civil day in the lifelog's configured time zone, for example 2026-09-08")
+    })
+  },
+  async ({ day }) => {
+    const stars = await client.listStars(day)
+    return {
+      content: [{ type: "text", text: JSON.stringify(stars, null, 2) }],
+      structuredContent: { stars }
+    }
+  }
+)
+
+server.registerTool(
+  "get_star",
+  {
+    title: "Get one star",
+    description: "Get one authored star by id: its interval, name, note, visibility and retention. Returns an unavailable status when no such star exists (any more).",
+    inputSchema: z.object({
+      id: z.string().describe("The star's id, as returned by list_stars")
+    })
+  },
+  async ({ id }) => {
+    const star = await client.getStar(id)
+    if (star === null) {
+      return {
+        content: [{ type: "text", text: `No star ${id} is available.` }],
+        structuredContent: { id, status: "unavailable" }
+      }
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify(star, null, 2) }],
+      structuredContent: star
+    }
+  }
+)
+
 await server.connect(new StdioServerTransport())

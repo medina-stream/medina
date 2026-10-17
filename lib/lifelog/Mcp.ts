@@ -24,6 +24,19 @@ export interface LifelogDayReport {
   readonly report: string
 }
 
+/** One authored star, as the server's star endpoints return the record. */
+export interface LifelogStar {
+  readonly id: string
+  readonly startUtc: string
+  readonly endUtc: string
+  readonly name: string | null
+  readonly note: string | null
+  readonly visibility: "private" | "public"
+  readonly retentionSeconds: number
+  readonly createdAt: string
+  readonly createdVia: "voice" | "api"
+}
+
 type JournalResponse = {
   readonly day: string
   readonly generatedAt: string
@@ -122,6 +135,43 @@ export const makeLifelogMcpClient = (options: LifelogMcpClientOptions = {}) => {
       if (response.status === 202 || response.status === 404) return null
       const journal = await response.json() as JournalResponse
       return { day: journal.day, generatedAt: journal.generatedAt, report: journal.report }
+    },
+
+    /** The authored stars overlapping one civil day, oldest first. A day
+     * the server doesn't know is an empty list, not an error. */
+    async listStars(day: string): Promise<readonly LifelogStar[]> {
+      const parsed = parseDayId(day)
+      if (parsed === null) throw new Error("day must be YYYY-MM-DD")
+      const url = new URL(`/stars/${dayId(parsed)}`, origin)
+      let response: Response
+      try {
+        response = await request(url)
+      } catch (error) {
+        throw new Error(`could not reach lifelog at ${origin.origin}: ${String(error)}`)
+      }
+      if (response.status === 404) return []
+      if (!response.ok) {
+        const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 240)
+        throw new Error(`lifelog returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`)
+      }
+      return await response.json() as LifelogStar[]
+    },
+
+    /** One authored star by id, or null when there is none (any more). */
+    async getStar(id: string): Promise<LifelogStar | null> {
+      const url = new URL(`/star/${encodeURIComponent(id)}`, origin)
+      let response: Response
+      try {
+        response = await request(url)
+      } catch (error) {
+        throw new Error(`could not reach lifelog at ${origin.origin}: ${String(error)}`)
+      }
+      if (response.status === 404) return null
+      if (!response.ok) {
+        const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 240)
+        throw new Error(`lifelog returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`)
+      }
+      return await response.json() as LifelogStar
     }
   }
 }

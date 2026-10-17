@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { makeLifelogMcpClient } from "./Mcp.ts"
+import { type LifelogStar, makeLifelogMcpClient } from "./Mcp.ts"
 
 const journal = (day: string, report = "Walked by the bay.\n\n## 9:00–10:00 — Outside\nWalked.") => ({
   version: "journal-v12",
@@ -59,5 +59,36 @@ describe("lifelog MCP client", () => {
       generatedAt: "2026-01-01T12:00:00Z",
       report: "A focused day.\n\n## Home\nWorked."
     })
+  })
+
+  test("lists a day's stars and reads one star by id", async () => {
+    const star: LifelogStar = {
+      id: "abc",
+      startUtc: "2026-09-01T17:55:00.000Z",
+      endUtc: "2026-09-01T18:00:00.000Z",
+      name: "vet call",
+      note: null,
+      visibility: "private",
+      retentionSeconds: 3600,
+      createdAt: "2026-09-01T18:00:05.000Z",
+      createdVia: "voice"
+    }
+    const requested: string[] = []
+    const client = makeLifelogMcpClient({
+      baseUrl: "http://lifelog.test",
+      fetch: async (input) => {
+        const path = new URL(input.toString()).pathname
+        requested.push(path)
+        if (path === "/stars/020260901") return Response.json([star])
+        if (path === "/star/abc") return Response.json(star)
+        return new Response("not found", { status: 404 })
+      }
+    })
+
+    await expect(client.listStars("2026-09-01")).resolves.toEqual([star])
+    await expect(client.getStar("abc")).resolves.toEqual(star)
+    await expect(client.listStars("2026-09-02")).resolves.toEqual([])
+    await expect(client.getStar("gone")).resolves.toBeNull()
+    expect(requested).toEqual(["/stars/020260901", "/star/abc", "/stars/020260902", "/star/gone"])
   })
 })

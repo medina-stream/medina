@@ -312,6 +312,95 @@ export class Correction extends Schema.Class<Correction>("Correction")({
   note: Schema.optional(Schema.String)
 }) {}
 
+// --- stars: authored intervals over the day's evidence ---------------------
+
+/** Stars are authored, not derived — the star analogue of a correction
+ * file. The record below is the source of truth; the per-day view and the
+ * public artifact are materialized from the authored set (lifelog/Stars.ts).
+ * Intervals are stored in UTC; civil-day membership is a view concern,
+ * never stored on the record. */
+export const STARS_VERSION = "stars-v1"
+
+/** Default lifetime, in seconds, of a star that names none: long enough to
+ * be retrieved and used, short enough to mean it. Deliberate keeps say
+ * their own number. */
+export const DEFAULT_STAR_RETENTION_SECONDS = 3600
+
+export const starKey = (id: string) => `star/${id}.json`
+
+export class Star extends Schema.Class<Star>("Star")({
+  id: Schema.String,
+  /** UTC instants, full ISO. */
+  startUtc: Schema.String,
+  endUtc: Schema.String,
+  name: Schema.NullOr(Schema.String),
+  note: Schema.NullOr(Schema.String),
+  visibility: Schema.Literals(["private", "public"]),
+  /** Lifetime in seconds from `createdAt` (fractional values are valid);
+   * expiry deletes the record. Zero is a supported value meaning
+   * best-effort full forget: the star is usable in-flight but the system
+   * keeps no lasting record of it. That is an honest best-effort within
+   * the system's control, not a guarantee about copies outside it. */
+  retentionSeconds: Schema.Number,
+  createdAt: Schema.String,
+  createdVia: Schema.Literals(["voice", "api"])
+}) {}
+
+/** A day's stars view lives at a key baking in a hash over that day's
+ * authored stars plus the transcript keys their excerpts resolve from, so
+ * a new star, an edit, or a new transcript stales exactly that day. */
+export const starsDayKey = (day: string, basisHash: string) => `stars/${STARS_VERSION}/${day}/${basisHash}.json`
+
+export class StarsDayEntry extends Schema.Class<StarsDayEntry>("StarsDayEntry")({
+  star: Star,
+  /** Transcripts whose spans overlap the star's interval. */
+  transcriptKeys: Schema.Array(Schema.String),
+  /** Best-effort text of the overlapping utterances; null when no usable
+   * transcript covers the interval yet. */
+  excerpt: Schema.NullOr(Schema.String)
+}) {}
+
+export class StarsDay extends Schema.Class<StarsDay>("StarsDay")({
+  version: Schema.String,
+  day: Schema.String,
+  basisHash: Schema.String,
+  generatedAt: Schema.String,
+  entries: Schema.Array(StarsDayEntry)
+}) {}
+
+/** The public form of a public star: what its unauthenticated URL serves.
+ * The canonical JSON of this record is content-hashed; the hash is the
+ * artifact's key and the tail of its URL, so identical content shares one
+ * URL and any edit moves it. */
+export const publicStarKey = (contentHash: string) => `public/star/${contentHash}.json`
+
+export class PublicStar extends Schema.Class<PublicStar>("PublicStar")({
+  id: Schema.String,
+  startUtc: Schema.String,
+  endUtc: Schema.String,
+  name: Schema.NullOr(Schema.String),
+  note: Schema.NullOr(Schema.String),
+  createdAt: Schema.String,
+  transcriptKeys: Schema.Array(Schema.String),
+  excerpt: Schema.NullOr(Schema.String)
+}) {}
+
+/** The receipt left behind when a star is forgotten: content-free proof
+ * that a thing existed and was forgotten on schedule. Hashes and
+ * timestamps only — no name, no note, no interval, no excerpt. The content
+ * hash is the star's public-artifact hash, so a receipt and an artifact
+ * name the same content identity. */
+export const starForgetReceiptKey = (contentHash: string) => `provenance/star/${contentHash}.json`
+
+export class StarForgetReceipt extends Schema.Class<StarForgetReceipt>("StarForgetReceipt")({
+  contentHash: Schema.String,
+  createdAt: Schema.String,
+  /** The instant the system forgot the star. */
+  deletedAt: Schema.String,
+  retentionSeconds: Schema.Number,
+  reason: Schema.Literals(["zero-retention", "expired", "removed"])
+}) {}
+
 // --- day index: the one derived view over all attributions ------------------
 
 /** One file answering “which captures (with usable transcripts) belong to

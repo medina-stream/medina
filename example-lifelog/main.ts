@@ -47,7 +47,7 @@ import type { Source } from "../lib/Resource.ts"
 import { MedinaAuth, MEDINA_SCOPE } from "../lib/lifelog/Auth.ts"
 import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, devicesPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
-import { archiveSweepSource, audioSource, captureBucketSource, deviceEventsSource, driveAllowlistSource, driveInventorySource, localTranscriptSource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, todayDay } from "./Lifelog.ts"
+import { archiveSweepSource, audioSource, captureBucketSource, deviceEventsSource, driveAllowlistSource, driveInventorySource, localTranscriptSource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, starById, starsForDay, starsResource, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 import { CapturePolicyStore, decodePolicy } from "../lib/capture/CapturePolicy.ts"
@@ -585,6 +585,35 @@ one-line download above is the zero-install form.
         return HttpServerResponse.jsonUnsafe(movement, { headers: { "cache-control": cacheControl } })
       })
     )
+    // Authored stars, read-only for tools (the MCP bridge reads these).
+    // Served from the authored records themselves, so a star is visible the
+    // moment it is set; the materialized per-day view is for the pipeline's
+    // consumers, not this read. Expired stars disappear when the pipeline's
+    // next pass sweeps them.
+    yield* router.add(
+      "GET",
+      "/stars/:day",
+      Effect.gen(function*() {
+        const day = parseDayId((yield* HttpRouter.params).day ?? "")
+        if (day === null) {
+          return HttpServerResponse.text("not a day: use 020260907 or 2026-09-07", { status: 400 })
+        }
+        const stars = yield* starsForDay(day).pipe(Effect.orDie)
+        return HttpServerResponse.jsonUnsafe(stars, { headers: { "cache-control": "private, max-age=60" } })
+      })
+    )
+    yield* router.add(
+      "GET",
+      "/star/:id",
+      Effect.gen(function*() {
+        const id = (yield* HttpRouter.params).id ?? ""
+        const star = yield* starById(id).pipe(Effect.orDie)
+        if (Option.isNone(star)) {
+          return HttpServerResponse.text("no such star", { status: 404 })
+        }
+        return HttpServerResponse.jsonUnsafe(star.value, { headers: { "cache-control": "private, max-age=60" } })
+      })
+    )
     // Operator surface, kept as plain HTTP for curl and monitoring. Encoded
     // through the same `PipelineStatus` schema the RPC serves, so the two
     // views of pipeline health cannot describe different shapes.
@@ -873,7 +902,7 @@ const Ingest = Layer.effectDiscard(
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement
         // changes), movement enriches journals, and the journal reads both.
-        [attributionResource, dayIndexResource, transcriptSearchResource, movementResource, notesResource, journalResource],
+        [attributionResource, dayIndexResource, transcriptSearchResource, movementResource, notesResource, journalResource, starsResource],
         dataPath,
         { name: "ingest", cadenceMs: 60_000 }
       ).pipe(

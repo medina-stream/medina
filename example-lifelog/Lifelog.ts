@@ -32,4 +32,5 @@ export {
   todayDay
 } from "../lib/lifelog/Journal.ts"
 export { currentJournals, pipelineStatus, type JournalView } from "../lib/lifelog/Views.ts"
+export { starById, starsForDay, starsResource } from "../lib/lifelog/Stars.ts"
 export { homeTimeZone } from "../lib/lifelog/Time.ts"
