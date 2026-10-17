@@ -184,6 +184,18 @@ export const currentDayIndex = Effect.gen(function*() {
   return yield* cached
 })
 
+/**
+ * The speaker label that identifies Scott himself in a transcript's
+ * utterances. Today only the on-device channel is self-attributable: it
+ * does not diarize, so its utterances are unlabeled (speaker: null) and
+ * come from his own device's mic stream. Vendor diarization labels
+ * ("speaker_A", "speaker_B", ...) are per-capture and carry no durable
+ * identity yet — see the "Durable speaker identity" item in todo.md — so
+ * no vendor label counts as self. When confirmed label-to-person mappings
+ * land, this becomes a lookup rather than a constant.
+ */
+export const SPEAKER_SELF_ID: string | null = null
+
 /** Transcripts for one day, in believed chronological order. */
 export const dayTranscripts = (index: DayIndex, day: string) =>
   Effect.forEach(index.days[day] ?? [], (entry) =>

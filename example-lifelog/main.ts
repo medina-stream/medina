@@ -49,6 +49,8 @@ import { DATA_DIR, dataPath } from "../lib/lifelog/Resources.ts"
 import { dayPage, devicesPage, pendingPage, spaHome } from "../lib/lifelog/Pages.tsx"
 import { archiveSweepSource, audioSource, captureBucketSource, deviceEventsSource, driveAllowlistSource, driveInventorySource, localTranscriptSource, mediaNormalizeSource, mediaTranscribeSource, recordingObjectSource, attributionResource, dayIndexResource, transcriptSearchResource, httpIngest, journalCachedForDay, journalResource, notesResource, notesSource, pipelineStatus, starById, starsForDay, starsResource, todayDay } from "./Lifelog.ts"
 import { movementCachedForDay, movementResource } from "../lib/lifelog/Movement.ts"
+import { detectAndFileStars, STAR_DETECTOR_PERIOD_SECONDS } from "../lib/lifelog/StarDetector.ts"
+import { StarsLive } from "../lib/lifelog/Stars.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 import { CapturePolicyStore, decodePolicy } from "../lib/capture/CapturePolicy.ts"
 import { appIconResponse, webIconTarget } from "./AppIconResource.ts"
@@ -932,6 +934,18 @@ const Ingest = Layer.effectDiscard(
     ).pipe(
       Effect.catchCause((cause) => Effect.logError("inventory pipeline run failed", cause)),
       Effect.repeat(Schedule.spaced("1 hour")),
+      Effect.forkScoped
+    )
+
+    // The star doorbell: re-scan recent transcripts for spoken "star …"
+    // commands and file them as voice stars, then run the retention
+    // sweep. Idempotent by deterministic command ids; off the request
+    // path entirely; failures are caught and logged here so a bad pass
+    // can never take the ingest loops down with it.
+    yield* detectAndFileStars(new Date()).pipe(
+      Effect.provide(StarsLive),
+      Effect.catchCause((cause) => Effect.logError("star detector sweep failed", cause)),
+      Effect.repeat(Schedule.spaced(`${STAR_DETECTOR_PERIOD_SECONDS} seconds`)),
       Effect.forkScoped
     )
   })
