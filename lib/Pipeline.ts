@@ -6,7 +6,6 @@
  */
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
-import * as FileSystem from "effect/FileSystem"
 import * as Files from "./Files.ts"
 import { publishEvent } from "./RuntimeEvents.ts"
 import type { Resource, ResourceInstance, Source, SourceReport } from "./Resource.ts"
@@ -247,7 +246,6 @@ export const runPipeline = <R>(
       })
     }
 
-    const fs = yield* FileSystem.FileSystem
     const materialized: Array<{ resource: string; label: string }> = []
     const resourceReports: Array<{ name: string; durationMs: number; discovered: number; materialized: number; failed: number }> = []
     for (const resource of resources) {
@@ -268,7 +266,10 @@ export const runPipeline = <R>(
       // backlog. Per-instance failures stay isolated, as in the old loop.
       const materializeOne = (instance: ResourceInstance<R>) =>
         Effect.gen(function*() {
-          if (yield* fs.exists(dataPath(instance.key))) return
+          // The freshness check goes through the store seam (Files.exists):
+          // in bucket mode the instance's file exists in the bucket, not on
+          // any local disk, and a local stat would re-materialize forever.
+          if (yield* Files.exists(dataPath(instance.key))) return
           yield* Effect.log(`materializing ${resource.name}/${instance.label}`)
           yield* publishEvent({
             type: "resource",

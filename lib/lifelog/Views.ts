@@ -374,10 +374,9 @@ const writeSnapshot = (value: ReadonlyArray<DayPreview>) =>
 const readSnapshot: Effect.Effect<ReadonlyArray<DayPreview> | null, never, FileSystem.FileSystem> =
   Effect.matchCauseEffect(
     Effect.gen(function*() {
-      const fs = yield* FileSystem.FileSystem
-      if (!(yield* fs.exists(PREVIEWS_SNAPSHOT))) return null
-      const text = yield* fs.readFileString(PREVIEWS_SNAPSHOT)
-      return yield* Schema.decodeUnknownEffect(ListDays.successSchema)(JSON.parse(text))
+      const text = yield* Files.readText(PREVIEWS_SNAPSHOT)
+      if (Option.isNone(text)) return null
+      return yield* Schema.decodeUnknownEffect(ListDays.successSchema)(JSON.parse(text.value))
     }),
     {
       onFailure: () => Effect.succeed(null),

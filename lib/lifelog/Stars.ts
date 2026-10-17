@@ -199,8 +199,7 @@ const removeStar = (id: string) =>
   Effect.gen(function*() {
     const star = yield* requireStar(id)
     yield* writeForgetReceipt(star, "removed", new Date().toISOString(), { transcriptKeys: [], excerpt: null })
-    const fs = yield* FileSystem.FileSystem
-    yield* fs.remove(dataPath(starKey(id)))
+    yield* Files.remove(dataPath(starKey(id)))
   }).pipe(Effect.mapError((error) => (error instanceof StarNotFound ? error : new Error(String(error)))))
 
 /** The instant a star stops existing. A zero retention puts that instant
@@ -214,7 +213,6 @@ export const starExpiresAt = (star: Star): number | null => {
 
 const sweepExpired = (now: Date = new Date()) =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const stars = yield* readAllStars
     const expired = stars.filter((star) => {
       const expiry = starExpiresAt(star)
@@ -223,7 +221,7 @@ const sweepExpired = (now: Date = new Date()) =>
     yield* Effect.forEach(expired, (star) =>
       Effect.gen(function*() {
         yield* writeForgetReceipt(star, "expired", now.toISOString(), { transcriptKeys: [], excerpt: null })
-        yield* fs.remove(dataPath(starKey(star.id)))
+        yield* Files.remove(dataPath(starKey(star.id)))
       }))
     return expired.map((star) => star.id)
   }).pipe(Effect.mapError((error) => new Error(String(error))))
@@ -441,14 +439,13 @@ const starsBasis = Effect.gen(function*() {
       () => new DayIndex({ version: DAY_INDEX_VERSION, inputHash: "unavailable", builtAt: now.toISOString(), days: {} })
     )
   )
-  const fs = yield* FileSystem.FileSystem
   const stars: Array<Star> = []
   for (const star of authored) {
     const expiry = starExpiresAt(star)
     if (expiry !== null && expiry <= now.getTime()) {
       const overlap = yield* starOverlap(index, star, starDays(star, zone))
       yield* writeForgetReceipt(star, "expired", now.toISOString(), overlap)
-      yield* fs.remove(dataPath(starKey(star.id)))
+      yield* Files.remove(dataPath(starKey(star.id)))
     } else {
       stars.push(star)
     }

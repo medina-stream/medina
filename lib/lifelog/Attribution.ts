@@ -64,14 +64,15 @@ export const transcribedCaptures = Effect.gen(function*() {
  * those would be spent learning that no file is there.
  */
 export const readCorrections = Effect.gen(function*() {
-  const fs = yield* FileSystem.FileSystem
   const entries = yield* Files.listFiles(dataPath("correction"))
   const corrections = new Map<string, { correction: Option.Option<Correction>; hash: string }>()
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue
     const captureId = entry.replace(/\.json$/, "")
     const path = dataPath(correctionKey(captureId))
-    const text = yield* fs.readFileString(path)
+    // The raw bytes are read through the same store seam as the decode:
+    // the hash must be over the bytes the store holds, wherever they live.
+    const text = Option.getOrElse(yield* Files.readText(path), () => "")
     corrections.set(captureId, { correction: yield* Files.readJson(Correction, path), hash: sha256(text) })
   }
   return corrections
