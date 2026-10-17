@@ -10,9 +10,7 @@ import { join } from "node:path"
 import {
   ArtifactStore,
   artifactPath,
-  bucketFromConfig,
   key,
-  layerFromConfig,
   makeBucket,
   makeIndexClient,
   makeLocal,
@@ -233,40 +231,63 @@ describe("index client (HTTP)", () => {
 })
 
 describe("config selection (layerFromConfig)", () => {
-  const withMode = async (mode: string | undefined, body: () => Promise<void>) => {
-    const previous = process.env.ARTIFACT_STORE
-    if (mode === undefined) delete process.env.ARTIFACT_STORE
-    else process.env.ARTIFACT_STORE = mode
-    try {
-      await body()
-    } finally {
-      if (previous === undefined) delete process.env.ARTIFACT_STORE
-      else process.env.ARTIFACT_STORE = previous
+  // These run in a subprocess, deliberately: Effect's env ConfigProvider
+  // snapshots process.env at its first evaluation in a process, so an
+  // in-process config test would freeze the environment for every other
+  // test file in the suite (the Transloadit tests set env per test and
+  // build config-reading layers — they must evaluate Config first).
+  // Config selection is boot-time behavior; a fresh process per case is
+  // also simply what production does.
+  const PROGRAM = `
+import { BunFileSystem } from "@effect/platform-bun"
+import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
+import { ArtifactStore, layerFromConfig } from "./lib/ArtifactStore.ts"
+const exit = await Effect.runPromiseExit(
+  Effect.gen(function*() {
+    const store = yield* ArtifactStore
+    yield* store.putText("probe/x.json", "ok")
+    const got = yield* store.getText("probe/x.json")
+    return { root: store.root, got: got._tag === "Some" ? got.value : null }
+  }).pipe(Effect.provide(layerFromConfig.pipe(Layer.provide(BunFileSystem.layer))))
+)
+console.log(JSON.stringify(
+  exit._tag === "Success"
+    ? { ok: true, ...exit.value }
+    : { ok: false, error: String(exit.cause).slice(0, 400) }
+))
+`
+  const runConfigCase = (env: Record<string, string | undefined>): { ok: boolean; root?: string; got?: string | null; error?: string } => {
+    const childEnv = { ...process.env }
+    for (const name of [
+      "ARTIFACT_STORE", "ARTIFACT_BUCKET_NAME", "ARTIFACT_BUCKET_ENDPOINT",
+      "ARTIFACT_BUCKET_ACCESS_KEY_ID", "ARTIFACT_BUCKET_SECRET_ACCESS_KEY",
+      "MEDINA_INDEX_URL", "INDEX_API_TOKEN", "DATA_DIR"
+    ]) delete childEnv[name]
+    for (const [name, value] of Object.entries(env)) {
+      if (value !== undefined) childEnv[name] = value
     }
+    const proc = Bun.spawnSync(["bun", "-e", PROGRAM], {
+      cwd: join(import.meta.dir, ".."),
+      env: childEnv,
+      stdout: "pipe",
+      stderr: "pipe"
+    })
+    if (proc.exitCode !== 0) throw new Error(`config case crashed: ${new TextDecoder().decode(proc.stderr)}`)
+    return JSON.parse(new TextDecoder().decode(proc.stdout).trim()) as { ok: boolean; root?: string; got?: string | null; error?: string }
   }
 
-  test("default is the local store over DATA_DIR, serving the Files seam end to end", async () => {
-    await withMode(undefined, async () => {
-      const layers = Layer.mergeAll(
-        BunFileSystem.layer,
-        layerFromConfig.pipe(Layer.provide(BunFileSystem.layer))
-      )
-      const probe = dataPath("artifact-seam-config/probe.json")
-      await Effect.runPromise(Files.writeJson(probe, { via: "config" }).pipe(Effect.provide(layers)))
-      const read = await Effect.runPromise(
-        Files.readJson(Schema.Struct({ via: Schema.String }), probe).pipe(Effect.provide(layers))
-      )
-      expect(read).toEqual(Option.some({ via: "config" }))
-      await Effect.runPromise(Files.remove(probe).pipe(Effect.provide(layers)))
-    })
+  test("default (no ARTIFACT_STORE) is the local store over DATA_DIR", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "medina-config-local-"))
+    const result = runConfigCase({ DATA_DIR: dataDir })
+    expect(result).toEqual({ ok: true, root: dataDir, got: "ok" })
   })
 
-  test("the bucket branch without bucket config builds a store that fails with instructions", async () => {
-    // Tested through bucketFromConfig: layerFromConfig reads its config
-    // once when the layer is built (the app builds Services once at
-    // boot), so the shared layer const cannot be mode-flipped per test.
-    const { store } = await Effect.runPromise(bucketFromConfig)
-    await expect(run(store.getText("anything.json"))).rejects.toThrow("ARTIFACT_STORE=bucket")
+  test("ARTIFACT_STORE=bucket without bucket config fails operations with instructions", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "medina-config-bucket-"))
+    const result = runConfigCase({ DATA_DIR: dataDir, ARTIFACT_STORE: "bucket" })
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain("ARTIFACT_STORE=bucket")
   })
 })
 
