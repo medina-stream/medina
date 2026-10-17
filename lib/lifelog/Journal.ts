@@ -28,6 +28,8 @@ import { movementDays, movementDayBasisHashes, movementForDay, movementKey, move
 import { recordingLabel, utteranceClock } from "./LocalTime.ts"
 import { StartTimeRulesService } from "./StartTimeRules.ts"
 import { dataPath, DayEntry, DayIndex, Journal, JOURNAL_VERSION, journalKey, NotesLlm, NOTES_LLM_VERSION, notesLlmKey, NOTE_VERSION, noteKey, Transcript } from "./Resources.ts"
+import { cachedFileHash, flushFileHashes } from "./FileHashes.ts"
+import { readStaysBasis } from "./Stays.ts"
 
 const MAX_BATCH_CHARS = 90_000
 
@@ -339,15 +341,36 @@ const journalInstance = (
     }
   })
 
+/** Note blob shas by file-content hash: a note file is re-read and parsed
+ * only when its manifest hash changes; a stat answers otherwise. */
+const noteBlobByFileHash = new Map<string, string>()
+
+/** The note days present on disk, from one listing (no file reads). */
+export const noteDays = Effect.map(
+  Files.listFiles(dataPath(`note/${NOTE_VERSION}`)),
+  (entries) => entries.flatMap((entry) => entry.endsWith(".json") ? [entry.replace(/\.json$/, "")] : [])
+)
+
 /** Every ingested note's day and blob sha, from one listing. */
 const noteHashes = Effect.gen(function*() {
-  const days = (yield* Files.listFiles(dataPath(`note/${NOTE_VERSION}`)))
-    .flatMap((entry) => entry.endsWith(".json") ? [entry.replace(/\.json$/, "")] : [])
+  const days = yield* noteDays
   const hashes = new Map<string, string>()
-  for (const day of days) {
-    const note = yield* noteForDay(day)
-    if (Option.isSome(note)) hashes.set(day, note.value.blobSha)
-  }
+  yield* Effect.forEach(days, (day) =>
+    Effect.gen(function*() {
+      const path = dataPath(noteKey(day))
+      const fileHash = yield* cachedFileHash(path)
+      const known = noteBlobByFileHash.get(fileHash)
+      if (known !== undefined) {
+        hashes.set(day, known)
+        return
+      }
+      const note = yield* noteForDay(day)
+      if (Option.isSome(note)) {
+        noteBlobByFileHash.set(fileHash, note.value.blobSha)
+        hashes.set(day, note.value.blobSha)
+      }
+    }), { concurrency: 8 })
+  yield* flushFileHashes
   return hashes
 })
 
@@ -359,6 +382,24 @@ const journalKeysOnDisk = Effect.gen(function*() {
   )
 })
 
+/** Enumeration memo, shared by the pipeline pass and (via
+ * `journalCachedInstances`) the request path: keyed by the day-index hash,
+ * the stays basis, the eager window, and (size, mtime) of every note file —
+ * all cheap stats/listings, so a hit costs no corpus reads or hashes. */
+let instancesMemo: { key: string; value: ReadonlyArray<{ key: string; label: string; dependencies: ReadonlyArray<string>; materialize: Effect.Effect<void, Error, JournalEnv> }> } | null = null
+
+const noteFingerprint = Effect.gen(function*() {
+  const fs = yield* FileSystem.FileSystem
+  const days = yield* noteDays
+  const stats = yield* Effect.forEach(days, (day) =>
+    Effect.gen(function*() {
+      const info = yield* fs.stat(dataPath(noteKey(day)))
+      const mtimeMs = Option.match(info.mtime, { onNone: () => 0, onSome: (date: Date) => date.getTime() })
+      return `${day}:${Number(info.size)}:${mtimeMs}`
+    }), { concurrency: 8 })
+  return stats.join("\n")
+})
+
 export const journalResource: Resource<JournalEnv> = {
   name: "journal",
   // Eager: days that have transcript or GPS inputs. The hourly pass keeps
@@ -367,12 +408,16 @@ export const journalResource: Resource<JournalEnv> = {
   // One movementDays scan + one batch per-day hash pass for the enumeration.
   instances: Effect.gen(function*() {
     const index = yield* currentDayIndex
+    const since = yield* eagerSinceDay
+    const memoKey = [
+      index.inputHash, since ?? "", (yield* readStaysBasis).basisHash, yield* noteFingerprint
+    ].join("\n")
+    if (instancesMemo?.key === memoKey) return instancesMemo.value
     const gpsDays = new Set(yield* movementDays)
     const notes = yield* noteHashes
     const all = new Set([...Object.keys(index.days), ...gpsDays, ...notes.keys()])
     // A development window bounds only what is pre-generated; `instance`
     // below still dereferences any day on demand.
-    const since = yield* eagerSinceDay
     const allDays = [...all].sort()
     const days = withinEagerWindow(allDays, since, (day) => day)
     // Per-day movement basis hashes: one pass reads all partitions, so each
@@ -396,7 +441,9 @@ export const journalResource: Resource<JournalEnv> = {
     )
     const catchup = yield* Effect.forEach(catchupDays, instanceForDay)
     // Newest first: the present day's journal matters more than the backlog.
-    return [...eager.reverse(), ...catchup.filter((instance) => !onDisk.has(instance.key)).reverse()]
+    const value = [...eager.reverse(), ...catchup.filter((instance) => !onDisk.has(instance.key)).reverse()]
+    instancesMemo = { key: memoKey, value }
+    return value
   }).pipe(Effect.mapError((error) => new Error(String(error)))),
   // Lazy: any well-formed day with inputs dereferences; a truly input-less
   // day fails, and the derefs below answer it transiently without persisting
@@ -424,6 +471,23 @@ export const journalResource: Resource<JournalEnv> = {
       }).pipe(Effect.mapError((error) => new Error(String(error))))
       : Effect.fail(new Error(`not a day: ${day}`))
 }
+
+/**
+ * Request-path enumeration: the pipeline's memoized instances when a pass
+ * has computed them; otherwise per-day cached-instance reads only
+ * (`movementReadForDay` + one note read per candidate day). Never the
+ * batch full-corpus hash pass, so `/status` and ListJournals stay cheap.
+ */
+export const journalCachedInstances = Effect.gen(function*() {
+  if (instancesMemo !== null) return instancesMemo.value
+  const index = yield* currentDayIndex
+  const gpsDays = yield* movementDays
+  const notes = yield* noteDays
+  const days = [...new Set([...Object.keys(index.days), ...gpsDays, ...notes])].sort()
+  const found = yield* Effect.forEach(days, (day) =>
+    Effect.option(journalResource.instance!(day)), { concurrency: 8 })
+  return found.flatMap((instance) => Option.isSome(instance) ? [instance.value] : [])
+}).pipe(Effect.mapError((error) => new Error(String(error))))
 
 /** No captures can exist before this day (nothing to lifelog pre-birth) or
  * after today; those journals get a hard-coded empty response and are never

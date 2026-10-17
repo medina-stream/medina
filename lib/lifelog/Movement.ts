@@ -13,6 +13,7 @@ import { gpsDay, haversineMeters } from "./Gps.ts"
 import { readStaysBasis, staysDayBasisHash, staysOverlappingDay, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
 import { eagerSinceDay, homeTimeZone, withinEagerWindow } from "./Time.ts"
+import { cachedFileHash, cachedFileHashes, flushFileHashes } from "./FileHashes.ts"
 
 export const MOVEMENT_VERSION = "movement-v1"
 const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2"
@@ -377,16 +378,19 @@ export const placeCandidates: Effect.Effect<ReadonlyArray<PlaceCandidate>, Error
     return value
   })
 
-/** Content hashes for the point partitions covering a set of UTC days. */
+/** Content hashes for the point partitions covering a set of UTC days.
+ * Manifest-cached (see FileHashes): unchanged partitions cost a stat. */
 const pointPartitionHashes = (utcDays: ReadonlyArray<string>) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
-    const hashes: Array<string> = []
+    const present: Array<{ day: string; path: string }> = []
     for (const day of utcDays) {
       const path = dataPath(`gps/points-v1/day=${day}/points.parquet`)
-      if (yield* fs.exists(path)) hashes.push(`${day}:${sha256(yield* fs.readFile(path))}`)
+      if (yield* fs.exists(path)) present.push({ day, path })
     }
-    return hashes
+    const hashes = yield* Effect.forEach(present, ({ path }) => cachedFileHash(path), { concurrency: 4 })
+    yield* flushFileHashes
+    return present.map(({ day }, index) => `${day}:${hashes[index]!}`)
   })
 
 /** The UTC day range a local day spans: [first, last] inclusive. */
@@ -419,33 +423,51 @@ export const movementDayBasisHash = (day: string) =>
   })
 
 
-/** Batch per-day basis hashes for eager enumeration. One pass reads every
- * stay and point partition on disk and indexes them by UTC day, so each
- * day's hash is composed from the index without re-reading files. The
- * result is a Map keyed by local day. */
+/** Per-pass memo for `movementDayBasisHashes`: keyed by a fingerprint of
+ * (path, size, mtime) for every partition plus the places hash and the day
+ * set, so a second enumeration in the same pass (or a request-path caller
+ * while nothing changed) costs stats, never reads or hashes. */
+let basisHashesMemo: { key: string; value: Map<string, string> } | null = null
+
+const partitionFingerprint = (root: string, entries: ReadonlyArray<string>) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const stats = yield* Effect.forEach(entries, (relative) =>
+      Effect.gen(function*() {
+        const info = yield* fs.stat(dataPath(`${root}/${relative}`))
+        const mtimeMs = Option.match(info.mtime, { onNone: () => 0, onSome: (date: Date) => date.getTime() })
+        return `${relative}:${Number(info.size)}:${mtimeMs}`
+      }), { concurrency: 8 })
+    return stats.join("\n")
+  })
+
+/** Batch per-day basis hashes for eager enumeration. Partition hashes come
+ * from the (path, size, mtime) manifest (see FileHashes), so an unchanged
+ * corpus is indexed from stats alone; the composed result is memoized per
+ * fingerprint above. The result is a Map keyed by local day. */
 export const movementDayBasisHashes = (days: ReadonlyArray<string>) =>
   Effect.gen(function*() {
     const zone = yield* homeTimeZone
     const places = yield* readPlaces
-    const fs = yield* FileSystem.FileSystem
 
-    // Index all stay partitions by UTC day.
+    // Index all stay and point partitions by UTC day.
     const stayEntries = (yield* Files.listFiles(dataPath("gps/stays-v1")))
       .filter((path) => /^day=\d{4}-\d{2}-\d{2}\/stays\.parquet$/.test(path))
-    const stayHashByDay = new Map<string, string>()
-    for (const relative of stayEntries) {
-      const day = relative.split("/")[0]!.replace("day=", "")
-      stayHashByDay.set(day, sha256(yield* fs.readFile(dataPath(`gps/stays-v1/${relative}`))))
-    }
-
-    // Index all point partitions by UTC day.
     const pointEntries = (yield* Files.listFiles(dataPath("gps/points-v1")))
       .filter((path) => /^day=\d{4}-\d{2}-\d{2}\/points\.parquet$/.test(path))
-    const pointHashByDay = new Map<string, string>()
-    for (const relative of pointEntries) {
-      const day = relative.split("/")[0]!.replace("day=", "")
-      pointHashByDay.set(day, sha256(yield* fs.readFile(dataPath(`gps/points-v1/${relative}`))))
-    }
+    const fingerprint = [
+      zone, places.hash, [...days].sort().join(","),
+      yield* partitionFingerprint("gps/stays-v1", stayEntries),
+      yield* partitionFingerprint("gps/points-v1", pointEntries)
+    ].join("\n==\n")
+    if (basisHashesMemo?.key === fingerprint) return basisHashesMemo.value
+
+    const stayHashes = yield* cachedFileHashes(stayEntries.map((relative) => dataPath(`gps/stays-v1/${relative}`)))
+    const stayHashByDay = new Map(stayEntries.map((relative, index) =>
+      [relative.split("/")[0]!.replace("day=", ""), stayHashes[index]!] as const))
+    const pointHashes = yield* cachedFileHashes(pointEntries.map((relative) => dataPath(`gps/points-v1/${relative}`)))
+    const pointHashByDay = new Map(pointEntries.map((relative, index) =>
+      [relative.split("/")[0]!.replace("day=", ""), pointHashes[index]!] as const))
 
     const radiusStr = String(process.env.STAY_RADIUS_M ?? "150")
     const result = new Map<string, string>()
@@ -470,6 +492,7 @@ export const movementDayBasisHashes = (days: ReadonlyArray<string>) =>
 
       result.set(day, sha256(`${MOVEMENT_VERSION}\n${MOVEMENT_BASIS_VERSION}\n${zone}\n${stayHash}\n${pointParts.join("\n")}\n${places.hash}`))
     }
+    basisHashesMemo = { key: fingerprint, value: result }
     return result
   })
 

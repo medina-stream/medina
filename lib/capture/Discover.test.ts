@@ -123,3 +123,42 @@ describe("discoverFresh", () => {
     expect(await discover(objects, 0)).toEqual([])
   })
 })
+
+describe("discoverFresh discovery index", () => {
+  test("a warm pass serves the pending backlog from the index on a bounded listing", async () => {
+    const source = "test-source-indexed"
+    const all = Array.from({ length: 10 }, (_, i) => object(`w${i}.m4a`, `etag-w${i}`))
+    const limits: Array<number> = []
+    // A contract-honoring stub: newest-first, sliced to the requested limit.
+    const honoringApi = {
+      configured: true,
+      list: (_prefix: string, limit: number) => {
+        limits.push(limit)
+        return Effect.succeed(all.slice(0, limit))
+      },
+      download: (_key: string) => Effect.fail(new Error("not needed")),
+      head: (_key: string) => Effect.succeed(null)
+    } as unknown as SourceBucketApi
+    const runDiscover = (limit: number) =>
+      run(discoverFresh(honoringApi, source, "prefix/", limit, (list) => list,
+        (item) => ({ key: item.key, version: item.etag ?? "" })))
+
+    // Cold pass: expands past the first truncated window, learns the whole
+    // backlog, and takes the newest window.
+    expect((await runDiscover(3)).map((o) => o.key)).toEqual(["w0.m4a", "w1.m4a", "w2.m4a"])
+    expect(limits).not.toContain(Number.MAX_SAFE_INTEGER)
+
+    // Receipt the first window the way ingest would, then a warm pass on a
+    // listing that only returns the newest 3 must still reach w3.. from
+    // the persisted index — without enumerating the prefix again.
+    for (let i = 0; i < 3; i++) {
+      await run(Files.writeJson(
+        dataPath(ingestReceiptKey(source, `w${i}.m4a`, `etag-w${i}`)),
+        new IngestReceipt({ captureId: "abc", ingestedAt: new Date().toISOString() })
+      ))
+    }
+    limits.length = 0
+    expect((await runDiscover(3)).map((o) => o.key)).toEqual(["w3.m4a", "w4.m4a", "w5.m4a"])
+    expect(limits).toEqual([3])
+  })
+})

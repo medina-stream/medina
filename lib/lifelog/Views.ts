@@ -14,7 +14,7 @@ import * as Schema from "effect/Schema"
 import * as Files from "../Files.ts"
 import { pipelineRuntime, pipelineRuntimeFor, RUN_REPORT_KEY, runReportKey, RunReport } from "../Pipeline.ts"
 import { currentDayIndex } from "./DayIndex.ts"
-import { journalResource } from "./Journal.ts"
+import { journalCachedInstances } from "./Journal.ts"
 import { DayRow, ListDays } from "./JournalApi.ts"
 import { dataPath, DayEntry, Journal, JOURNAL_VERSION, MediaTiming, Transcript } from "./Resources.ts"
 import { homeTimeZone } from "./Time.ts"
@@ -55,7 +55,7 @@ export const pipelineStatus = Effect.gen(function*() {
   })
   const byDay = yield* journalKeysByDay
   const index = yield* currentDayIndex
-  const instances = yield* journalResource.instances
+  const instances = yield* journalCachedInstances
   const days = [...instances]
     .sort((a, b) => b.label.localeCompare(a.label))
     .map((instance) => {
@@ -466,7 +466,7 @@ export const dayPreviews = Effect.gen(function*() {
  */
 export const currentJournals = Effect.gen(function*() {
   const byDay = yield* journalKeysByDay
-  const instances = yield* journalResource.instances
+  const instances = yield* journalCachedInstances
   const currentKey = new Map(instances.map((instance) => [instance.label, instance.key]))
   const views: Array<JournalView> = []
   for (const [day, keys] of byDay) {

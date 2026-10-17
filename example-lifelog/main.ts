@@ -54,6 +54,7 @@ import { detectAndFileStars, STAR_DETECTOR_PERIOD_SECONDS } from "../lib/lifelog
 import { StarsLive } from "../lib/lifelog/Stars.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 import { CapturePolicyStore, decodePolicy } from "../lib/capture/CapturePolicy.ts"
+import { discoverFresh } from "../lib/capture/Discover.ts"
 import { appIconResponse, webIconTarget } from "./AppIconResource.ts"
 
 const auth = new MedinaAuth({ directory: dataPath("auth") })
@@ -807,8 +808,15 @@ const Ingest = Layer.effectDiscard(
         source: enabled.has("bucket") && bucket.configured
           ? recordingObjectSource(
               "bucket-audio",
-              bucket.list(bucketPrefix, Number.isFinite(bucketLimit) ? bucketLimit : 25).pipe(
-                Effect.map((objects) =>
+              // Discovery-index backed (see Discover.ts): a warm pass asks
+              // only for the newest window and filters receipts from one
+              // batched listing, instead of enumerating the whole prefix.
+              discoverFresh(
+                bucket,
+                "bucket-audio",
+                bucketPrefix,
+                Number.isFinite(bucketLimit) ? bucketLimit : 25,
+                (objects) =>
                   objects
                     // The archive sweep writes back to this same bucket under
                     // `capture/` (and receipts under `archive/`); never
@@ -820,8 +828,9 @@ const Ingest = Layer.effectDiscard(
                       mimeType: "audio/application",
                       modifiedTime: object.lastModified ?? new Date(0).toISOString(),
                       ...(object.etag === null ? {} : { checksum: object.etag })
-                    }))
-                )
+                    })),
+                (file) => ({ key: file.id, version: file.checksum ?? file.modifiedTime }),
+                (file) => file.mimeType.startsWith("audio/")
               ),
               (file) => bucket.download(file.id)
             )
