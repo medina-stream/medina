@@ -53,10 +53,24 @@ import {
 } from "../lifelog/Resources.ts"
 
 export const MEDIA_VERSION = "media-v1"
-/** Chunk length. One hour of mono 16k Opus is ~11 MB: comfortably within
- * any transcription provider's upload limits, big enough that a full day
- * is a handful of requests. */
-export const CHUNK_SECONDS = 3600
+/** Span length for captures too long to transcribe as one job. Four hours:
+ * long spans keep speaker diarization coherent across a day-long lifelog
+ * file and put few seams in the merged transcript. The cost of a span is
+ * its blast radius when a job fails — and since per-chunk settling, a
+ * failed span is dropped rather than re-bought, so the radius is one
+ * span's transcript, never the file's spend. Silence inside a span is the
+ * provider's problem: billing is per submitted duration, so client-side
+ * silence skipping was considered and deliberately not built. Fresh
+ * captures never reach this — phone segments are minutes long and the
+ * archived original is the chunk (see directChunkFor). */
+export const CHUNK_SECONDS = 14400
+
+/** The direct path's ceiling, deliberately NOT CHUNK_SECONDS: a direct
+ * capture becomes a single transcription job in its source form, and one
+ * hour is the most audio one unsegmented job should carry. Longer
+ * canonical-form captures still segment into spans, so every span carries
+ * its own transcription receipt. */
+const DIRECT_CHUNK_MAX_SECONDS = 3600
 
 export const ffprobeKey = (captureId: string) => `${captureDir(captureId)}/ffprobe.json`
 export const mediaManifestKey = (captureId: string) => `media/${MEDIA_VERSION}/${captureId}.json`
@@ -172,7 +186,7 @@ export interface DirectChunk {
 
 /**
  * Whether the probed bytes are already in canonical-ish form -- a compact
- * speech codec, mono 16 kHz, no longer than one chunk. Such captures skip
+ * speech codec, mono 16 kHz, no longer than one hour. Such captures skip
  * the transcode/split entirely: the archived original *is* the chunk, and
  * the manifest points at it. Returns null for anything else (multi-hour
  * captures, video, lossless uploads), which keeps the old path.
@@ -186,7 +200,7 @@ export const directChunkFor = (probe: unknown): DirectChunk | null => {
   if (!DIRECT_CODECS.has(audio.codec_name ?? "")) return null
   if (audio.channels !== 1 || audio.sample_rate !== "16000") return null
   const duration = probeDuration(probe)
-  if (duration === null || duration > CHUNK_SECONDS) return null
+  if (duration === null || duration > DIRECT_CHUNK_MAX_SECONDS) return null
   return { durationSeconds: duration }
 }
 

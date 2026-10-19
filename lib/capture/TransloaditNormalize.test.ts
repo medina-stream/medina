@@ -87,7 +87,7 @@ describe("Transloadit remote media", () => {
       getAssembly: async () => ({ ok: "ASSEMBLY_EXECUTING" })
     }
     const result = await Effect.runPromise(
-      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("local-a", "input.wav", 3601)).pipe(
+      Effect.flatMap(TransloaditNormalize, (service) => service.normalize("local-a", "input.wav", 14401)).pipe(
         Effect.provide(services(store, client))
       )
     )
@@ -108,7 +108,7 @@ describe("Transloadit remote media", () => {
     expect(JSON.stringify(receipt)).not.toContain("signed.example")
   }))
 
-  test("Drive imports never persist bearer tokens and complete as R2 original plus one-hour chunks", async () => withConfig(async () => {
+  test("Drive imports never persist bearer tokens and complete as R2 original plus four-hour spans", async () => withConfig(async () => {
     const store = new Map<string, { bytes: Uint8Array; contentType?: string }>()
     const creates: Array<Record<string, unknown>> = []
     let importPolls = 0
@@ -128,7 +128,7 @@ describe("Transloadit remote media", () => {
           importPolls++
           return {
             ok: "ASSEMBLY_COMPLETED",
-            results: { import: [{ duration: 7201, meta: { duration: 7201 } }] }
+            results: { import: [{ duration: 18001, meta: { duration: 18001 } }] }
           }
         }
         chunkPolls++
@@ -174,9 +174,9 @@ describe("Transloadit remote media", () => {
     )
     expect(second).toBe("fired")
     const secondSteps = creates[1]!.steps as Record<string, Record<string, unknown>>
-    expect((secondSteps.split!.segments as Array<unknown>).length).toBe(3)
+    expect((secondSteps.split!.segments as Array<unknown>).length).toBe(2)
 
-    for (const index of [0, 1, 2]) {
+    for (const index of [0, 1]) {
       store.set(`media/media-v1/${captureId}/_${index}.ogg`, { bytes: new Uint8Array([index + 1]) })
     }
     const third = await Effect.runPromise(
@@ -191,7 +191,7 @@ describe("Transloadit remote media", () => {
     const manifest = await Effect.runPromise(
       Files.readJson(MediaManifest, dataPath(mediaManifestKey(captureId))).pipe(Effect.provide(BunFileSystem.layer))
     )
-    expect(Option.getOrThrow(manifest).chunks.map((chunk) => chunk.durationSeconds)).toEqual([3600, 3600, 1])
+    expect(Option.getOrThrow(manifest).chunks.map((chunk) => chunk.durationSeconds)).toEqual([14400, 3601])
     expect(await Bun.file(dataPath(originalKey)).exists()).toBe(false)
     expect(Option.isSome(await Effect.runPromise(
       Files.readJson(Provenance, dataPath(provenanceKey(captureId))).pipe(Effect.provide(BunFileSystem.layer))

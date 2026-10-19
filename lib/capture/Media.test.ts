@@ -144,6 +144,15 @@ describe("directChunkFor", () => {
     expect(directChunkFor(probe(canonical, "N/A"))).toBeNull()
   })
 
+  test("the direct ceiling stays at one hour even though spans are four", () => {
+    // A direct capture becomes a single transcription job as-is; segmentation
+    // spans (CHUNK_SECONDS) growing to four hours must not drag this ceiling
+    // with them.
+    expect(directChunkFor(probe(canonical, "3600.0"))).not.toBeNull()
+    expect(directChunkFor(probe(canonical, "3601.0"))).toBeNull()
+    expect(directChunkFor(probe(canonical, "14400.0"))).toBeNull()
+  })
+
   test("rejects non-audio probes", () => {
     expect(directChunkFor({ streams: [], format: { duration: "60.0" } })).toBeNull()
   })

@@ -4,7 +4,7 @@
  * Audio bytes never cross this process for this workflow. Drive imports are
  * fetched by Transloadit from Google's media endpoint, and archived captures
  * are fetched through short-lived R2 URLs. Transloadit writes originals and
- * one-hour Opus chunks straight to R2. Medina keeps only receipts, provenance,
+ * fixed-span Opus chunks straight to R2. Medina keeps only receipts, provenance,
  * and manifests.
  */
 import { ApiError, Transloadit } from "transloadit"
