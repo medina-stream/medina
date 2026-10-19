@@ -96,6 +96,20 @@ export class MediaManifest extends Schema.Class<MediaManifest>("MediaManifest")(
 export const transcriptJobsKey = (captureId: string) =>
   `transcript/${TRANSCRIPT_VERSION}/${captureId}.jobs.json`
 
+/** Marker written when a capture's transcription settles as errored (every
+ * chunk failed for a real reason). Discovery skips settled captures: their
+ * AssemblyAI jobs are terminal, and re-queuing would resubmit — and
+ * re-buy — them on every pass. Requeue manually by deleting this marker,
+ * the jobs receipt, and any canonical transcript for the capture. */
+export const transcriptSettledKey = (captureId: string) =>
+  `transcribe-settled/${TRANSCRIPT_VERSION}/${captureId}.json`
+
+/** AssemblyAI refuses language detection on audio with no spoken audio.
+ * That is a property of the audio, not a transient failure: the chunk is
+ * silence, and its transcript is empty by definition. */
+const isNoSpokenAudioError = (error: string | null): boolean =>
+  error !== null && error.toLowerCase().includes("no spoken audio")
+
 export class TranscriptChunkJob extends Schema.Class<TranscriptChunkJob>("TranscriptChunkJob")({
   index: Schema.Number,
   key: Schema.String,
@@ -586,23 +600,49 @@ export const transcribeMediaCapture = (captureId: string) =>
       chunked: true,
       chunks: results.map((result) => result.raw)
     })
-    const merged = mergeChunkTranscripts(captureId, manifest, capturedAt, parts)
-    if (merged.status === "error") {
-      // Do not write the canonical transcript: its existence is what
-      // discovery and the day index key off, so an error record would
-      // strand the capture forever. Drop the jobs receipt too — the
-      // errored AssemblyAI ids are terminal, so the next pass must
-      // resubmit fresh jobs rather than poll them again — and fail, so
-      // the pipeline records the failure instead of counting a success.
-      // The hourly pass is the retry, with its cadence as the backoff.
-      yield* fs.remove(receiptPath, { force: true })
-      yield* fs.remove(canonicalPath, { force: true })
-      return yield* Effect.fail(new Error(
-        `AssemblyAI transcription failed for ${captureId}: ${merged.error ?? "unknown error"}`
-      ))
+    const completedParts = parts.filter((part) => part.error === null)
+    const erroredParts = parts.filter((part) => part.error !== null)
+    if (erroredParts.length === 0) {
+      yield* Files.writeJson(canonicalPath, mergeChunkTranscripts(captureId, manifest, capturedAt, parts))
+      return "ingested" as const
     }
-    yield* Files.writeJson(canonicalPath, merged)
-    return "ingested" as const
+    if (completedParts.length > 0) {
+      // Partial success settles the capture: the completed chunks are the
+      // transcript, and the errored chunks are dropped (their raw vendor
+      // results stay in the vendor receipt above). The previous behavior —
+      // fail the whole file and delete the jobs receipt — made the next
+      // pass resubmit every chunk, re-buying all the completed ones; one
+      // bad chunk in a many-chunk file looped that spend indefinitely.
+      yield* Effect.log(
+        `settling ${captureId.slice(0, 12)} with ${completedParts.length}/${parts.length} chunks; ` +
+        `dropping ${erroredParts.length} errored chunk(s): ${erroredParts[0]!.error ?? "unknown error"}`
+      )
+      yield* Files.writeJson(canonicalPath, mergeChunkTranscripts(captureId, manifest, capturedAt, completedParts))
+      return "ingested" as const
+    }
+    if (erroredParts.every((part) => isNoSpokenAudioError(part.error))) {
+      // No chunk has any spoken audio: the transcript is empty. Settle
+      // with a completed, empty transcript instead of failing — silence
+      // is a result, and resubmitting it can only fail the same way.
+      yield* Files.writeJson(canonicalPath, mergeChunkTranscripts(captureId, manifest, capturedAt, []))
+      return "ingested" as const
+    }
+    // Every chunk failed for a real reason. Settle the capture as errored:
+    // write the settled marker, KEEP the jobs receipt, and fail so the
+    // pipeline records the failure instead of counting a success. Do not
+    // write a canonical transcript — its existence is what the day index
+    // keys off, and this capture has none. Discovery skips settled
+    // captures, so a fully-failed file costs nothing further; the manual
+    // requeue is deleting the settled marker (see transcriptSettledKey).
+    const merged = mergeChunkTranscripts(captureId, manifest, capturedAt, parts)
+    yield* Files.writeJson(dataPath(transcriptSettledKey(captureId)), {
+      captureId,
+      error: merged.error,
+      settledAt: new Date().toISOString()
+    })
+    return yield* Effect.fail(new Error(
+      `AssemblyAI transcription failed for ${captureId}: ${merged.error ?? "unknown error"}`
+    ))
   })
 
 export const mediaTranscribeSource: Source<
@@ -616,6 +656,9 @@ export const mediaTranscribeSource: Source<
     const pending: Array<string> = []
     for (const manifest of manifests) {
       const captureId = manifest.slice(0, -".json".length)
+      // Settled-errored captures are done: re-queuing them would resubmit
+      // (and re-buy) AssemblyAI jobs that already failed terminally.
+      if (yield* fs.exists(dataPath(transcriptSettledKey(captureId)))) continue
       const canonicalPath = dataPath(transcriptKey(captureId))
       if (!(yield* fs.exists(canonicalPath))) {
         pending.push(captureId)
@@ -630,7 +673,8 @@ export const mediaTranscribeSource: Source<
   }),
   ingest: transcribeMediaCapture,
   label: (captureId) => `capture/${captureId}`,
-  // Unbounded: submitting and polling are API calls; AssemblyAI does the
-  // work. A backlog drains in ~one transcription pass instead of serially.
-  concurrency: "unbounded"
+  // Bounded on purpose: submissions spend real money, so a discovery or
+  // receipt bug must not be able to submit the whole backlog — and the
+  // whole balance — in a single pass.
+  concurrency: 8
 })
