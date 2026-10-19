@@ -34,6 +34,7 @@
  */
 import { DeleteObjectsCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
 import { existsSync, readFileSync, rmSync } from "node:fs"
+import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
 import {
   MEDIA_VERSION,
@@ -152,8 +153,11 @@ const program = Effect.gen(function*() {
   }
   const failures: Array<string> = []
   for (const captureId of captureIds) {
-    const outcome = yield* Effect.either(requeueOne(r2, captureId))
-    if (outcome._tag === "Left") failures.push(outcome.left.message)
+    const outcome = yield* Effect.exit(requeueOne(r2, captureId))
+    if (outcome._tag === "Failure") {
+      const error = Cause.squash(outcome.cause)
+      failures.push(error instanceof Error ? error.message : String(error))
+    }
   }
   if (failures.length > 0) {
     return yield* Effect.fail(new Error(`failures:\n${failures.join("\n")}`))
