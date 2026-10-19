@@ -43,7 +43,7 @@ import {
 } from "../lib/capture/Media.ts"
 import { transloaditReceiptKey } from "../lib/capture/TransloaditNormalize.ts"
 import { DATA_DIR, dataPath, transcriptKey } from "../lib/lifelog/Resources.ts"
-import { R2TempCreds } from "../lib/R2TempCreds.ts"
+import { layer as r2TempCredsLayer, R2TempCreds } from "../lib/R2TempCreds.ts"
 
 const args = process.argv.slice(2)
 const fileArg = args.find((arg) => arg.startsWith("--file="))?.slice("--file=".length)
@@ -160,7 +160,7 @@ const program = Effect.gen(function*() {
   }
 })
 
-await Effect.runPromise(program.pipe(Effect.provide(R2TempCreds.layer))).catch((error: unknown) => {
+await Effect.runPromise(program.pipe(Effect.provide(r2TempCredsLayer))).catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error))
   process.exit(1)
 })
