@@ -21,6 +21,31 @@ Baseline (September 10, 2026): `bun test` 147 pass, `bun run typecheck` clean.
   `/v1/identify` output before labeling -- `match` fires at 16-30 today, which
   is noise. Validate with the experiment script on labeled captures and check
   Scott-cluster separation.
+  **Status 2026-10-18: enrollment rebuilt; validation BLOCKED on pyannoteAI
+  credit.** New composite at `$DATA_DIR/experiments/pyannote-speaker-id/enrollment/scott-enrollment-v2.wav`
+  (280s of speech, 8 clips, manifest.json alongside with per-clip text
+  evidence): individual label-A turns (>=4s, boundaries clamped to neighbour
+  turns, <=45s per turn, ~70s per capture) from four content-verified captures
+  -- `0a1dbe09` (2026-10-17, outdoors dictation), `f10ae9ba` (2026-10-12,
+  custody conversation), `55b9b621` + `dd64172a` (2026-09-28, restaurant +
+  indoor conversation). Only Scott's own turns were extracted, never the spans
+  between them, so no other voice is in the composite. Validation runs
+  (a35308f0 window 128.4+2420 held out, 05714c74 window 1244.34+516, negative
+  controls 234e0d24 + 19a65bd2) all failed at upload: the exe.dev integration
+  returns **HTTP 402 "No credit or active subscription"** for
+  `/v1/media/input` -- the pyannoteAI account behind
+  `pyannoteai.int.exe.xyz` needs credit/a subscription before any job runs.
+  Old-baseline outputs preserved as `*.old47s.json` in the experiments dir.
+  Provisional labeling threshold until measured on the new print: **>=50**
+  (noise band 16-30 per above; old self-match ~67). Once credit exists, run
+  the four windows with `PYANNOTE_ENROLLMENT` pointed at the v2 composite,
+  replace the provisional threshold with measured Scott/non-Scott
+  distributions, and only then check this off. Note: the seed shorthands in
+  the Durable-speaker-identity item (`source-574/eac/940`) do not resolve as
+  transcript-store filename prefixes; the two `940*` captures were checked by
+  content and are not the C=Scott seed (one is a 3s fragment, the other a
+  podcast). Ground truth for this rebuild was established by transcript
+  content verification instead.
 
 - [x] **Remote-first Transloadit media ingest** — allowlisted Drive files are
   imported directly by signed SDK Assemblies; originals and one-hour Opus

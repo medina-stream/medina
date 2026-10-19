@@ -30,11 +30,15 @@ if (targetPath !== targetAudio) {
 }
 
 const upload = async (key: string, path: string) => {
-  const init = await fetch(`${base}/v1/media/input`, {
+  const initResponse = await fetch(`${base}/v1/media/input`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ url: `media://${key}` })
-  }).then((r) => r.json() as Promise<{ url: string }>)
+  })
+  const init = await initResponse.json() as { url?: string }
+  if (!initResponse.ok || !init.url) {
+    throw new Error(`media input failed: ${initResponse.status} ${JSON.stringify(init)}`)
+  }
   const put = await fetch(init.url, { method: "PUT", headers: { "content-type": "application/octet-stream" }, body: Bun.file(path) })
   if (!put.ok) throw new Error(`media upload failed: ${put.status}`)
   return `media://${key}`
