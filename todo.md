@@ -10,42 +10,23 @@ Baseline (September 10, 2026): `bun test` 147 pass, `bun run typecheck` clean.
 
 ## Next
 
-- [ ] **Rebuild the pyannoteAI Scott voiceprint** (`scripts/pyannote-speaker-experiment.ts`)
-  The current enrollment is a 47-second composite in `/tmp` (no manifest,
-  unknown provenance) that separates Scott cleanly only on the capture it came
-  from (matched avg 67/100) and collapses elsewhere (avg 27-34, near the 16-20
-  floor). Re-enroll with 3-5 minutes of verified Scott-only speech across
-  several captures/days/environments; verify each clip is single-speaker before
-  adding it to the composite; store the composite in the data dir with a
-  manifest (capture, time ranges, verified-by). Add a confidence threshold on
-  `/v1/identify` output before labeling -- `match` fires at 16-30 today, which
-  is noise. Validate with the experiment script on labeled captures and check
-  Scott-cluster separation.
-  **Status 2026-10-18: enrollment rebuilt; validation BLOCKED on pyannoteAI
-  credit.** New composite at `$DATA_DIR/experiments/pyannote-speaker-id/enrollment/scott-enrollment-v2.wav`
-  (280s of speech, 8 clips, manifest.json alongside with per-clip text
-  evidence): individual label-A turns (>=4s, boundaries clamped to neighbour
-  turns, <=45s per turn, ~70s per capture) from four content-verified captures
-  -- `0a1dbe09` (2026-10-17, outdoors dictation), `f10ae9ba` (2026-10-12,
-  custody conversation), `55b9b621` + `dd64172a` (2026-09-28, restaurant +
-  indoor conversation). Only Scott's own turns were extracted, never the spans
-  between them, so no other voice is in the composite. Validation runs
-  (a35308f0 window 128.4+2420 held out, 05714c74 window 1244.34+516, negative
-  controls 234e0d24 + 19a65bd2) all failed at upload: the exe.dev integration
-  returns **HTTP 402 "No credit or active subscription"** for
-  `/v1/media/input` -- the pyannoteAI account behind
-  `pyannoteai.int.exe.xyz` needs credit/a subscription before any job runs.
-  Old-baseline outputs preserved as `*.old47s.json` in the experiments dir.
-  Provisional labeling threshold until measured on the new print: **>=50**
-  (noise band 16-30 per above; old self-match ~67). Once credit exists, run
-  the four windows with `PYANNOTE_ENROLLMENT` pointed at the v2 composite,
-  replace the provisional threshold with measured Scott/non-Scott
-  distributions, and only then check this off. Note: the seed shorthands in
-  the Durable-speaker-identity item (`source-574/eac/940`) do not resolve as
-  transcript-store filename prefixes; the two `940*` captures were checked by
-  content and are not the C=Scott seed (one is a 3s fragment, the other a
-  podcast). Ground truth for this rebuild was established by transcript
-  content verification instead.
+- [x] **Rebuild the pyannoteAI Scott voiceprint** (`scripts/pyannote-speaker-experiment.ts`)
+  Done 2026-10-18. Enrollment v2 (280s of verified Scott-only turns from 4
+  captures / 3 days / 4 environments) lives in
+  `experiments/pyannote-speaker-id/enrollment/` with a manifest. Validation
+  on 4 held-out runs: cluster-level separation is clean -- true Scott
+  clusters scored 88 and 90; every other cluster (two positive captures,
+  two podcast negative controls) scored <=44. The API's raw `match` flag is
+  not safe alone (it fired on both negative controls, at 19 and 44), so
+  labeling requires cluster voiceprint confidence >= 60 (`LABEL_THRESHOLD`
+  in the script, inside the measured 44-88 gap). Against the old 47s print
+  on identical diarization, the accepted cluster on the collapse capture
+  rose 57 -> 90 (turn-level mean 34 -> 77). Caveats: on that capture
+  (a35308f0) the print accepts 300s of 1,245s of diarized speech, and the
+  remaining clusters' text suggests a multi-party conversation AssemblyAI
+  had lumped under one label -- so recall in loud multi-party settings is
+  unproven rather than disproven, and that capture's AssemblyAI
+  single-label ground truth is unreliable for the window.
 
 - [x] **Remote-first Transloadit media ingest** — allowlisted Drive files are
   imported directly by signed SDK Assemblies; originals and one-hour Opus

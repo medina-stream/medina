@@ -66,9 +66,21 @@ const output = await job("/v1/identify", {
   model: "precision-2",
   confidence: true,
   turnLevelConfidence: true
-})
+}) as { voiceprints?: Array<{ speaker: string; match?: string | null; confidence?: Record<string, number> }> }
+
+// Labeling threshold (cluster level), set from the 2026-10-18 validation of
+// enrollment v2: true Scott clusters scored 88-90, while every other cluster
+// across two positive captures and two podcast negative controls scored
+// <=44 -- and the API's own `match` flag fired on noise clusters at 19 and
+// 44, so `match` alone is not safe. Only a cluster whose voiceprint
+// confidence for the label clears this threshold may be labeled with it;
+// turn-level confidence is evidence, never the gate.
+const LABEL_THRESHOLD = 60
+const labeledSpeakers = (output.voiceprints ?? [])
+  .filter((vp) => (vp.confidence?.["Scott"] ?? 0) >= LABEL_THRESHOLD)
+  .map((vp) => vp.speaker)
 const outDir = join(dataDir, "experiments", "pyannote-speaker-id")
 await mkdir(outDir, { recursive: true })
 const outputPath = join(outDir, `${captureId}${targetPath === targetAudio ? "" : `-${targetStart}-${targetDuration}`}.json`)
-await Bun.write(outputPath, JSON.stringify({ provider: "pyannoteai", captureId, startSeconds: Number.isFinite(targetStart) ? targetStart : null, durationSeconds: Number.isFinite(targetDuration) ? targetDuration : null, output }, null, 2))
-console.log(JSON.stringify({ captureId, outputPath, output }, null, 2))
+await Bun.write(outputPath, JSON.stringify({ provider: "pyannoteai", captureId, startSeconds: Number.isFinite(targetStart) ? targetStart : null, durationSeconds: Number.isFinite(targetDuration) ? targetDuration : null, labelThreshold: LABEL_THRESHOLD, labeledSpeakers, output }, null, 2))
+console.log(JSON.stringify({ captureId, outputPath, labelThreshold: LABEL_THRESHOLD, labeledSpeakers, output }, null, 2))
