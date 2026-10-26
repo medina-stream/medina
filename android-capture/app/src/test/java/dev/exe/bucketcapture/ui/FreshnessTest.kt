@@ -37,7 +37,7 @@ class FreshnessTest {
         assertEquals("just now", lastSyncedText(now, now + 60_000))
     }
 
-    @Test fun `amplitude normalizes to 0..1`() {
+    @Test fun `amplitude normalizes to range 0 to 1`() {
         assertEquals(0f, normalizeAmplitude(0))
         assertEquals(1f, normalizeAmplitude(32767), 0.001f)
         assertEquals(1f, normalizeAmplitude(99_999), 0.001f)
