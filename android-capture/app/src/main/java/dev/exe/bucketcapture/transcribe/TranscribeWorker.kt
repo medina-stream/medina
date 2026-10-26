@@ -2,6 +2,7 @@ package dev.exe.bucketcapture.transcribe
 
 import android.content.Context
 import androidx.work.*
+import dev.exe.bucketcapture.AppForeground
 import dev.exe.bucketcapture.CaptureApplication
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -19,9 +20,21 @@ import java.time.Instant
  *
  * A marker file per audio id records completed transcriptions; failures do
  * not retry forever (a corrupt file would never succeed).
+ *
+ * Foreground-gated: on-device transcription only runs while the app is in
+ * the foreground (see AppForeground). WorkManager may start this worker
+ * after the user has already left the app, so a backgrounded attempt defers
+ * via Result.retry() instead of transcribing — the work stays queued and
+ * lands on a later attempt that finds the app foregrounded. The gate is
+ * checked again after decoding, just before the whisper run; a run already
+ * inside the (uninterruptible) JNI call when the app backgrounds finishes,
+ * but no new run starts in the background.
  */
 class TranscribeWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.Default) {
+        // Transcription is foreground-only: defer (don't fail, don't
+        // transcribe) while the app is in the background.
+        if (!AppForeground.transcriptionAllowed()) return@withContext Result.retry()
         val app = applicationContext as CaptureApplication
         val audioId = inputData.getString(KEY_AUDIO_ID)
             ?: return@withContext Result.failure(workDataOf("error" to "Missing audio id"))
@@ -37,6 +50,9 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : CoroutineWo
         try {
             val pcm = withContext(Dispatchers.IO) { AacDecoder.decode(file) }
             if (pcm.isEmpty()) return@withContext Result.failure(workDataOf("error" to "Decoded audio empty"))
+            // Re-check the gate: the app may have been backgrounded while we
+            // were setting up. Defer rather than start whisper in background.
+            if (!AppForeground.transcriptionAllowed()) return@withContext Result.retry()
             val result = engine.transcribe(pcm)
             // The capture id is the sha256 of the audio bytes -- the same
             // content identity the server ingest derives -- so the pipeline

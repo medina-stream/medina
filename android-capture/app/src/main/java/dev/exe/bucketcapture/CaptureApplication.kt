@@ -16,9 +16,18 @@ class CaptureApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // The user just looked at the app: make the freshest data move now.
+        // Track foreground state process-wide: on-device transcription is
+        // gated on it (see AppForeground), and uploads move fastest then.
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) = ForegroundSync.kick(this@CaptureApplication)
+            override fun onStart(owner: LifecycleOwner) {
+                AppForeground.setForeground(true)
+                // The user just looked at the app: make the freshest data move now.
+                ForegroundSync.kick(this@CaptureApplication)
+            }
+
+            override fun onStop(owner: LifecycleOwner) {
+                AppForeground.setForeground(false)
+            }
         })
     }
 }

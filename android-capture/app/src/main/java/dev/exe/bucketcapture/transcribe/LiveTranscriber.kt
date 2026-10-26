@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import dev.exe.bucketcapture.AppForeground
 import dev.exe.bucketcapture.CaptureTelemetry
 import dev.exe.bucketcapture.data.SpoolRepository
 import kotlinx.coroutines.*
@@ -26,6 +27,12 @@ import kotlin.math.sqrt
  * Chunked full transcription (not whisper.cpp's VAD streaming) keeps the JNI
  * surface to the existing transcribe() call and degrades gracefully: a
  * failed tick just means the next tick's overlap covers the gap.
+ *
+ * Foreground-gated: whisper only runs while the app is in the foreground
+ * (see AppForeground). The mic tap keeps the ring buffer warm in the
+ * background, but ticks skip transcription until the next foreground, whose
+ * first tick covers the last window — the accumulated transcript persists
+ * across backgrounding, so nothing already merged is lost.
  */
 class LiveTranscriber(
     private val context: Context,
@@ -134,6 +141,8 @@ class LiveTranscriber(
     }
 
     private suspend fun tick() {
+        // On-device transcription happens only while the app is foregrounded.
+        if (!AppForeground.transcriptionAllowed()) return
         val uuid = synchronized(stateLock) { segmentUuid } ?: return
         if (!ModelManager.isPresent(context)) return
         val pcm = snapshot(WINDOW_SEC)
