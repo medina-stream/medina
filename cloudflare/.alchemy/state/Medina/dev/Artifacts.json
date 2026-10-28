@@ -1,0 +1,27 @@
+{
+  "status": "updated",
+  "fqn": "Artifacts",
+  "logicalId": "Artifacts",
+  "instanceId": "34f85b03f21fb150adde0b705b40c316",
+  "resourceType": "Cloudflare.R2.Bucket",
+  "props": {
+    "name": "sco-lifelog"
+  },
+  "attr": {
+    "bucketName": "sco-lifelog",
+    "storageClass": "Standard",
+    "jurisdiction": "default",
+    "location": "wnam",
+    "accountId": "22e64798cbb760891764f349b53f573a",
+    "domains": [],
+    "lifecycleRules": [],
+    "cors": []
+  },
+  "bindings": [],
+  "providerVersion": 0,
+  "downstream": [
+    "Api"
+  ],
+  "removalPolicy": "destroy",
+  "providerMode": "live"
+}
