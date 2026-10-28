@@ -1,9 +1,10 @@
-import { rmSync } from "node:fs"
+import { existsSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { describe, expect, test } from "bun:test"
 import { BunFileSystem } from "@effect/platform-bun"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import { ArtifactStore, makeMemory } from "../ArtifactStore.ts"
 import { Bucket, layerMemory } from "../Bucket.ts"
 import * as Files from "../Files.ts"
 import { sha256 } from "../Hash.ts"
@@ -68,6 +69,47 @@ describe("archiveCapture", () => {
     await Effect.runPromise(httpIngest("gps-test-again", body, "application/json").pipe(Effect.provide(layers)))
     const after = store.get(`capture/${captureId}/provenance.json`)!.bytes.length
     expect(after).toBeGreaterThan(before)
+  })
+})
+
+describe("archiveCapture against a non-local artifact store", () => {
+  // The flipped deployment: captures live only in the artifact store, so
+  // listing, sizing, and the reconciliation upload must all go through
+  // the seam — a local stat on the store path is the NotFound that failed
+  // every capture in the first flipped window.
+  test("a store-only capture reconciles into the archive bucket", async () => {
+    const artifacts = makeMemory(DATA_DIR)
+    const bucketStore = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    const layers = Layer.mergeAll(
+      BunFileSystem.layer,
+      layerMemory(bucketStore),
+      Layer.succeed(ArtifactStore, artifacts.api)
+    )
+
+    const body = bytesOf("gps batch store only")
+    const captureId = sha256(body)
+    const result = await Effect.runPromise(
+      httpIngest("gps-store", body, "application/json").pipe(Effect.provide(layers))
+    )
+    expect(result.captureId).toBe(captureId)
+
+    // Blob and provenance are in the artifact store and nowhere on disk.
+    const artifactKeys = [...artifacts.objects.keys()].filter((key) => key.startsWith(`capture/${captureId}/`))
+    expect(artifactKeys.length).toBe(2)
+    expect(existsSync(dataPath(`capture/${captureId}`))).toBe(false)
+
+    // httpIngest's prompt archive reconciled them store-to-bucket.
+    const bucketKeys = [...bucketStore.keys()].filter((key) => key.startsWith(`capture/${captureId}/`))
+    expect(bucketKeys.length).toBe(2)
+    expect(bucketStore.get(`capture/${captureId}/provenance.json`)!.bytes.length).toBeGreaterThan(0)
+
+    // A fresh reconciliation uploads nothing: the receipt (in the store)
+    // short-circuits, and losing it re-verifies by size, not re-uploads.
+    expect(await Effect.runPromise(archiveCapture(captureId).pipe(Effect.provide(layers)))).toBe(0)
+    await Effect.runPromise(
+      Files.remove(dataPath(archiveReceiptKey(captureId))).pipe(Effect.provide(layers))
+    )
+    expect(await Effect.runPromise(archiveCapture(captureId).pipe(Effect.provide(layers)))).toBe(0)
   })
 })
 

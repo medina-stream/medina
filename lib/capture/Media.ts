@@ -39,6 +39,7 @@ import * as Files from "../Files.ts"
 import { R2TempCreds } from "../R2TempCreds.ts"
 import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
+import { putArtifactToBucket } from "./Archive.ts"
 import { TransloaditNormalize } from "./TransloaditNormalize.ts"
 import {
   captureDir,
@@ -169,10 +170,20 @@ export const blobPathFor = (captureId: string) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
     const dir = dataPath(captureDir(captureId))
-    if (!(yield* fs.exists(dir))) return null
-    const names = yield* fs.readDirectory(dir)
-    const name = names.find((candidate) => !METADATA_NAMES.has(candidate) && !/\.tmp-[^/]*$/.test(candidate))
-    return name === undefined ? null : { name, path: `${dir}/${name}` }
+    // Names through the store seam: with the bucket store the capture
+    // exists only there, and a direct directory read sees nothing at all.
+    const listed = yield* Files.listFiles(dir)
+    const name = listed
+      .filter((entry) => !entry.includes("/"))
+      .find((candidate) => !METADATA_NAMES.has(candidate) && !/\.tmp-[^/]*$/.test(candidate))
+    if (name === undefined) return null
+    const path = `${dir}/${name}`
+    // Probing and transcoding read bytes from this disk, though: a blob
+    // that lives only in a remote store has no readable path yet, so
+    // report none. The probe then stays uncached and the capture waits,
+    // instead of caching a failed probe of a path that does not exist.
+    if (!(yield* fs.exists(path))) return null
+    return { name, path }
   }).pipe(
     Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause))))
   )
@@ -294,8 +305,6 @@ export const segmentToChunks = (
     }
     const chunks: Array<MediaChunk> = []
     let offset = 0
-    const outputDir = dataPath(`media/${MEDIA_VERSION}/${captureId}`)
-    yield* fs.makeDirectory(outputDir, { recursive: true })
     for (const [index, name] of names.entries()) {
       const probed = yield* run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", `${tmpDir}/${name}`])
       const duration = probed.ok ? probeDuration(JSON.parse(probed.stdout)) : null
@@ -304,7 +313,10 @@ export const segmentToChunks = (
         return yield* Effect.fail(new Error(`could not determine duration for ${captureId} chunk ${index}`))
       }
       const key = mediaChunkKey(captureId, index)
-      yield* fs.rename(`${tmpDir}/${name}`, dataPath(key)).pipe(Effect.mapError((cause) => new Error(String(cause))))
+      // Land the chunk through the store seam, not a direct rename onto
+      // a store-owned path.
+      yield* Files.putFile(dataPath(key), `${tmpDir}/${name}`)
+      yield* fs.remove(`${tmpDir}/${name}`, { force: true }).pipe(Effect.ignore)
       chunks.push(new MediaChunk({ index, key, startSeconds: offset, durationSeconds: duration }))
       offset += duration
     }
@@ -336,7 +348,6 @@ const captureIds = Effect.gen(function*() {
 
 const ensureManifestChunksInR2 = (manifest: MediaManifest) =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const bucket = yield* Bucket
     if (!bucket.configured) {
       return yield* Effect.fail(new Error("R2 bucket is required before media chunks can be transcribed"))
@@ -346,10 +357,13 @@ const ensureManifestChunksInR2 = (manifest: MediaManifest) =>
       const remote = yield* bucket.head(chunk.key)
       if (remote !== null && remote.size !== null && remote.size > 0) continue
       const local = dataPath(chunk.key)
-      if (!(yield* fs.exists(local))) {
+      // Presence through the store seam (the chunk may live only in the
+      // artifact store), and the upload itself goes through the same
+      // store-aware path the archive sweep uses.
+      if (!(yield* Files.exists(local))) {
         return yield* Effect.fail(new Error(`media chunk is missing from R2 and local storage: ${chunk.key}`))
       }
-      yield* bucket.putFile(chunk.key, local, "audio/ogg")
+      yield* putArtifactToBucket(bucket, chunk.key, local, "audio/ogg")
       uploaded++
     }
     return uploaded
@@ -379,11 +393,10 @@ export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNor
   discover: captureIds,
   ingest: (captureId) =>
     Effect.gen(function*() {
-      const fs = yield* FileSystem.FileSystem
-      if (yield* fs.exists(dataPath(normalizeSettledKey(captureId)))) return "skipped" as const
+      if (yield* Files.exists(dataPath(normalizeSettledKey(captureId)))) return "skipped" as const
       const probe = yield* probeCapture(captureId)
       if (!probe.media) return "skipped" as const
-      if (yield* fs.exists(dataPath(mediaManifestKey(captureId)))) {
+      if (yield* Files.exists(dataPath(mediaManifestKey(captureId)))) {
         const stored = Option.getOrNull(yield* Files.readJson(MediaManifest, dataPath(mediaManifestKey(captureId))))
         if (stored === null) return yield* Effect.fail(new Error(`manifest vanished for ${captureId}`))
         return (yield* ensureManifestChunksInR2(stored)) > 0 ? "ingested" as const : "cached" as const
@@ -523,7 +536,6 @@ export const mergeChunkTranscripts = (
  */
 export const transcribeMediaCapture = (captureId: string) =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const bucket = yield* Bucket
     const r2 = yield* R2TempCreds
     const assemblyai = yield* AssemblyAI
@@ -550,7 +562,7 @@ export const transcribeMediaCapture = (captureId: string) =>
       Effect.gen(function*() {
         const remote = yield* bucket.head(chunk.key)
         if (remote !== null && remote.size !== null && remote.size > 0) return "ready" as const
-        if (yield* fs.exists(dataPath(chunk.key))) return "missing" as const
+        if (yield* Files.exists(dataPath(chunk.key))) return "missing" as const
         yield* Files.writeJson(dataPath(transcriptSettledKey(captureId)), {
           captureId,
           error: `media chunk is missing from R2 and local storage: ${chunk.key}`,
@@ -566,7 +578,7 @@ export const transcribeMediaCapture = (captureId: string) =>
     const canonicalPath = dataPath(transcriptKey(captureId))
     const stale = yield* Files.readJson(Transcript, canonicalPath)
     if (Option.isSome(stale) && stale.value.status === "error") {
-      yield* fs.remove(canonicalPath, { force: true })
+      yield* Files.remove(canonicalPath)
     }
 
     const receiptPath = dataPath(transcriptJobsKey(captureId))
@@ -724,7 +736,6 @@ export const mediaTranscribeSource: Source<
 > = makeItemSource({
   name: "media-transcribe",
   discover: Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const entries = yield* Files.listFiles(dataPath(`media/${MEDIA_VERSION}`))
     const manifests = entries.filter((entry) => entry.endsWith(".json") && !entry.includes("/"))
     const pending: Array<string> = []
@@ -732,9 +743,9 @@ export const mediaTranscribeSource: Source<
       const captureId = manifest.slice(0, -".json".length)
       // Settled-errored captures are done: re-queuing them would resubmit
       // (and re-buy) AssemblyAI jobs that already failed terminally.
-      if (yield* fs.exists(dataPath(transcriptSettledKey(captureId)))) continue
+      if (yield* Files.exists(dataPath(transcriptSettledKey(captureId)))) continue
       const canonicalPath = dataPath(transcriptKey(captureId))
-      if (!(yield* fs.exists(canonicalPath))) {
+      if (!(yield* Files.exists(canonicalPath))) {
         pending.push(captureId)
         continue
       }

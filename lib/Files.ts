@@ -67,6 +67,45 @@ export const writeJson = (
     }).pipe(Effect.mapError(asError))
   )
 
+/** Store raw bytes as the artifact at `file` (atomic, like writeJson). */
+export const putBytes = (
+  file: string,
+  bytes: Uint8Array,
+  contentType?: string
+): Effect.Effect<void, Error, FileSystem.FileSystem> =>
+  withStore(
+    file,
+    (store, key) => store.putBytes(key, bytes, contentType),
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const tmp = `${file}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      yield* fs.makeDirectory(dirname(file), { recursive: true })
+      yield* fs.writeFile(tmp, bytes)
+      yield* fs.rename(tmp, file)
+    }).pipe(Effect.mapError(asError))
+  )
+
+/**
+ * Store the on-disk file at `sourcePath` as the artifact at `file`,
+ * without loading it into memory. Through a store the bytes are copied
+ * (the caller still owns `sourcePath` and removes its scratch file);
+ * with no store in context the source is *moved* into place — the
+ * rename ingest has always done, same-filesystem by construction.
+ */
+export const putFile = (
+  file: string,
+  sourcePath: string
+): Effect.Effect<void, Error, FileSystem.FileSystem> =>
+  withStore(
+    file,
+    (store, key) => store.putFile(key, sourcePath),
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      yield* fs.makeDirectory(dirname(file), { recursive: true })
+      yield* fs.rename(sourcePath, file)
+    }).pipe(Effect.mapError(asError))
+  )
+
 /** The file's text, or none when it does not exist. */
 export const readText = (
   file: string
@@ -90,6 +129,24 @@ export const exists = (
     Effect.gen(function*() {
       const fs = yield* FileSystem.FileSystem
       return yield* fs.exists(file)
+    }).pipe(Effect.mapError(asError))
+  )
+
+/** The artifact's size in bytes, or none when it does not exist. */
+export const size = (
+  file: string
+): Effect.Effect<Option.Option<number>, Error, FileSystem.FileSystem> =>
+  withStore(
+    file,
+    (store, key) =>
+      Effect.map(store.head(key), (head) =>
+        Option.flatMap(head, (h) => (h.size === null ? Option.none() : Option.some(h.size)))
+      ),
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      if (!(yield* fs.exists(file))) return Option.none()
+      const info = yield* fs.stat(file)
+      return Option.some(Number(info.size))
     }).pipe(Effect.mapError(asError))
   )
 

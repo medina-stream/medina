@@ -83,7 +83,7 @@ export const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
   const fs = yield* FileSystem.FileSystem
   const version = file.checksum ?? file.modifiedTime
   const receiptKey = ingestReceiptKey(sourceName, file.id, version)
-  if (yield* fs.exists(dataPath(receiptKey))) return "cached" as const
+  if (yield* Files.exists(dataPath(receiptKey))) return "cached" as const
   if (!file.mimeType.startsWith("audio/")) {
     yield* Effect.logDebug(`skipping non-audio file ${file.name} (${file.mimeType})`)
     return "skipped" as const
@@ -93,7 +93,7 @@ export const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
   // Adopt that id as the capture id (audio bytes not retained; backfilling
   // legacy audio is a separate migration).
   const legacyId = ingestId(sourceName, file.id, version)
-  if (yield* fs.exists(dataPath(transcriptKey(legacyId)))) {
+  if (yield* Files.exists(dataPath(transcriptKey(legacyId)))) {
     yield* Files.writeJson(
       dataPath(receiptKey),
       new IngestReceipt({ captureId: legacyId, ingestedAt: new Date().toISOString() })
@@ -105,21 +105,26 @@ export const ingestAudioFile = Effect.fn("ingestAudioFile")(function*(
   // Stream straight to disk while hashing: hours-long recordings can be
   // hundreds of MB, so the bytes must never sit in memory whole. The
   // capture id (content hash) is known only once the stream ends, hence a
-  // temp file in the data dir (same filesystem, so the rename is atomic)
-  // renamed into place afterwards. Nothing lists the data dir root, so the
-  // temp file is invisible to enumeration while it exists.
+  // temp file in the data dir (local scratch, never store-owned) that is
+  // landed into the store afterwards. Nothing lists the data dir root, so
+  // the temp file is invisible to enumeration while it exists.
   const tmpPath = dataPath(`tmp/capture-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   yield* fs.makeDirectory(dataPath("tmp"), { recursive: true })
   const captureId = yield* hashStreamToFile(yield* download, tmpPath)
 
   const blobKey = `${captureDir(captureId)}/${captureBlobName(file.name)}`
-  if (yield* fs.exists(dataPath(blobKey))) {
+  if (yield* Files.exists(dataPath(blobKey))) {
     // Same bytes already captured (renamed re-upload, or a pass that died
     // between blob write and receipt): drop the duplicate download.
     yield* fs.remove(tmpPath)
   } else {
-    yield* fs.makeDirectory(dataPath(captureDir(captureId)), { recursive: true })
-    yield* fs.rename(tmpPath, dataPath(blobKey))
+    // Land the blob through the artifact store, so the bytes live wherever
+    // the provenance and receipt (written through the same seam below) do.
+    // A direct rename into capture/ is the seam leak the first bucket flip
+    // exposed: provenance and receipt in the bucket, blob stranded on this
+    // disk, the capture split across two stores.
+    yield* Files.putFile(dataPath(blobKey), tmpPath)
+    yield* fs.remove(tmpPath, { force: true })
   }
 
   // Append this sighting to provenance unless already recorded: the same

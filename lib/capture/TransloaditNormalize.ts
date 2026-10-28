@@ -490,11 +490,10 @@ export const layerWithClient = (
     file: RemoteDriveObject,
     request: Effect.Effect<RemoteImportRequest, Error>
   ) => !configured ? failUnconfigured() : Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const bucket = yield* Bucket
     const version = file.checksum ?? file.modifiedTime
     const finalReceiptPath = dataPath(ingestReceiptKey(sourceName, file.id, version))
-    if (yield* fs.exists(finalReceiptPath)) return "cached" as const
+    if (yield* Files.exists(finalReceiptPath)) return "cached" as const
 
     const captureId = ingestId(sourceName, file.id, version)
     const originalKey = originalKeyFor(captureId, file.name)

@@ -126,8 +126,7 @@ const ingestDeviceEvent = (
 ): Effect.Effect<"ingested" | "cached" | "skipped", Error, FileSystem.FileSystem> =>
   Effect.gen(function*() {
     const receiptKey = dataPath(ingestReceiptKey(DEVICE_EVENTS_SOURCE_NAME, item.key, item.version))
-    const fs = yield* FileSystem.FileSystem
-    if (yield* fs.exists(receiptKey)) return "cached" as const
+    if (yield* Files.exists(receiptKey)) return "cached" as const
 
     const bytes = yield* (yield* api.download(item.key)).pipe(Stream.runCollect)
     const raw: unknown = JSON.parse(Buffer.concat([...bytes] as Uint8Array[]).toString("utf-8"))

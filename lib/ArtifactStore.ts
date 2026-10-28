@@ -165,11 +165,10 @@ export const makeLocal = (
       keyForPath: keyForPathIn(root),
       putBytes: (value, bytes) => putBytes(value, bytes),
       putText,
+      // Copied, never loaded: capture blobs can be hundreds of MB and
+      // ingest streams them to disk precisely to keep them out of memory.
       putFile: (value, source) =>
-        Effect.gen(function*() {
-          const bytes = yield* fail(fs.readFile(source))
-          yield* putBytes(value, bytes)
-        }),
+        writeAtomic(path(value), (tmp) => fail(fs.copyFile(source, tmp))),
       getBytes: (value) =>
         Effect.gen(function*() {
           const file = path(value)

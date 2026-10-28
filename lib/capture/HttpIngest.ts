@@ -2,7 +2,6 @@
  * Push ingest: an HTTP-posted body becomes a capture, uninterpreted.
  */
 import * as Effect from "effect/Effect"
-import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import type { Bucket } from "../Bucket.ts"
 import * as Files from "../Files.ts"
@@ -30,7 +29,6 @@ export const httpIngest = Effect.fn("httpIngest")(function*(
   bytes: Uint8Array,
   contentType: string
 ) {
-  const fs = yield* FileSystem.FileSystem
   const receivedAt = new Date().toISOString()
   const captureId = sha256(bytes)
 
@@ -49,8 +47,11 @@ export const httpIngest = Effect.fn("httpIngest")(function*(
 
   if (!duplicate) {
     const blobKey = `${captureDir(captureId)}/${captureBlobName(filename)}`
-    yield* fs.makeDirectory(dataPath(captureDir(captureId)), { recursive: true })
-    yield* fs.writeFile(dataPath(blobKey), bytes)
+    // Through the artifact store, like the provenance below: a direct
+    // write to the local path is the seam leak that split captures when
+    // the store flipped to the bucket (paperwork in the bucket, blob
+    // stranded on this disk).
+    yield* Files.putBytes(dataPath(blobKey), bytes)
   }
 
   // Duplicate content re-posted is still a sighting: append its provenance.

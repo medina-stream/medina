@@ -175,17 +175,16 @@ export const promoteLiveTranscript = (
   Effect.gen(function*() {
     const parsed = parseCaptureAudioKey(objectKey)
     if (parsed === null) return
-    const fs = yield* FileSystem.FileSystem
     const liveKey = dataPath(liveTranscriptKey(parsed.installId, parsed.segmentUuid))
-    if (!(yield* fs.exists(liveKey))) return
+    if (!(yield* Files.exists(liveKey))) return
     const provisional = yield* Files.readJson(Transcript, liveKey)
     const target = dataPath(localTranscriptKey(captureId))
-    if (Option.isSome(provisional) && !(yield* fs.exists(target))) {
+    if (Option.isSome(provisional) && !(yield* Files.exists(target))) {
       yield* Files.writeJson(target, provisional.value)
     } else if (Option.isNone(provisional)) {
       yield* Effect.logWarning(`live provisional ${liveKey} failed validation; dropping`)
     }
-    yield* fs.remove(liveKey)
+    yield* Files.remove(liveKey)
     yield* Files.writeJson(
       dataPath(liveTranscriptPromotedKey(parsed.installId, parsed.segmentUuid)),
       new IngestReceipt({ captureId, ingestedAt: new Date().toISOString() })
@@ -197,9 +196,8 @@ const ingestLiveTranscript = (
   item: LocalTranscriptObject
 ): Effect.Effect<"ingested" | "cached" | "skipped", Error, FileSystem.FileSystem> =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const receiptKey = dataPath(ingestReceiptKey(LOCAL_TRANSCRIPT_SOURCE_NAME, item.key, item.version))
-    if (yield* fs.exists(receiptKey)) return "cached" as const
+    if (yield* Files.exists(receiptKey)) return "cached" as const
 
     const bytes = yield* (yield* api.download(item.key)).pipe(Stream.runCollect)
     const raw = JSON.parse(Buffer.concat([...bytes] as Uint8Array[]).toString("utf-8"))
@@ -212,7 +210,7 @@ const ingestLiveTranscript = (
 
     // A partial that raced the seal must not resurrect a promoted provisional.
     const promotedKey = dataPath(liveTranscriptPromotedKey(parsed.installId, parsed.segmentUuid))
-    if (yield* fs.exists(promotedKey)) {
+    if (yield* Files.exists(promotedKey)) {
       yield* Files.writeJson(receiptKey, new IngestReceipt({ captureId: "", ingestedAt: new Date().toISOString() }))
       return "cached" as const
     }
@@ -239,9 +237,8 @@ const ingestFinalTranscript = (
   item: LocalTranscriptObject
 ): Effect.Effect<"ingested" | "cached" | "skipped", Error, FileSystem.FileSystem> =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const receiptKey = dataPath(ingestReceiptKey(LOCAL_TRANSCRIPT_SOURCE_NAME, item.key, item.version))
-    if (yield* fs.exists(receiptKey)) return "cached" as const
+    if (yield* Files.exists(receiptKey)) return "cached" as const
 
     const bytes = yield* (yield* api.download(item.key)).pipe(Stream.runCollect)
     const raw = JSON.parse(Buffer.concat([...bytes] as Uint8Array[]).toString("utf-8"))

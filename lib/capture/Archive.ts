@@ -33,7 +33,8 @@ import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
-import { Bucket } from "../Bucket.ts"
+import { ArtifactStore } from "../ArtifactStore.ts"
+import { Bucket, type BucketApi } from "../Bucket.ts"
 import * as Files from "../Files.ts"
 import type { Source } from "../Resource.ts"
 import { makeItemSource } from "../Source.ts"
@@ -73,6 +74,40 @@ const contentTypeFor = (name: string) => {
 }
 
 /**
+ * Upload one artifact to the archive bucket; resolves to the stored etag.
+ * When the bytes sit on this disk (the local store, or a pre-flip
+ * leftover) they stream from the file. When they live only in the
+ * artifact store (the bucket store), they move store-to-bucket through
+ * memory — a restore path, not the common one: with the deployment's
+ * buckets aligned, anything the store holds the archive bucket already
+ * holds too, and the caller's head check skips the upload entirely.
+ * Keys are content addresses, so identical bytes land either way.
+ */
+export const putArtifactToBucket = (
+  bucket: BucketApi,
+  bucketKey: string,
+  localPath: string,
+  contentType?: string
+): Effect.Effect<string | null, Error, FileSystem.FileSystem> =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    if (yield* fs.exists(localPath)) {
+      return yield* bucket.putFile(bucketKey, localPath, contentType)
+    }
+    const store = yield* Effect.serviceOption(ArtifactStore)
+    const key = Option.isSome(store) ? store.value.keyForPath(localPath) : null
+    const bytes = key === null || Option.isNone(store)
+      ? Option.none<Uint8Array>()
+      : yield* store.value.getBytes(key)
+    if (Option.isNone(bytes)) {
+      return yield* Effect.fail(
+        new Error(`artifact is in neither the artifact store nor local disk: ${bucketKey}`)
+      )
+    }
+    return yield* bucket.put(bucketKey, bytes.value, contentType)
+  })
+
+/**
  * Reconcile one capture with the bucket; resolves to how many files were
  * uploaded. Fails only on bucket errors (an unconfigured bucket included);
  * a capture directory that has vanished resolves to 0.
@@ -81,7 +116,6 @@ export const archiveCapture = (
   captureId: string
 ): Effect.Effect<number, Error, Bucket | FileSystem.FileSystem> =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const bucket = yield* Bucket
     const dir = dataPath(captureDir(captureId))
     const names = yield* Files.listFiles(dir)
@@ -99,10 +133,18 @@ export const archiveCapture = (
     const files: Array<ArchivedFile> = []
     for (const name of names) {
       const path = `${dir}/${name}`
-      const size = Number((yield* fs.stat(path).pipe(
-        Effect.mapError((cause) => new Error(String(cause)))
-      )).size)
       const bucketKey = `${captureDir(captureId)}/${name}`
+      // Size through the store seam: with the bucket store the capture
+      // exists only there, and a direct local stat is the NotFound that
+      // failed every capture in the first flipped window. A name the
+      // listing just returned but the store can no longer size vanished
+      // mid-sweep: fail the item (it retries next pass), as the stat
+      // failure did before.
+      const sizeOption = yield* Files.size(path)
+      if (Option.isNone(sizeOption)) {
+        return yield* Effect.fail(new Error(`capture file vanished before archival: ${bucketKey}`))
+      }
+      const size = sizeOption.value
 
       const existing = known.get(name)
       if (existing !== undefined && existing.size === size) {
@@ -124,7 +166,7 @@ export const archiveCapture = (
         continue
       }
 
-      const etag = yield* bucket.putFile(bucketKey, path, contentTypeFor(name))
+      const etag = yield* putArtifactToBucket(bucket, bucketKey, path, contentTypeFor(name))
       files.push(new ArchivedFile({ name, size, etag, uploadedAt: new Date().toISOString() }))
       uploaded += 1
       changed = true
