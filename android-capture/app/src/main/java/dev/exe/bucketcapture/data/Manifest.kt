@@ -56,13 +56,21 @@ interface ManifestDao {
     @Query("SELECT COUNT(*) FROM upload_items WHERE localPath = :path") suspend fun countPath(path: String): Int
     @Query("UPDATE upload_items SET state = 'PENDING', localPath = :path, byteCount = :bytes, contentMd5 = :md5, createdAt = :now, lastError = NULL, uploadedAt = NULL WHERE id = :id")
     suspend fun refreshPayload(id: String, path: String, bytes: Long, md5: String, now: Long)
-    @Query("UPDATE upload_items SET attemptCount = attemptCount + 1, lastError = :message WHERE id = :id")
+    // Guarded to PENDING rows: upload passes race (foreground, scheduled,
+    // manual), and a pass holding a stale snapshot must not stamp an
+    // error onto a row another pass has since uploaded — nothing would
+    // ever clear it, since only PENDING rows are processed again.
+    @Query("UPDATE upload_items SET attemptCount = attemptCount + 1, lastError = :message WHERE id = :id AND state = 'PENDING'")
     suspend fun failed(id: String, message: String)
     @Query("UPDATE upload_items SET state = 'UPLOADED', uploadedAt = :at, lastError = NULL WHERE id = :id AND state = 'PENDING'")
     suspend fun uploaded(id: String, at: Long): Int
     @Query("SELECT * FROM upload_items WHERE state = 'UPLOADED' AND localPath != ''") suspend fun uploadedWithFiles(): List<UploadItem>
     @Query("UPDATE upload_items SET localPath = '' WHERE id = :id AND state = 'UPLOADED'") suspend fun cleared(id: String)
     @Query("DELETE FROM upload_items WHERE state = 'UPLOADED' AND uploadedAt < :before AND localPath = ''") suspend fun prune(before: Long)
+    /** Heals rows uploaded by older builds that carry a stale error from
+     * a racing pass: an UPLOADED row's lastError is meaningless. */
+    @Query("UPDATE upload_items SET lastError = NULL WHERE state = 'UPLOADED' AND lastError IS NOT NULL")
+    suspend fun clearUploadedErrors()
 }
 
 @Dao

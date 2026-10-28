@@ -151,6 +151,7 @@ class SpoolRepository(private val context: Context, private val db: CaptureDatab
         db.manifest().uploadedWithFiles().forEach { item ->
             val file = File(item.localPath); if (!file.exists() || file.delete()) db.manifest().cleared(item.id)
         }
+        db.manifest().clearUploadedErrors()
         db.manifest().prune(System.currentTimeMillis() - 90L * 24 * 60 * 60 * 1000)
     }
     fun freeBytes() = StatFs(context.filesDir.absolutePath).availableBytes
