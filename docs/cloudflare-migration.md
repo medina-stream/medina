@@ -428,7 +428,10 @@ the obvious optimization when the bucket grows.
   receipts migrated with the store, and the first flipped main
   pass reproduced the local store's behavior exactly (including
   its two pre-existing Transloadit chunk-validation failures,
-  captures `414fe3fa` / `4b380c0a`, unchanged).
+  captures `414fe3fa` / `4b380c0a`, unchanged). One transient AWS
+  SDK `UnknownError` from R2 failed a single pipeline run at
+  22:24Z; every loop kept cycling and it did not recur in the
+  window.
 - **Known limitations after the re-flip**: (1) Device-events
   ingest throttles under burst: every `location.fix` rewrites
   the same per-device latest-location object, which R2 rate-
