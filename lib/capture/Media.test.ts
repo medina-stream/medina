@@ -2,7 +2,9 @@ import { tmpdir } from "node:os"
 import { describe, expect, test } from "bun:test"
 import { BunFileSystem } from "@effect/platform-bun"
 import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
+import { Bucket } from "../Bucket.ts"
 import * as Files from "../Files.ts"
 import { sha256 } from "../Hash.ts"
 import { captureDir, DATA_DIR, dataPath, Transcript } from "../lifelog/Resources.ts"
@@ -12,10 +14,13 @@ import {
   MediaChunk,
   MediaManifest,
   mediaManifestKey,
+  mediaNormalizeSource,
   mergeChunkTranscripts,
   normalizeCapture,
+  normalizeSettledKey,
   probeCapture
 } from "./Media.ts"
+import { TransloaditNormalize } from "./TransloaditNormalize.ts"
 
 if (!DATA_DIR.startsWith(tmpdir())) {
   throw new Error(`refusing to run against a non-temp data dir: ${DATA_DIR}`)
@@ -211,5 +216,78 @@ describe("mergeChunkTranscripts", () => {
     ])
     expect(merged.status).toBe("error")
     expect(merged.error).toBe("upload failed")
+  })
+})
+
+describe("mediaNormalizeSource", () => {
+  const TransloaditTest = Layer.succeed(TransloaditNormalize)({
+    configured: false,
+    normalize: () => Effect.fail(new Error("transloadit must not be called")),
+    ingestDrive: () => Effect.fail(new Error("transloadit must not be called"))
+  })
+  const bucketLayer = (heads: Array<string>, puts: Array<string>) => Layer.succeed(Bucket)({
+    configured: true,
+    list: () => Effect.succeed([]),
+    head: (candidate) => Effect.sync(() => {
+      heads.push(candidate)
+      return null
+    }),
+    download: () => Effect.fail(new Error("download must not happen")),
+    put: () => Effect.fail(new Error("put must not happen")),
+    putFile: (candidate) => Effect.sync(() => {
+      puts.push(candidate)
+      return "etag"
+    })
+  })
+  const writeManifest = (captureId: string, chunkKey: string) =>
+    Files.writeJson(dataPath(mediaManifestKey(captureId)), new MediaManifest({
+      captureId,
+      version: "media-v1",
+      createdAt: new Date().toISOString(),
+      sourceDurationSeconds: 2,
+      chunks: [new MediaChunk({ index: 0, key: chunkKey, startSeconds: 0, durationSeconds: 2 })]
+    })).pipe(Effect.provide(layers))
+
+  test("a manifest chunk missing from both stores settles as skipped, once", async () => {
+    const captureId = await makeCapture(2, "wav")
+    const chunkKey = `media/media-v1/${captureId}/chunk-000.ogg`
+    await Effect.runPromise(writeManifest(captureId, chunkKey))
+    const heads: Array<string> = []
+    const puts: Array<string> = []
+    const live = Layer.mergeAll(layers, bucketLayer(heads, puts), TransloaditTest)
+    const label = `capture/${captureId}`
+
+    // First pass: the chunk is in neither store, so the capture settles --
+    // counted as skipped, not a failure -- and the marker names the chunk.
+    const first = await Effect.runPromise(mediaNormalizeSource.ingest.pipe(Effect.provide(live)))
+    expect(first.failures.map((failure) => failure.item)).not.toContain(label)
+    expect(heads.filter((key) => key === chunkKey)).toHaveLength(1)
+    const marker = await Bun.file(dataPath(normalizeSettledKey(captureId))).json()
+    expect(marker.captureId).toBe(captureId)
+    expect(marker.error).toContain(chunkKey)
+
+    // Later passes short-circuit on the marker: no further head checks
+    // for the missing chunk, and still no failure.
+    const second = await Effect.runPromise(mediaNormalizeSource.ingest.pipe(Effect.provide(live)))
+    expect(second.failures.map((failure) => failure.item)).not.toContain(label)
+    expect(heads.filter((key) => key === chunkKey)).toHaveLength(1)
+  })
+
+  test("a manifest chunk present locally is restored to R2, not settled", async () => {
+    // A different duration than the settle test's capture: makeCapture's
+    // tone is deterministic, so equal parameters would alias the same
+    // capture id (and inherit its settled marker).
+    const captureId = await makeCapture(3, "wav")
+    const chunkKey = `media/media-v1/${captureId}/chunk-000.ogg`
+    await Bun.write(dataPath(chunkKey), new Uint8Array([1, 2, 3]))
+    await Effect.runPromise(writeManifest(captureId, chunkKey))
+    const heads: Array<string> = []
+    const puts: Array<string> = []
+    const live = Layer.mergeAll(layers, bucketLayer(heads, puts), TransloaditTest)
+
+    const report = await Effect.runPromise(mediaNormalizeSource.ingest.pipe(Effect.provide(live)))
+    expect(report.failures.map((failure) => failure.item)).not.toContain(`capture/${captureId}`)
+    expect(puts).toContain(chunkKey)
+    expect(await Bun.file(dataPath(normalizeSettledKey(captureId))).exists()).toBe(false)
   })
 })

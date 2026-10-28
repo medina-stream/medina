@@ -111,12 +111,23 @@ export const transcriptJobsKey = (captureId: string) =>
   `transcript/${TRANSCRIPT_VERSION}/${captureId}.jobs.json`
 
 /** Marker written when a capture's transcription settles as errored (every
- * chunk failed for a real reason). Discovery skips settled captures: their
- * AssemblyAI jobs are terminal, and re-queuing would resubmit — and
- * re-buy — them on every pass. Requeue manually by deleting this marker,
- * the jobs receipt, and any canonical transcript for the capture. */
+ * chunk failed for a real reason) or as impossible (a manifest chunk is
+ * missing from both R2 and local storage, so there is nothing to submit).
+ * Discovery skips settled captures: their AssemblyAI jobs are terminal,
+ * and re-queuing would resubmit — and re-buy — them on every pass.
+ * Requeue manually by deleting this marker, the jobs receipt, and any
+ * canonical transcript for the capture. */
 export const transcriptSettledKey = (captureId: string) =>
   `transcribe-settled/${TRANSCRIPT_VERSION}/${captureId}.json`
+
+/** Marker written when a capture's normalization settles as impossible:
+ * its manifest names chunks that are missing from BOTH R2 and local
+ * storage, so no pass can ever upload them. Normalize reports settled
+ * captures as skipped instead of re-failing them on every pass. Nothing
+ * is deleted — the manifest still names the chunks — and requeueing is
+ * manual: delete this marker once the media is back in either store. */
+export const normalizeSettledKey = (captureId: string) =>
+  `normalize-settled/${MEDIA_VERSION}/${captureId}.json`
 
 /** AssemblyAI refuses language detection on audio with no spoken audio.
  * That is a property of the audio, not a transient failure: the chunk is
@@ -344,12 +355,20 @@ const ensureManifestChunksInR2 = (manifest: MediaManifest) =>
     return uploaded
   })
 
+/** The one `ensureManifestChunksInR2` failure that can never heal: the
+ * chunk was asked for in both stores and is in neither. Every other
+ * failure — bucket errors, a vanished manifest — stays retryable. */
+const isMissingMediaChunkError = (error: unknown): error is Error =>
+  error instanceof Error && error.message.startsWith("media chunk is missing from R2 and local storage:")
+
 /**
  * Probe + normalize as a pipeline stage. Every capture is probed once;
  * captures already in canonical-ish form (the recorder app's AAC) skip
  * transcode/split and point a one-chunk manifest at the archived original.
  * Everything else goes through the transcode path as before. Settled
- * captures cost one probe read and one manifest existence check per pass.
+ * captures cost one probe read and one manifest existence check per pass;
+ * captures settled as impossible (a manifest chunk in neither store) cost
+ * one marker stat and report as skipped.
  *
  * Unbounded: nothing here is CPU-bound -- ffprobe is milliseconds, and the
  * heavy work (Transloadit assemblies, AssemblyAI transcripts) happens in
@@ -361,6 +380,7 @@ export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNor
   ingest: (captureId) =>
     Effect.gen(function*() {
       const fs = yield* FileSystem.FileSystem
+      if (yield* fs.exists(dataPath(normalizeSettledKey(captureId)))) return "skipped" as const
       const probe = yield* probeCapture(captureId)
       if (!probe.media) return "skipped" as const
       if (yield* fs.exists(dataPath(mediaManifestKey(captureId)))) {
@@ -394,7 +414,22 @@ export const mediaNormalizeSource: Source<FileSystem.FileSystem | TransloaditNor
       const manifest = yield* normalizeCapture(captureId)
       yield* ensureManifestChunksInR2(manifest)
       return "ingested" as const
-    }),
+    }).pipe(
+      // A manifest chunk missing from both R2 and local storage is
+      // permanent — no later pass can upload what neither store has.
+      // Write the settled marker so later passes skip this capture
+      // instead of re-failing it, and report this pass as skipped too.
+      // The marker records which chunk was missing.
+      Effect.catch((error) =>
+        isMissingMediaChunkError(error)
+          ? Files.writeJson(dataPath(normalizeSettledKey(captureId)), {
+            captureId,
+            error: error.message,
+            settledAt: new Date().toISOString()
+          }).pipe(Effect.as("skipped" as const))
+          : Effect.fail(error)
+      )
+    ),
   label: (captureId) => `capture/${captureId}`,
   concurrency: "unbounded"
 })
@@ -501,6 +536,29 @@ export const transcribeMediaCapture = (captureId: string) =>
     if (manifest === null) return yield* Effect.fail(new Error(`manifest vanished for ${captureId}`))
     if (manifest.chunks.length === 0) return yield* Effect.fail(new Error(`empty media manifest for ${captureId}`))
 
+    /**
+     * Whether a manifest chunk can be submitted. Missing from R2 but
+     * present locally is transient — the normalize stage runs before this
+     * one and restores local chunks to R2 — so the caller fails with the
+     * usual missing-chunk error and the capture retries next pass.
+     * Missing from BOTH stores is permanent: settle the capture with the
+     * terminal marker and report "settled". Any jobs receipt committed so
+     * far is kept, so a manual requeue (delete the marker once the media
+     * is back) resumes submission instead of resubmitting.
+     */
+    const chunkAvailability = (chunk: MediaChunk) =>
+      Effect.gen(function*() {
+        const remote = yield* bucket.head(chunk.key)
+        if (remote !== null && remote.size !== null && remote.size > 0) return "ready" as const
+        if (yield* fs.exists(dataPath(chunk.key))) return "missing" as const
+        yield* Files.writeJson(dataPath(transcriptSettledKey(captureId)), {
+          captureId,
+          error: `media chunk is missing from R2 and local storage: ${chunk.key}`,
+          settledAt: new Date().toISOString()
+        })
+        return "settled" as const
+      })
+
     // A canonical transcript left by a pre-fix run may be an error record.
     // It is not evidence: clear it up front so the capture is invisible to
     // the day index until a completed transcript lands, and so discovery
@@ -516,8 +574,9 @@ export const transcribeMediaCapture = (captureId: string) =>
     if (Option.isNone(existing)) {
       const jobs: Array<TranscriptChunkJob> = []
       for (const chunk of manifest.chunks) {
-        const remote = yield* bucket.head(chunk.key)
-        if (remote === null || remote.size === null || remote.size <= 0) {
+        const availability = yield* chunkAvailability(chunk)
+        if (availability === "settled") return "skipped" as const
+        if (availability === "missing") {
           return yield* Effect.fail(new Error(`R2 media chunk missing for transcription: ${chunk.key}`))
         }
         yield* Effect.log(
@@ -552,8 +611,9 @@ export const transcribeMediaCapture = (captureId: string) =>
     if (receipt.chunks.length < manifest.chunks.length) {
       const jobs = [...receipt.chunks]
       for (const chunk of manifest.chunks.slice(jobs.length)) {
-        const remote = yield* bucket.head(chunk.key)
-        if (remote === null || remote.size === null || remote.size <= 0) {
+        const availability = yield* chunkAvailability(chunk)
+        if (availability === "settled") return "skipped" as const
+        if (availability === "missing") {
           return yield* Effect.fail(new Error(`R2 media chunk missing for transcription: ${chunk.key}`))
         }
         const audioUrl = yield* r2.presignGet(chunk.key, 2 * 60 * 60)

@@ -876,7 +876,16 @@ const Ingest = Layer.effectDiscard(
         disabledReason: enabled.has("bucket")
           ? "BUCKET_NAME and BUCKET_ENDPOINT are required"
           : "disabled by MEDINA_SOURCES"
-      },
+      }
+    ]
+
+    // The capture sources ride their own pipeline loop (below), not the
+    // main ingest loop: they only receipt new objects into the data dir,
+    // and their latency is user-visible -- a phone segment should land
+    // minutes after it uploads, not after the main loop's multi-hour
+    // stage/resource pass comes back around. The main loop's stages pick
+    // the captured audio up from the data dir as before.
+    const captureSources: ReadonlyArray<PipelineSource<LifelogEnv>> = [
       {
         // The capture app's on-device first-look transcripts: tiny JSON next
         // to the audio. Ingest-only, like the capture bucket source.
@@ -965,6 +974,22 @@ const Ingest = Layer.effectDiscard(
       // Ingest-relevant sources poll every minute: every pass is
       // receipt-guarded and idempotent, and Schedule.spaced starts the
       // interval after a pass finishes, so passes can never overlap.
+      Effect.repeat(Schedule.spaced("1 minute")),
+      Effect.forkScoped
+    )
+
+    // The capture loop: same minutely cadence, but no stages and no
+    // resources -- a pass is just the three receipt-guarded source polls,
+    // so it finishes in seconds and runs on its own schedule. A wedged or
+    // merely slow main pass can never delay capture ingest again.
+    yield* runPipeline<LifelogEnv>(
+      captureSources,
+      [],
+      [],
+      dataPath,
+      { name: "capture", cadenceMs: 60_000 }
+    ).pipe(
+      Effect.catchCause((cause) => Effect.logError("capture pipeline run failed", cause)),
       Effect.repeat(Schedule.spaced("1 minute")),
       Effect.forkScoped
     )

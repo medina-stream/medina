@@ -425,4 +425,106 @@ describe("remote media transcription", () => {
     expect(submitted).toEqual([`https://r2.test/signed/${legacyKey}`])
     expect(report.failures.map((failure) => failure.item)).not.toContain(`capture/${settledId}`)
   })
+
+  test("a chunk missing from R2 and local storage settles instead of failing every pass", async () => {
+    const captureId = "remote-transcription-missing-chunk"
+    const key = `media/media-v1/${captureId}/chunk-0.ogg`
+    await Effect.runPromise(
+      Files.writeJson(dataPath(mediaManifestKey(captureId)), new MediaManifest({
+        captureId,
+        version: "media-v1",
+        createdAt: new Date().toISOString(),
+        sourceDurationSeconds: 5,
+        chunks: [new MediaChunk({ index: 0, key, startSeconds: 0, durationSeconds: 5 })]
+      })).pipe(Effect.provide(BunFileSystem.layer))
+    )
+
+    const submitted: Array<string> = []
+    const BucketTest = Layer.succeed(Bucket)({
+      configured: true,
+      list: () => Effect.succeed([]),
+      // The chunk is in neither store: head misses and no local file exists.
+      head: () => Effect.succeed(null),
+      download: () => Effect.fail(new Error("audio download must never be called")),
+      put: () => Effect.fail(new Error("audio put must not happen during transcription")),
+      putFile: () => Effect.fail(new Error("audio putFile must not happen during transcription"))
+    })
+    const R2Test = Layer.succeed(R2TempCreds)({
+      configured: true,
+      endpoint: "https://r2.test",
+      bucket: "archive",
+      mint: () => Effect.succeed(new TempCredentials({ accessKeyId: "unused", secretAccessKey: "unused", sessionToken: "unused" })),
+      presignGet: (candidate) => Effect.succeed(`https://r2.test/signed/${candidate}`)
+    })
+    const AssemblyTest = Layer.succeed(AssemblyAI)({
+      submit: (audio) => Effect.sync(() => {
+        if (audio._tag !== "url") throw new Error("expected url audio")
+        submitted.push(audio.url)
+        return { transcript: new VendorTranscript({ id: "t-never", status: "queued" }), raw: { id: "t-never", status: "queued" } }
+      }),
+      poll: () => Effect.fail(new Error("poll must not happen for a settled capture"))
+    })
+    const live = Layer.mergeAll(BunFileSystem.layer, BucketTest, R2Test, AssemblyTest)
+
+    // The pass settles the capture: skipped, not failed; nothing submitted
+    // and no jobs receipt -- and the settled marker records the chunk.
+    expect(await Effect.runPromise(transcribeMediaCapture(captureId).pipe(Effect.provide(live)))).toBe("skipped")
+    expect(submitted).toEqual([])
+    expect(await Bun.file(dataPath(transcriptJobsKey(captureId))).exists()).toBe(false)
+    const marker = await Bun.file(dataPath(transcriptSettledKey(captureId))).json()
+    expect(marker.captureId).toBe(captureId)
+    expect(marker.error).toContain(key)
+
+    // Discovery now skips the capture entirely: a source pass neither
+    // submits nor records a failure for it.
+    const report = await Effect.runPromise(mediaTranscribeSource.ingest.pipe(Effect.provide(live)))
+    expect(report.failures.map((failure) => failure.item)).not.toContain(`capture/${captureId}`)
+    expect(submitted).toEqual([])
+  })
+
+  test("a chunk missing from R2 but present locally still fails retryably", async () => {
+    const captureId = "remote-transcription-local-chunk"
+    const key = `media/media-v1/${captureId}/chunk-0.ogg`
+    await Effect.runPromise(
+      Files.writeJson(dataPath(mediaManifestKey(captureId)), new MediaManifest({
+        captureId,
+        version: "media-v1",
+        createdAt: new Date().toISOString(),
+        sourceDurationSeconds: 5,
+        chunks: [new MediaChunk({ index: 0, key, startSeconds: 0, durationSeconds: 5 })]
+      })).pipe(Effect.provide(BunFileSystem.layer))
+    )
+    // The chunk survives locally: normalize can restore it to R2, so the
+    // capture must NOT settle -- it fails with the usual error, no marker.
+    await Bun.write(dataPath(key), new Uint8Array([1, 2, 3]))
+
+    const BucketTest = Layer.succeed(Bucket)({
+      configured: true,
+      list: () => Effect.succeed([]),
+      head: () => Effect.succeed(null),
+      download: () => Effect.fail(new Error("audio download must never be called")),
+      put: () => Effect.fail(new Error("audio put must not happen during transcription")),
+      putFile: () => Effect.fail(new Error("audio putFile must not happen during transcription"))
+    })
+    const R2Test = Layer.succeed(R2TempCreds)({
+      configured: true,
+      endpoint: "https://r2.test",
+      bucket: "archive",
+      mint: () => Effect.succeed(new TempCredentials({ accessKeyId: "unused", secretAccessKey: "unused", sessionToken: "unused" })),
+      presignGet: (candidate) => Effect.succeed(`https://r2.test/signed/${candidate}`)
+    })
+    const AssemblyTest = Layer.succeed(AssemblyAI)({
+      submit: () => Effect.fail(new Error("submit must not happen while a chunk is missing")),
+      poll: () => Effect.fail(new Error("poll must not happen while a chunk is missing"))
+    })
+    const live = Layer.mergeAll(BunFileSystem.layer, BucketTest, R2Test, AssemblyTest)
+
+    const failed = await Effect.runPromise(transcribeMediaCapture(captureId).pipe(Effect.provide(live)))
+      .then(() => null, (error: unknown) => error)
+    expect(String(failed)).toContain("R2 media chunk missing for transcription")
+    expect(await Bun.file(dataPath(transcriptSettledKey(captureId))).exists()).toBe(false)
+    // Remove the manifest so no later source pass in this file keeps
+    // discovering (and failing) this deliberately unsettled capture.
+    await rm(dataPath(mediaManifestKey(captureId)), { force: true })
+  })
 })
