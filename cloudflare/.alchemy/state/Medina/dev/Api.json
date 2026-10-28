@@ -1,5 +1,5 @@
 {
-  "status": "created",
+  "status": "updated",
   "fqn": "Api",
   "logicalId": "Api",
   "instanceId": "4c2b8b1165fd149f499223bd628ba009",
@@ -10,7 +10,16 @@
       "date": "2026-10-13"
     },
     "workersDev": true,
-    "env": {},
+    "crons": [
+      "* * * * *"
+    ],
+    "env": {
+      "ShadowDiscovery": {
+        "kind": "Cloudflare.DurableObject",
+        "name": "ShadowDiscovery",
+        "className": "ShadowDiscovery"
+      }
+    },
     "isExternal": true
   },
   "attr": {
@@ -24,16 +33,21 @@
     "tags": [
       "alchemy:stack:Medina",
       "alchemy:stage:dev",
-      "alchemy:id:Api"
+      "alchemy:id:Api",
+      "alchemy:dos:ShadowDiscovery"
     ],
-    "durableObjectNamespaces": {},
+    "durableObjectNamespaces": {
+      "ShadowDiscovery": "c2fa160190a2468e896bbbb048d95c37"
+    },
     "accountId": "22e64798cbb760891764f349b53f573a",
     "routes": [],
-    "crons": [],
+    "crons": [
+      "* * * * *"
+    ],
     "tailConsumers": [],
     "hash": {
-      "bundle": "354ce7d2fde5908c0e95e18746d7e0472826d282d86ec1442c3f84aad6080a57",
-      "metadata": "be969fd2ae74c03306da17261ae745fad994bd8fb29b3f6187b43e455cdb2340"
+      "bundle": "61ed473961778a81795efcaca1f236860ff5463313051842e434f8d80a0c489a",
+      "metadata": "f8bd8287df78ee5298d1c2ce631c4f55bae29a311b77154cf27ea62b4898d073"
     }
   },
   "bindings": [
@@ -45,6 +59,30 @@
             "type": "r2_bucket",
             "name": "ARTIFACTS",
             "bucketName": "sco-lifelog"
+          }
+        ]
+      }
+    },
+    {
+      "sid": "CAPTURE_IN",
+      "data": {
+        "bindings": [
+          {
+            "type": "r2_bucket",
+            "name": "CAPTURE_IN",
+            "bucketName": "sco-lifelog-in"
+          }
+        ]
+      }
+    },
+    {
+      "sid": "ShadowDiscovery",
+      "data": {
+        "bindings": [
+          {
+            "type": "durable_object_namespace",
+            "name": "ShadowDiscovery",
+            "className": "ShadowDiscovery"
           }
         ]
       }

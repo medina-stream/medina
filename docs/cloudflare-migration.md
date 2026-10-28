@@ -1,6 +1,8 @@
 # Medina on Cloudflare: migration plan
 
-Status: milestone 1 (plan + scaffold + policy-serving proof), Oct 27, 2026.
+Status: milestone 2 (shadow ingest live and parity-checked), Oct 27, 2026.
+Milestone 1 (plan + scaffold + policy-serving proof) completed earlier
+the same day.
 Decision (Scott, Oct 27): Medina leaves exe.dev. Development stays on the
 `effect-rethink` branch; deployment target is Cloudflare, **Workers-native**,
 infra declared with **Alchemy** on the standard path (the hskping pattern:
@@ -226,6 +228,56 @@ Explicitly *not* in this pass: ingest implementation, data migration,
 any change to medina-dev, the medina-index Worker, the canonical policy,
 or the phone's configured URL.
 
+## 4.1 Milestone 2 — shadow ingest (done in this pass)
+
+§3 phase 1, on the same Worker and stage:
+
+- **Stack additions**: the `sco-lifelog-in` bucket adopted for a read
+  binding (`CAPTURE_IN`), a minutely Cron Trigger (`* * * * *`) on the
+  Worker, and the `ShadowDiscovery` Durable Object (SQLite-backed,
+  Alchemy `new_sqlite_classes` migration).
+- **Shadow pass** (the Worker's `scheduled` handler): paginate the
+  whole source prefix (6,422 objects at first pass), sort newest-first
+  by lastModified, classify with the server's exact filters
+  (capture-bucket .m4a / device-events `/events/` .json /
+  local-transcripts `/transcript/` .json, `probe/` dropped), and hand
+  the classified set to the DO, which records per object key: source,
+  size, etag, bucket lastModified, and `firstSeenAt` (the pass's
+  scheduled start). Bookkeeping (run count, last run) is written
+  *before* the batch inserts, so an interrupted pass still leaves a
+  trace. `GET /shadow/status` and a manual `POST /shadow/run` sit
+  behind the same device-token gate as the policy route.
+- **Census parity**: the first (cold) pass classified 6,296 objects —
+  capture-bucket 2,124, device-events 3,140, local-transcripts 1,032 —
+  matching an independent S3 census of the bucket exactly; the 126
+  unclassified objects are the location JSONs and probe objects the
+  server likewise skips.
+- **Fresh-segment parity** (the window after the cold pass, Oct 28
+  06:30–06:37 UTC): three new audio segments uploaded; the shadow saw
+  all three, and medina-dev held ingest receipts for all three — no
+  misses. The 06:15 segment's 262 s shadow latency is entirely the
+  new Cron Trigger's warm-up (created 06:25 UTC, first fire ~06:34);
+  the two 06:30/06:36 segments were seen by the pass that started
+  within seconds of their upload (their small negative raw latencies
+  are the pass-start timestamp artifact: an object uploaded mid-pass
+  is listed moments later in that same pass; true latency ≤ the
+  ~8 s pass duration — one cron tick, like-for-like with the
+  medina-dev loop).
+- **Discover-only, verified by construction**: the cron path calls
+  only `list` on the source binding and `fetch` on its own DO; there
+  is no object `get`, no bucket write, and no provider submission
+  anywhere in the shadow code path.
+
+Friction noted for later phases: the shadow tracks *keys*, the server
+tracks *(key, version)* — they coincide for immutable capture objects,
+but `.live.json` transcript partials are overwritten in place, so the
+shadow records their first sighting only, not their updates (the DO
+keeps the original etag/lastModified). If live partials matter to a
+future phase, the DO schema grows a version column. Also: each pass
+ships the full classified set (~6.3k rows) to the DO; fine at this
+bucket size, but a windowed listing (the server's warm-pass bound) is
+the obvious optimization when the bucket grows.
+
 ## 5. Risks and open questions
 
 - **Workers CPU limits vs derivations.** Paid Workers allow 30 s CPU
@@ -275,3 +327,33 @@ or the phone's configured URL.
   backlog drain should be estimated before phase 3, from the Oct 19
   drain numbers (~$5.52/day steady-state provider spend is separate
   and unchanged).
+
+## Addendum (Oct 27, 2026): auth direction — Cloudflare Access
+
+Scott has decided the auth answer for the human-facing surfaces,
+resolving the §5 Auth open question: **Cloudflare Access (Zero
+Trust)** is the analogue of the exe.dev login gate and the Tailscale
+identity headers — it, not a port of the server-side scheme, is what
+stands in front of the Worker.
+
+- **Browser surfaces** (the journal UI, `/status`, and the other
+  auth-gated pages) sit behind a Cloudflare Access application on a
+  **real (custom) domain**, with Scott's identity provider as the
+  login. Access supplies the identity; the Worker trusts the Access
+  assertion the way the bun server trusts the tailnet headers today.
+- **The phone's token routes stay outside Access.**
+  `/api/capture-policy/*` and `/bucket-capture/*` are not part of the
+  Access application and keep their existing per-device capability
+  token auth — the app has no browser and no IdP login, and its
+  contract does not change.
+- **Machine posters to `/in`** authenticate with **Access service
+  tokens** (the non-interactive Access credential), replacing the
+  tailnet-identity trust those posts rely on today.
+- **Access does not apply to workers.dev URLs.** The gated surface
+  therefore needs a custom domain attached at the milestone that
+  moves the browser UI — until then, the workers.dev deployment
+  remains a token-routes-and-proofs surface only.
+
+Direction only in this addendum: no Access application, domain, or
+service token is created by the shadow-ingest milestone, and the
+shadow scope is unchanged.

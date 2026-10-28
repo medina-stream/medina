@@ -1,0 +1,27 @@
+{
+  "status": "updated",
+  "fqn": "CaptureIn",
+  "logicalId": "CaptureIn",
+  "instanceId": "8e823ca419f5545f176b8b04c591a77e",
+  "resourceType": "Cloudflare.R2.Bucket",
+  "props": {
+    "name": "sco-lifelog-in"
+  },
+  "attr": {
+    "bucketName": "sco-lifelog-in",
+    "storageClass": "Standard",
+    "jurisdiction": "default",
+    "location": "wnam",
+    "accountId": "22e64798cbb760891764f349b53f573a",
+    "domains": [],
+    "lifecycleRules": [],
+    "cors": []
+  },
+  "bindings": [],
+  "providerVersion": 0,
+  "downstream": [
+    "Api"
+  ],
+  "removalPolicy": "destroy",
+  "providerMode": "live"
+}
