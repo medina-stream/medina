@@ -278,6 +278,86 @@ ships the full classified set (~6.3k rows) to the DO; fine at this
 bucket size, but a windowed listing (the server's warm-pass bound) is
 the obvious optimization when the bucket grows.
 
+## 4.2 Milestone 3 — Archil → R2 data migration (copy verified; flip attempted and rolled back)
+
+§3 phase 2, executed Oct 28, 2026 (bulk copy ~07:12–11:05 UTC, flip
+11:29 UTC, rollback 11:35 UTC):
+
+- **Seam check first**: ingest receipts and pipeline state are written
+  through `lib/Files.ts`, which routes through the in-context
+  `ArtifactStore` — so receipts, discovery indexes, and run reports
+  migrate with the artifacts key-for-key. No separate receipt
+  migration exists or is needed, and the flip cannot cause mass
+  re-submission on receipt grounds.
+- **Bulk copy** (the repo's `scripts/migrate-artifacts-to-bucket.ts`,
+  run per top-level prefix in four parallel workers; the tool is
+  sequential per key — local stat + bucket head + put + index
+  registration — and the medina-index DO's serialized registration is
+  the throughput ceiling, ~2–11 keys/s aggregate):
+  **51,753 keys scanned, 67.37 GB total; 43,347 uploaded
+  (21.34 GB), 8,406 skipped as already present with matching size
+  (8,259 capture originals, 145 media chunks, the 2 capture-policy
+  objects); 0 failures.** Per-prefix counts and byte totals in the
+  bucket afterwards match the local scan exactly, prefix for prefix
+  (media holds 413 additional bucket-only Transloadit chunk objects
+  that were never part of the local tree). Verification: 776
+  full-content sample hashes matched, 15 more size-verified (files
+  over the 64 MiB hash cap), **0 mismatches**. The one prefix the
+  tool cannot target is a bare top-level *file* key (`places.json` —
+  its `list(prefix)` treats the prefix as a directory); it and the
+  writes the live pipeline made during the ~4 h copy window were
+  converged afterwards by an explicit-key copy (528 keys listed,
+  276 copied, 252 already matching, 0 failures; plus a final
+  24-key mini-converge immediately before the flip). One prefix,
+  `normalize-settled/` (tonight's dead-letter markers), was created
+  after the initial inventory and copied separately (11 keys,
+  hash-verified). The Archil copy is untouched throughout and
+  remains the cold backup. Tooling note: `du` over the Archil FUSE
+  mount badly underreports (the `search/` tree is 15.66 GB by stat,
+  not the 1.9 GB `du` claimed) — trust stat-based totals.
+- **The flip**: `ARTIFACT_STORE` was unset (default `local`); the
+  flip appended `ARTIFACT_STORE=bucket` to `/home/exedev/medina/.env`
+  (the systemd unit sets no artifact env) and restarted the service
+  once (new MainPID 968610 at 11:29:40 UTC). The bucket-store path
+  itself worked immediately: the first capture pass ran entirely
+  against the bucket and wrote its report there (started 11:29:42,
+  finished 11:30:24 UTC, all sources clean).
+- **Why it was rolled back**: a seam leak in the file-ingest paths.
+  `ingestAudioFile` (`lib/capture/Audio.ts`, and the twin in
+  `lib/capture/HttpIngest.ts`) streams each blob to a local tmp
+  file and `fs.rename`s it into `capture/<captureId>/` with direct
+  filesystem calls — by design from when the store *was* the disk —
+  while provenance and receipts go through the `Files` seam. With
+  the store flipped, every newly ingested capture split: provenance
+  and receipt in the bucket, blob bytes stranded on Archil, never
+  registered in the index. The archive sweep
+  (`lib/capture/Archive.ts` `archiveCapture`) then discovers the
+  capture from the bucket index, lists `provenance.json`, and
+  `fs.stat`s it on the local path — NotFound — failing that capture
+  on every pass. The signature (`FileSystem.stat …/provenance.json`)
+  occurred 0 times in the 9 days before the flip and 18 times
+  (18 distinct captures) in the ~5 minutes after it. That is a
+  half-flipped system for new data, so the flip was reverted rather
+  than left in place: `.env` restored (previous value: unset),
+  one controlled restart (MainPID 968844 at 11:35:13 UTC), and
+  health confirmed on the local store (capture pass completed
+  11:35:14–11:37:35 UTC, zero error lines after the restart). The
+  18 split captures self-heal on the next main pass (their ingest
+  receipts exist only in the bucket, so the file sources re-ingest
+  them locally; the blob is already on disk, and provenance and
+  receipt are rewritten locally). The ~15 minutes of bucket-side
+  writes from the flipped window remain in the bucket, harmless;
+  the local store is authoritative again.
+- **Fix required before re-flipping** (code change, its own step):
+  land ingested blobs through the store — stream to the local tmp
+  file as today, then `putFile` it into the bucket store (which
+  registers it) instead of `fs.rename` into the capture dir — in
+  `Audio.ts` and `HttpIngest.ts`; and make `archiveCapture`
+  store-consistent (list and size/hash through the store, not
+  direct `fs.stat` on local paths; `Media.ts`'s capture-dir reads
+  deserve the same audit). Re-run the converge pass, then flip
+  again with the same procedure.
+
 ## 5. Risks and open questions
 
 - **Workers CPU limits vs derivations.** Paid Workers allow 30 s CPU
