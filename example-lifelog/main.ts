@@ -54,11 +54,20 @@ import { detectAndFileStars, STAR_DETECTOR_PERIOD_SECONDS } from "../lib/lifelog
 import { StarsLive } from "../lib/lifelog/Stars.ts"
 import { staysDay, staysSource } from "../lib/lifelog/Stays.ts"
 import { CapturePolicyStore, decodePolicy } from "../lib/capture/CapturePolicy.ts"
+import { APK_CONTENT_TYPE, apkKey, stampFromFileName } from "../lib/capture/CaptureApk.ts"
 import { discoverFresh } from "../lib/capture/Discover.ts"
 import { appIconResponse, webIconTarget } from "./AppIconResource.ts"
 
 const auth = new MedinaAuth({ directory: dataPath("auth") })
-const capturePolicy = new CapturePolicyStore({ directory: dataPath("capture-policy") })
+// The artifact bucket (sco-lifelog) holds the canonical capture policy
+// document, the mirrored token registry, and the published recorder
+// APKs. Null when ARTIFACT_BUCKET_* is unconfigured: the policy store
+// then keeps its document on local disk, as before.
+const capturePolicyObjects = ArtifactStore.objectStoreFromEnv()
+const capturePolicy = new CapturePolicyStore({
+  directory: dataPath("capture-policy"),
+  policyObjects: capturePolicyObjects
+})
 
 const bearerToken = (headers: Readonly<Record<string, string | undefined>>) => {
   const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(headers.authorization ?? "")
@@ -222,10 +231,13 @@ const publicAuthPath = (url: string) => {
   const policyFetch = path.startsWith("/api/capture-policy/") &&
     !path.slice("/api/capture-policy/".length).includes("/") &&
     path !== "/api/capture-policy/tokens"
+  // Published recorder APKs are public artifacts (the APK carries no
+  // credentials), addressed by exact stamp only.
+  const apkDownload = /^\/bucket-capture\/0\d{12}\.apk$/.test(path)
   return webIconTarget.outputs.some((output) => output.route === path) || path === "/auth.md" || path === "/cli/skill.md" || path === "/cli/medina.js" || path === "/.well-known/oauth-protected-resource" ||
     path === "/.well-known/oauth-authorization-server" || path === "/auth/requests" ||
     path.startsWith("/auth/approve/") || path === "/auth/delegations" || path === "/oauth2/token" || path === "/oauth2/revoke" ||
-    policyFetch
+    policyFetch || apkDownload
 }
 
 /** Apply the same full-access check to REST and the typed RPC endpoint. */
@@ -416,6 +428,32 @@ one-line download above is the zero-install form.
       yield* capturePolicy.writePolicy(policy).pipe(Effect.orDie)
       yield* Effect.log(`capture policy updated: version ${policy.version}`)
       return HttpServerResponse.jsonUnsafe(policy, { headers: { "cache-control": "no-store" } })
+    }))
+
+    // Recorder APK downloads: `/bucket-capture/<stamp>.apk`, streamed
+    // from the artifact bucket object of the same name. Public (the APK
+    // contains no credentials; devices learn the stamp from their
+    // token-gated policy), exact stamp paths only — anything else is a
+    // 404, and an unpublished stamp is a 404, never a listing.
+    yield* router.add("GET", "/bucket-capture/:name", Effect.gen(function*() {
+      const name = (yield* HttpRouter.params).name ?? ""
+      const stamp = stampFromFileName(name)
+      const key = stamp === null ? null : apkKey(stamp)
+      if (key === null || capturePolicyObjects === null) {
+        return HttpServerResponse.jsonUnsafe({ error: "not_found" }, { status: 404 })
+      }
+      const found = yield* capturePolicyObjects.get(key).pipe(
+        Effect.match({ onFailure: () => null, onSuccess: (value) => value })
+      )
+      if (found === null) return HttpServerResponse.jsonUnsafe({ error: "apk_unavailable" }, { status: 500 })
+      if (Option.isNone(found)) return HttpServerResponse.jsonUnsafe({ error: "not_found" }, { status: 404 })
+      return HttpServerResponse.uint8Array(found.value, {
+        contentType: APK_CONTENT_TYPE,
+        headers: {
+          "cache-control": "public, max-age=31536000, immutable",
+          "content-length": String(found.value.length)
+        }
+      })
     }))
 
     // The home page is an SPA: a static shell plus the client bundle. All

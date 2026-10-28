@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process"
 import { createInterface } from "node:readline"
 import { BunFileSystem } from "@effect/platform-bun"
 import * as Effect from "effect/Effect"
+import * as ArtifactStore from "../lib/ArtifactStore.ts"
 import { CapturePolicyStore, CapturePolicyUpload, decodePolicy } from "../lib/capture/CapturePolicy.ts"
 import { dataPath } from "../lib/lifelog/Resources.ts"
 
@@ -69,7 +70,13 @@ const main = async () => {
   const { options } = parsed
   if (!process.stdin.isTTY) throw new Error("run this interactively: secrets are prompted on the terminal, never piped")
 
-  const store = new CapturePolicyStore({ directory: dataPath("capture-policy") })
+  // The policy document's canonical home is the artifact bucket when
+  // ARTIFACT_BUCKET_* is configured; write through the same backend the
+  // server reads, or the update would land in a file nobody serves.
+  const store = new CapturePolicyStore({
+    directory: dataPath("capture-policy"),
+    policyObjects: ArtifactStore.objectStoreFromEnv()
+  })
   const runStore = <A, E>(effect: Effect.Effect<A, E, import("effect/FileSystem").FileSystem>) =>
     Effect.runPromise(effect.pipe(Effect.provide(BunFileSystem.layer)))
   const current = await runStore(store.readPolicy())

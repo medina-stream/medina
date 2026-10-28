@@ -802,6 +802,34 @@ export const bucketFromConfig: Effect.Effect<
 })
 
 /**
+ * The raw object store over the ARTIFACT_BUCKET_* env, built
+ * synchronously from `process.env` — the twin of `bucketFromConfig`
+ * minus the index, for callers that need objects only and construct at
+ * module scope where Config effects are not available (the capture
+ * policy store: its policy document and APK distribution live in this
+ * bucket). Returns null when the bucket is unconfigured or explicitly
+ * "disabled"; callers fall back to local behavior.
+ */
+export const objectStoreFromEnv = (): ObjectStoreApi | null => {
+  const read = (name: string) => process.env[`ARTIFACT_BUCKET_${name}`]?.trim() || null
+  const bucket = read("NAME")
+  if (!bucket || bucket === "disabled") return null
+  const endpoint = read("ENDPOINT")
+  const client = new S3Client({
+    ...(endpoint === null ? {} : { endpoint }),
+    region: read("REGION") ?? "auto",
+    forcePathStyle: read("FORCE_PATH_STYLE") !== "false",
+    credentials: {
+      // Keyless is a real configuration (edge-signing endpoint), as in
+      // readArtifactBucketConnection: placeholders stand in.
+      accessKeyId: read("ACCESS_KEY_ID") ?? "edge-injected",
+      secretAccessKey: read("SECRET_ACCESS_KEY") ?? "edge-injected"
+    }
+  })
+  return makeS3ObjectStore(client, bucket)
+}
+
+/**
  * The store layer for the running app, selected by ARTIFACT_STORE:
  * `bucket` for the bucket+index pair, anything else (including unset) for
  * the local store over DATA_DIR. Production flips by config only.

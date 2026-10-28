@@ -4,7 +4,15 @@ import * as Effect from "effect/Effect"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { CapturePolicyError, CapturePolicyStore, decodePolicy, defaultPolicy } from "./CapturePolicy.ts"
+import { makeMemoryObjectStore } from "../ArtifactStore.ts"
+import {
+  CapturePolicyError,
+  CapturePolicyStore,
+  POLICY_OBJECT_KEY,
+  TOKENS_OBJECT_KEY,
+  decodePolicy,
+  defaultPolicy
+} from "./CapturePolicy.ts"
 
 const directories: string[] = []
 const store = () => {
@@ -104,6 +112,39 @@ describe("CapturePolicyStore", () => {
     expect(error).toBeInstanceOf(CapturePolicyError)
   })
 
+  test("the apk section decodes, round-trips, and is tolerated absent", async () => {
+    const base = JSON.parse(JSON.stringify(defaultPolicy()))
+    const withApk = decodePolicy({
+      ...base,
+      apk: {
+        stamp: "0202610280317",
+        url: "https://edge.example/bucket-capture/0202610280317.apk",
+        sha256: "a".repeat(64),
+        sizeBytes: 31569815,
+        publishedAt: "2026-10-28T03:17:00Z",
+        notes: "spectrogram build"
+      }
+    })
+    expect(withApk).not.toBeNull()
+    expect(withApk!.apk?.stamp).toBe("0202610280317")
+    expect(withApk!.apk?.sizeBytes).toBe(31569815)
+    expect(withApk!.apk?.notes).toBe("spectrogram build")
+    // A policy written before APK distribution has no apk section.
+    const without = decodePolicy(base)
+    expect(without).not.toBeNull()
+    expect(without!.apk ?? null).toBeNull()
+    expect(decodePolicy({ ...base, apk: null })!.apk).toBeNull()
+    // A malformed apk section invalidates the document rather than
+    // being silently half-trusted.
+    expect(decodePolicy({ ...base, apk: { stamp: 42 } })).toBeNull()
+    // And the section survives a store round-trip.
+    const s = store()
+    await run(s.writePolicy(withApk!))
+    const read = await run(s.readPolicy())
+    expect(read.apk?.stamp).toBe("0202610280317")
+    expect(read.apk?.sha256).toBe("a".repeat(64))
+  })
+
   test("long-revoked tokens are pruned on write", async () => {
     const directory = mkdtempSync(join(tmpdir(), "medina-policy-"))
     directories.push(directory)
@@ -116,5 +157,106 @@ describe("CapturePolicyStore", () => {
     await run(s.issueToken("new device"))
     const listed = await run(s.listTokens())
     expect(listed.map((token) => token.label)).toEqual(["new device"])
+  })
+})
+
+describe("CapturePolicyStore with a bucket backend", () => {
+  const bucketStore = () => {
+    const directory = mkdtempSync(join(tmpdir(), "medina-policy-"))
+    directories.push(directory)
+    const backing = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    const objects = makeMemoryObjectStore(backing)
+    return {
+      directory,
+      backing,
+      objects,
+      store: new CapturePolicyStore({ directory, policyObjects: objects })
+    }
+  }
+
+  test("writes land in the bucket and a fresh store reads them back", async () => {
+    const { backing, objects, store: first } = bucketStore()
+    const updated = decodePolicy({
+      ...JSON.parse(JSON.stringify(defaultPolicy())),
+      version: 2,
+      apk: {
+        stamp: "0202610280317",
+        url: "https://edge.example/bucket-capture/0202610280317.apk",
+        sha256: "b".repeat(64),
+        sizeBytes: 123,
+        publishedAt: "2026-10-28T03:17:00Z"
+      }
+    })
+    await run(first.writePolicy(updated!))
+    expect(backing.has(POLICY_OBJECT_KEY)).toBe(true)
+    const secondDirectory = mkdtempSync(join(tmpdir(), "medina-policy-"))
+    directories.push(secondDirectory)
+    const second = new CapturePolicyStore({ directory: secondDirectory, policyObjects: objects })
+    const read = await run(second.readPolicy())
+    expect(read.version).toBe(2)
+    expect(read.apk?.stamp).toBe("0202610280317")
+  })
+
+  test("the on-disk policy seeds the bucket on first read", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "medina-policy-"))
+    directories.push(directory)
+    // Provision on disk only, as the deployment exists today.
+    const fileOnly = new CapturePolicyStore({ directory })
+    const provisioned = decodePolicy({
+      ...JSON.parse(JSON.stringify(defaultPolicy())),
+      upload: {
+        ...JSON.parse(JSON.stringify(defaultPolicy().upload)),
+        bucket: "sco-lifelog-in",
+        accessKeyId: "AKID",
+        secretAccessKey: "shh"
+      }
+    })
+    await run(fileOnly.writePolicy(provisioned!))
+    // A bucket-backed store over the same directory migrates it up.
+    const backing = new Map<string, { bytes: Uint8Array; contentType?: string }>()
+    const objects = makeMemoryObjectStore(backing)
+    const migrated = new CapturePolicyStore({ directory, policyObjects: objects })
+    const read = await run(migrated.readPolicy())
+    expect(read.upload.accessKeyId).toBe("AKID")
+    expect(backing.has(POLICY_OBJECT_KEY)).toBe(true)
+    const seeded = JSON.parse(new TextDecoder().decode(backing.get(POLICY_OBJECT_KEY)!.bytes))
+    expect(seeded.upload.secretAccessKey).toBe("shh")
+  })
+
+  test("an out-of-band bucket write is picked up on the next read", async () => {
+    const { backing, objects, store: s } = bucketStore()
+    await run(s.writePolicy(defaultPolicy()))
+    // The publish script is a separate process writing the same object.
+    const newer = {
+      ...JSON.parse(JSON.stringify(defaultPolicy())),
+      updatedAt: new Date().toISOString(),
+      apk: {
+        stamp: "0202610280400",
+        url: "https://edge.example/bucket-capture/0202610280400.apk",
+        sha256: "c".repeat(64),
+        sizeBytes: 5,
+        publishedAt: "2026-10-28T04:00:00Z"
+      }
+    }
+    await Effect.runPromise(objects.put(POLICY_OBJECT_KEY, new TextEncoder().encode(JSON.stringify(newer)), "application/json"))
+    const read = await run(s.readPolicy())
+    expect(read.apk?.stamp).toBe("0202610280400")
+  })
+
+  test("token writes mirror the registry (hashes only) to the bucket", async () => {
+    const { backing, objects, store: s } = bucketStore()
+    const { token } = await run(s.issueToken("pixel"))
+    expect(backing.has(TOKENS_OBJECT_KEY)).toBe(true)
+    const mirror = new TextDecoder().decode(backing.get(TOKENS_OBJECT_KEY)!.bytes)
+    expect(mirror).not.toContain(token)
+    const parsed = JSON.parse(mirror)
+    expect(parsed.tokens.length).toBe(1)
+    expect(parsed.tokens[0].label).toBe("pixel")
+    expect(typeof parsed.tokens[0].hash).toBe("string")
+    // Revocation propagates to the mirror too.
+    const listed = await run(s.listTokens())
+    await run(s.revokeToken(listed[0]!.id))
+    const after = JSON.parse(new TextDecoder().decode(backing.get(TOKENS_OBJECT_KEY)!.bytes))
+    expect(after.tokens[0].revokedAt).not.toBeNull()
   })
 })
