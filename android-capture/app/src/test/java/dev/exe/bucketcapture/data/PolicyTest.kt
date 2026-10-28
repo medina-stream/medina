@@ -83,6 +83,35 @@ class PolicyTest {
         }
     }
 
+    @Test fun `apk section parses when well formed`() {
+        val withApk = valid.replace(
+            "\"unknownFuture\": true,",
+            "\"unknownFuture\": true, \"apk\": { \"stamp\": \"0202610280317\", \"url\": \"https://edge.example/bucket-capture/0202610280317.apk\", \"sha256\": \"${"a".repeat(64)}\", \"sizeBytes\": 31569815, \"publishedAt\": \"2026-10-28T03:17:00Z\", \"notes\": \"spectrogram build\" },"
+        )
+        val policy = parsePolicy(withApk)
+        assertNotNull(policy)
+        val apk = policy!!.apk
+        assertNotNull(apk)
+        assertEquals("0202610280317", apk!!.stamp)
+        assertEquals("https://edge.example/bucket-capture/0202610280317.apk", apk.url)
+        assertEquals("a".repeat(64), apk.sha256)
+        assertEquals(31569815L, apk.sizeBytes)
+        assertEquals("spectrogram build", apk.notes)
+    }
+
+    @Test fun `apk section is tolerated absent or malformed`() {
+        // Absent: policies written before APK distribution.
+        assertNull(parsePolicy(valid)!!.apk)
+        // Malformed: ignored, never a reason to reject the whole policy.
+        val badStamp = valid.replace("\"unknownFuture\": true,", "\"unknownFuture\": true, \"apk\": { \"stamp\": \"soon\", \"url\": \"https://e.example/x.apk\", \"sha256\": \"${"a".repeat(64)}\", \"sizeBytes\": 10 },")
+        assertNotNull(parsePolicy(badStamp))
+        assertNull(parsePolicy(badStamp)!!.apk)
+        val badHash = valid.replace("\"unknownFuture\": true,", "\"unknownFuture\": true, \"apk\": { \"stamp\": \"0202610280317\", \"url\": \"https://e.example/x.apk\", \"sha256\": \"xyz\", \"sizeBytes\": 10 },")
+        assertNull(parsePolicy(badHash)!!.apk)
+        val httpUrl = valid.replace("\"unknownFuture\": true,", "\"unknownFuture\": true, \"apk\": { \"stamp\": \"0202610280317\", \"url\": \"http://e.example/x.apk\", \"sha256\": \"${"a".repeat(64)}\", \"sizeBytes\": 10 },")
+        assertNull(parsePolicy(httpUrl)!!.apk)
+    }
+
     @Test fun `gps adaptive fields parse with defaults`() {
         val policy = parsePolicy(valid)!!
         // The fixture has no adaptive fields: defaults apply.

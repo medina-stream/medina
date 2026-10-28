@@ -53,6 +53,7 @@ sealed interface PolicyState {
  * is fetched.
  */
 class PolicyStore(context: Context) {
+    private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("capture_policy", Context.MODE_PRIVATE)
     private val legacy = context.getSharedPreferences("bucket_settings", Context.MODE_PRIVATE)
     private val cipher = KeystoreCipher()
@@ -110,6 +111,9 @@ class PolicyStore(context: Context) {
                     .putBoolean("revoked", false)
                     .remove("stale_error").remove("last_error")
                     .apply()
+                // Every refresh path funnels through here, so this one
+                // call is the whole update check's trigger.
+                dev.exe.bucketcapture.update.AppUpdate.onPolicyApplied(appContext, result.policy)
                 result
             }
             is PolicyFetchResult.Transient -> {

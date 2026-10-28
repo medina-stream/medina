@@ -50,6 +50,8 @@ import dev.exe.bucketcapture.data.UploadItem
 import dev.exe.bucketcapture.data.UploadState
 import dev.exe.bucketcapture.ui.DotState
 import dev.exe.bucketcapture.ui.StatusDot
+import dev.exe.bucketcapture.update.AppUpdate
+import dev.exe.bucketcapture.update.UpdateInstaller
 import dev.exe.bucketcapture.ui.lastSyncedText
 import dev.exe.bucketcapture.ui.normalizeAmplitude
 import dev.exe.bucketcapture.ui.theme.BucketCaptureTheme
@@ -71,18 +73,36 @@ import java.util.UUID
 
 data class HealthSummary(val pending: Int, val uploaded: Int, val errorCount: Int, val lastError: String?)
 
+/**
+ * Errors are a property of work still owed: only PENDING rows count.
+ * An UPLOADED row that still carries error text (stamped by a racing
+ * pass in an older build, before failed() was state-guarded) is done,
+ * not broken — counting it strands a permanent "N with errors" in the
+ * UI that nothing can clear.
+ */
+fun summarizeHealth(list: List<UploadItem>): HealthSummary {
+    val errored = list.filter { it.state == UploadState.PENDING && it.lastError != null }
+    return HealthSummary(
+        pending = list.count { it.state == UploadState.PENDING },
+        uploaded = list.count { it.state == UploadState.UPLOADED },
+        errorCount = errored.size,
+        lastError = errored.maxByOrNull { it.createdAt }?.lastError,
+    )
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as CaptureApplication
+
+    init {
+        // Seed the update offer from the cached policy, so an update
+        // learned about earlier still shows before the next refresh.
+        (app.policies.state() as? PolicyState.Active)?.policy?.let {
+            AppUpdate.onPolicyApplied(app, it)
+        }
+    }
     val items: StateFlow<List<UploadItem>> = app.spool.items.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val health: StateFlow<HealthSummary> = items.map { list ->
-        val errored = list.filter { it.lastError != null }
-        HealthSummary(
-            pending = list.count { it.state == UploadState.PENDING },
-            uploaded = list.count { it.state == UploadState.UPLOADED },
-            errorCount = errored.size,
-            lastError = errored.maxByOrNull { it.createdAt }?.lastError,
-        )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HealthSummary(0, 0, 0, null))
+    val health: StateFlow<HealthSummary> = items.map { list -> summarizeHealth(list) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HealthSummary(0, 0, 0, null))
 
     /** Newest bucket-confirmed upload across all spooled items; drives "Last synced …". */
     val lastSyncedAt: StateFlow<Long?> = items.map { list -> list.mapNotNull { it.uploadedAt }.maxOrNull() }
@@ -330,6 +350,7 @@ class MainActivity : ComponentActivity() {
                     Button(onClick = onOpenSettings) { Text("Open settings") }
                     Spacer(Modifier.height(8.dp))
                 }
+                UpdateBanner()
                 LiveCaptureBlock()
                 val statusText = when (val s = vm.policyState) {
                     is PolicyState.Active ->
@@ -506,6 +527,56 @@ private val EMPTY_SPECTRO_FRAMES: StateFlow<List<FloatArray>> = MutableStateFlow
  * when the service isn't recording and no transcript exists — never
  * placeholder data.
  */
+/**
+ * The self-update offer: shown when the applied policy names a newer
+ * build than the one running (see update/AppUpdate). Install downloads
+ * and verifies the APK, then hands it to the system installer; every
+ * failure lands here as plain text.
+ */
+@Composable
+private fun UpdateBanner() {
+    val context = LocalContext.current
+    val update by AppUpdate.available.collectAsStateWithLifecycle()
+    val apk = update ?: return
+    var phase by remember(apk.stamp) { mutableStateOf<String?>(null) }
+    var error by remember(apk.stamp) { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("New build available", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Build ${apk.stamp}" + (apk.notes?.let { " — $it" } ?: ""),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            error?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    enabled = phase == null,
+                    onClick = {
+                        error = null
+                        scope.launch {
+                            val result = UpdateInstaller(context).downloadAndInstall(apk) { phase = it }
+                            phase = null
+                            result.exceptionOrNull()?.let { error = it.message ?: "Install failed" }
+                        }
+                    },
+                ) { Text(phase ?: "Install") }
+                Spacer(Modifier.width(8.dp))
+                TextButton(
+                    enabled = phase == null,
+                    onClick = { AppUpdate.dismiss(context, apk.stamp) },
+                ) { Text("Dismiss") }
+            }
+        }
+    }
+    Spacer(Modifier.height(16.dp))
+}
+
 @Composable
 private fun LiveCaptureBlock() {
     var capturing by remember { mutableStateOf(false) }

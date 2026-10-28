@@ -12,8 +12,18 @@ android {
         applicationId = "dev.exe.bucketcapture"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        // Distribution is by direct APK download (see the policy's apk
+        // section), so the build stamp is the version identity: "0" +
+        // UTC yyyyMMddHHmm of build time, baked in via -PAPK_STAMP and
+        // compared lexicographically against the policy's stamp.
+        // versionCode is UTC epoch-minutes at build time so every new
+        // build is an upgrade Android will install over the last.
+        val apkStamp = (project.findProperty("APK_STAMP") as String?)?.takeIf { it.isNotBlank() }
+            ?: "0000000000000"
+        versionCode = (project.findProperty("APK_VERSION_CODE") as String?)?.toIntOrNull()
+            ?: (System.currentTimeMillis() / 60_000L).toInt()
         versionName = "0.1.0"
+        buildConfigField("String", "APK_STAMP", "\"$apkStamp\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild { cmake { arguments += "-DANDROID_STL=c++_static" } }

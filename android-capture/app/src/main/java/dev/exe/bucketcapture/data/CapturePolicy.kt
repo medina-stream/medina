@@ -58,12 +58,29 @@ data class PolicyUpload(
     fun describe() = if (bucket.isBlank()) "not configured" else "$bucket · ${endpoint.removePrefix("https://").substringBefore("/")}"
 }
 
+/**
+ * The newest published build of this app (self-hosted distribution).
+ * `stamp` is "0" + UTC yyyyMMddHHmm of build time — fixed width, so it
+ * compares lexicographically against BuildConfig.APK_STAMP. The bytes
+ * at `url` are verified against `sha256`/`sizeBytes` before the system
+ * installer ever sees them.
+ */
+data class PolicyApk(
+    val stamp: String = "",
+    val url: String = "",
+    val sha256: String = "",
+    val sizeBytes: Long = 0,
+    val publishedAt: String = "",
+    val notes: String? = null,
+)
+
 data class CapturePolicy(
     val version: Int = 1,
     val updatedAt: String = "",
     val audio: PolicyAudio = PolicyAudio(),
     val gps: PolicyGps = PolicyGps(),
     val upload: PolicyUpload = PolicyUpload(),
+    val apk: PolicyApk? = null,
 )
 
 /** Newest policy version this app build understands. */
@@ -99,6 +116,24 @@ fun parsePolicy(raw: String): CapturePolicy? = runCatching {
     val minAccuracy = gpsJson.optInt("minAccuracyMeters", 100)
     if (intervalSeconds !in 5..3600 || movingIntervalSeconds !in 5..3600 || minDistance !in 0..10000 || minAccuracy !in 1..1000) return null
     val uploadJson = root.optJSONObject("upload") ?: JSONObject()
+    // The apk section is advisory like the rest of the policy: a
+    // malformed one is ignored (treated as "no update offered"), never
+    // a reason to distrust the whole document.
+    val apk = root.optJSONObject("apk")?.let { apkJson ->
+        val stamp = apkJson.optString("stamp", "")
+        val url = apkJson.optString("url", "")
+        val sha256 = apkJson.optString("sha256", "").lowercase()
+        val sizeBytes = apkJson.optLong("sizeBytes", 0)
+        if (stamp.matches(Regex("^0\\d{12}$")) && url.startsWith("https://") &&
+            sha256.matches(Regex("^[0-9a-f]{64}$")) && sizeBytes > 0
+        ) {
+            PolicyApk(
+                stamp = stamp, url = url, sha256 = sha256, sizeBytes = sizeBytes,
+                publishedAt = apkJson.optString("publishedAt", ""),
+                notes = apkJson.optString("notes", "").ifBlank { null },
+            )
+        } else null
+    }
     CapturePolicy(
         version = version,
         updatedAt = root.optString("updatedAt", ""),
@@ -125,6 +160,7 @@ fun parsePolicy(raw: String): CapturePolicy? = runCatching {
             secretAccessKey = uploadJson.optString("secretAccessKey", ""),
             unmeteredOnly = uploadJson.optBoolean("unmeteredOnly", true),
         ),
+        apk = apk,
     )
 }.getOrNull()
 
