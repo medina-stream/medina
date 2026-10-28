@@ -8,6 +8,9 @@ import dev.exe.bucketcapture.AppForeground
 import dev.exe.bucketcapture.CaptureTelemetry
 import dev.exe.bucketcapture.data.SpoolRepository
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -57,6 +60,27 @@ class LiveTranscriber(
     private var record: AudioRecord? = null
     private var readerJob: Job? = null
     private var tickerJob: Job? = null
+    private var spectroJob: Job? = null
+
+    private val _liveText = MutableStateFlow("")
+
+    /**
+     * The current segment's accumulated live transcript, for the UI.
+     * Mirrors what is spooled as the `.live.json` first-look; empty when
+     * nothing has been transcribed yet this segment.
+     */
+    val liveText: StateFlow<String> = _liveText.asStateFlow()
+
+    private val _spectrogramFrames = MutableStateFlow<List<FloatArray>>(emptyList())
+
+    /**
+     * Rolling mel-spectrogram frames for the UI waterfall, oldest first,
+     * ~[SPECTRO_HISTORY] frames at [SPECTRO_POLL_MS] intervals (~30 s).
+     * Frames are computed ONLY while the app is foregrounded (see
+     * AppForeground): in the background the loop idles and publishes
+     * nothing new, so this feature adds zero background compute.
+     */
+    val spectrogramFrames: StateFlow<List<FloatArray>> = _spectrogramFrames.asStateFlow()
 
     /** A new segment started recording: reset accumulation (safe to call before start()). */
     fun onSegment(uuid: String, startMs: Long) {
@@ -70,6 +94,7 @@ class LiveTranscriber(
             updateSeq = 0
         }
         CaptureTelemetry.liveTranscriptLine = ""
+        _liveText.value = ""
         synchronized(ringLock) { ringStart = 0; ringCount = 0; totalSamples = 0 }
     }
 
@@ -100,12 +125,23 @@ class LiveTranscriber(
         tickerJob = scope.launch(Dispatchers.Default) {
             while (isActive) { delay(TICK_MS); runCatching { tick() } }
         }
+        spectroJob = scope.launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(SPECTRO_POLL_MS)
+                // Display-only: never burn FFT cycles in the background.
+                if (!AppForeground.isForeground) continue
+                runCatching {
+                    val frame = Spectrogram.frame(snapshotSamples(Spectrogram.FFT_SIZE))
+                    _spectrogramFrames.value = (_spectrogramFrames.value + frame).takeLast(SPECTRO_HISTORY)
+                }
+            }
+        }
     }
 
     fun stop() {
         running = false
-        readerJob?.cancel(); tickerJob?.cancel()
-        readerJob = null; tickerJob = null
+        readerJob?.cancel(); tickerJob?.cancel(); spectroJob?.cancel()
+        readerJob = null; tickerJob = null; spectroJob = null
         runCatching { record?.stop() }
         record?.release(); record = null
         synchronized(stateLock) {
@@ -116,6 +152,8 @@ class LiveTranscriber(
             updateSeq = 0
         }
         CaptureTelemetry.liveTranscriptLine = ""
+        _liveText.value = ""
+        _spectrogramFrames.value = emptyList()
         synchronized(ringLock) { ringStart = 0; ringCount = 0; totalSamples = 0 }
     }
 
@@ -137,6 +175,12 @@ class LiveTranscriber(
 
     private fun snapshot(seconds: Int): FloatArray = synchronized(ringLock) {
         val n = minOf(ringCount, seconds * SAMPLE_RATE)
+        FloatArray(n) { i -> ring[(ringStart + ringCount - n + i) % ring.size] / 32768f }
+    }
+
+    /** The last [count] samples from the ring, oldest first. */
+    private fun snapshotSamples(count: Int): FloatArray = synchronized(ringLock) {
+        val n = minOf(ringCount, count)
         FloatArray(n) { i -> ring[(ringStart + ringCount - n + i) % ring.size] / 32768f }
     }
 
@@ -168,6 +212,7 @@ class LiveTranscriber(
             }
             accumulatedText = merged
             CaptureTelemetry.liveTranscriptLine = merged
+            _liveText.value = merged
             updateSeq += 1
             seq = updateSeq
             segments = accumulatedSegments.toList()
@@ -211,6 +256,9 @@ class LiveTranscriber(
         const val SAMPLE_RATE = 16000
         const val TICK_MS = 30_000L
         const val WINDOW_SEC = 35
+        /** Spectrogram cadence while foregrounded: 5 Hz × 150 frames ≈ 30 s of waterfall history. */
+        const val SPECTRO_POLL_MS = 200L
+        const val SPECTRO_HISTORY = 150
         /** Broadcast when the whisper model download lands; starts the tap. */
         const val MODEL_READY_ACTION = "dev.exe.bucketcapture.MODEL_READY"
         private const val RING_SEC = 45

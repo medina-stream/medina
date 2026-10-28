@@ -36,6 +36,7 @@ class CaptureService : Service() {
         live = LiveTranscriber(this, app.spool, scope)
         activities = ActivityMonitor(this)
         CaptureTelemetry.audio = audio
+        CaptureTelemetry.liveTranscriber = live
         audio.onSegmentStart = { info -> live.onSegment(info.id, info.startedAtMs) }
         ContextCompat.registerReceiver(this, modelReady, IntentFilter(LiveTranscriber.MODEL_READY_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED)
     }
@@ -87,7 +88,7 @@ class CaptureService : Service() {
             .addAction(0, "Sync", service(ACTION_SYNC, 1)).addAction(0, "Stop", service(ACTION_STOP, 2)).build()
     }
     private fun ensureChannel() { getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "Active capture", NotificationManager.IMPORTANCE_LOW)) }
-    override fun onDestroy() { CaptureTelemetry.audio = null; live.stop(); location.stop(); activities.stop(); runCatching { unregisterReceiver(modelReady) }; scope.cancel(); super.onDestroy() }
+    override fun onDestroy() { CaptureTelemetry.audio = null; CaptureTelemetry.liveTranscriber = null; live.stop(); location.stop(); activities.stop(); runCatching { unregisterReceiver(modelReady) }; scope.cancel(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
     companion object { const val ACTION_START = "capture.start"; const val ACTION_STOP = "capture.stop"; const val ACTION_SYNC = "capture.sync"; const val ACTION_REPOLICY = "capture.repolicy"; const val CHANNEL = "capture"; const val NOTIFICATION_ID = 1001 }
 }

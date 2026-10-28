@@ -32,6 +32,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -41,6 +42,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import dev.exe.bucketcapture.capture.CaptureService
+import dev.exe.bucketcapture.transcribe.LiveTranscriber
+import dev.exe.bucketcapture.transcribe.Spectrogram
 import dev.exe.bucketcapture.data.PolicyFetchResult
 import dev.exe.bucketcapture.data.PolicyState
 import dev.exe.bucketcapture.data.UploadItem
@@ -492,21 +495,27 @@ private fun SyncStateSheet(vm: MainViewModel, onDismiss: () -> Unit) {
 private const val WAVEFORM_BARS = 28
 private const val WAVEFORM_POLL_MS = 200L
 
+private val EMPTY_LIVE_TEXT: StateFlow<String> = MutableStateFlow("")
+private val EMPTY_SPECTRO_FRAMES: StateFlow<List<FloatArray>> = MutableStateFlow(emptyList())
+
 /**
- * Live "it's capturing right now" feedback. If the on-device live
- * transcriber is actually producing text, the latest line wins; otherwise
- * a real level meter driven by the recorder's peak amplitude. Renders
- * nothing when the service isn't recording — never placeholder data.
+ * Live "it's capturing right now" feedback: a real level meter driven by
+ * the recorder's peak amplitude, a scrolling mel-spectrogram waterfall
+ * under it, and — once the on-device live transcriber produces text —
+ * the current segment's live transcript beneath both. Renders nothing
+ * when the service isn't recording and no transcript exists — never
+ * placeholder data.
  */
 @Composable
 private fun LiveCaptureBlock() {
     var capturing by remember { mutableStateOf(false) }
     var levels by remember { mutableStateOf(listOf<Float>()) }
-    var liveLine by remember { mutableStateOf("") }
+    var live by remember { mutableStateOf<LiveTranscriber?>(null) }
     LaunchedEffect(Unit) {
         var lastActiveMs = 0L
         while (true) {
             val audio = CaptureTelemetry.audio
+            live = CaptureTelemetry.liveTranscriber
             val now = System.currentTimeMillis()
             if (audio?.currentSegment != null) {
                 lastActiveMs = now
@@ -514,26 +523,14 @@ private fun LiveCaptureBlock() {
             }
             capturing = now - lastActiveMs < 2_000
             if (!capturing && levels.isNotEmpty()) levels = emptyList()
-            liveLine = CaptureTelemetry.liveTranscriptLine
             delay(WAVEFORM_POLL_MS)
         }
     }
-    if (!capturing && liveLine.isBlank()) return
+    val liveText by (live?.liveText ?: EMPTY_LIVE_TEXT).collectAsStateWithLifecycle()
+    val spectroFrames by (live?.spectrogramFrames ?: EMPTY_SPECTRO_FRAMES).collectAsStateWithLifecycle()
+    if (!capturing && liveText.isBlank()) return
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
-        if (liveLine.isNotBlank()) {
-            Text(
-                "Hearing now",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                liveLine,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        } else {
+        if (capturing) {
             Text(
                 "Capturing now",
                 style = MaterialTheme.typography.labelSmall,
@@ -541,8 +538,69 @@ private fun LiveCaptureBlock() {
             )
             Spacer(Modifier.height(4.dp))
             WaveformStrip(levels)
+            Spacer(Modifier.height(6.dp))
+            SpectrogramStrip(spectroFrames)
+        }
+        if (liveText.isNotBlank()) {
+            if (capturing) Spacer(Modifier.height(12.dp))
+            Text(
+                "Hearing now",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                liveTail(liveText),
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+/**
+ * Keep only the newest ~[maxChars] characters of the live transcript —
+ * the tail is what was just said; the full text lives in the journal.
+ * Trims to a word boundary and marks the elision with a leading "…".
+ */
+private fun liveTail(text: String, maxChars: Int = 240): String {
+    if (text.length <= maxChars) return text
+    val tail = text.takeLast(maxChars)
+    val cut = tail.indexOf(' ')
+    return "…" + if (cut in 1 until 40) tail.substring(cut + 1) else tail
+}
+
+/**
+ * Scrolling mel-spectrogram waterfall: newest frame on the right, lowest
+ * frequency at the bottom. Columns are fixed at the transcriber's history
+ * capacity so older frames slide left as new ones arrive.
+ */
+@Composable
+private fun SpectrogramStrip(frames: List<FloatArray>) {
+    val hot = MaterialTheme.colorScheme.primary
+    val cold = MaterialTheme.colorScheme.surfaceVariant
+    Canvas(Modifier.fillMaxWidth().height(56.dp)) {
+        val cols = LiveTranscriber.SPECTRO_HISTORY
+        val rows = Spectrogram.BIN_COUNT
+        val cellW = size.width / cols
+        val cellH = size.height / rows
+        val visible = frames.takeLast(cols)
+        val offset = cols - visible.size
+        for (c in visible.indices) {
+            val frame = visible[c]
+            val x = (offset + c) * cellW
+            for (b in 0 until rows) {
+                val v = frame.getOrNull(b) ?: 0f
+                if (v <= 0.02f) continue
+                drawRect(
+                    color = lerp(cold, hot, v),
+                    topLeft = Offset(x, size.height - (b + 1) * cellH),
+                    size = Size(cellW + 1f, cellH + 1f),
+                )
+            }
+        }
     }
 }
 

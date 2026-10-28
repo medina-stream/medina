@@ -1,6 +1,7 @@
 package dev.exe.bucketcapture
 
 import dev.exe.bucketcapture.capture.AudioCapture
+import dev.exe.bucketcapture.transcribe.LiveTranscriber
 
 /**
  * Process-local live telemetry published by [dev.exe.bucketcapture.capture.CaptureService]
@@ -10,6 +11,12 @@ import dev.exe.bucketcapture.capture.AudioCapture
 object CaptureTelemetry {
     /** The live [AudioCapture] while the service runs; null when it isn't. */
     @Volatile var audio: AudioCapture? = null
+
+    /**
+     * The live [LiveTranscriber] while the service runs; null when it
+     * isn't. The UI collects its liveText / spectrogramFrames flows.
+     */
+    @Volatile var liveTranscriber: LiveTranscriber? = null
 
     /**
      * Latest live-transcript text produced on-device. Empty when the live
