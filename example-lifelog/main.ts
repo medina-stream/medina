@@ -856,10 +856,22 @@ const Ingest = Layer.effectDiscard(
                 Number.isFinite(bucketLimit) ? bucketLimit : 25,
                 (objects) =>
                   objects
-                    // The archive sweep writes back to this same bucket under
-                    // `capture/` (and receipts under `archive/`); never
-                    // re-discover our own archive as new recordings.
-                    .filter((object) => !object.key.startsWith("capture/") && !object.key.startsWith("archive/") && !object.key.startsWith("media/") && !object.key.startsWith("normalize/"))
+                    // Ingest only this bucket's real drop zones: the GPS
+                    // app's inbox, and files dropped at the bucket root
+                    // (the historical lifelog drops). Everything else in
+                    // the bucket is the pipeline's own state — the archive
+                    // sweep writes under `capture/` and `archive/`, and
+                    // since the artifact store moved into this bucket
+                    // (ARTIFACT_STORE=bucket) its whole namespace lives
+                    // here too: runs/, ingest/, journal/, …. An exclusion
+                    // list cannot keep up with that; left as one, this
+                    // source ate its own run reports and receipts as
+                    // captures. places.json is the store's one root file,
+                    // not a drop.
+                    .filter((object) =>
+                      object.key.startsWith("gps/inbox/") ||
+                      (!object.key.includes("/") && object.key !== "places.json")
+                    )
                     .map((object) => ({
                       id: object.key,
                       name: object.key.split("/").pop() || object.key,
