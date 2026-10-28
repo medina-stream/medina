@@ -5,6 +5,8 @@ import android.os.Build
 import dev.exe.bucketcapture.data.PolicyAudio
 import dev.exe.bucketcapture.data.SpoolRepository
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.time.Instant
 
@@ -13,6 +15,10 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
     private var current: Pending? = null
     private var rollover: Job? = null
     private var config: PolicyAudio = PolicyAudio()
+    /** Serializes seal/start transitions: the boundary rollover runs on the
+     * service scope, while an early roll (see [rollNow]) can arrive from
+     * any thread via the foreground sync kick. */
+    private val transitionMutex = Mutex()
     private data class Pending(val id: String, val key: String, val partial: File, val final: File, val startedAtMs: Long)
 
     /** The segment currently recording, if any. */
@@ -38,6 +44,18 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
             val r = nowMs % segmentMs
             return if (r == 0L) segmentMs else segmentMs - r
         }
+
+        /**
+         * Youngest a segment may be for an early roll to be worth sealing
+         * it. Below this the segment will roll at the boundary soon anyway,
+         * and MediaRecorder dislikes being stopped in its first moments.
+         */
+        const val MIN_EARLY_ROLL_AGE_MS = 30_000L
+
+        /** Pure for testing: has a segment started at [startedAtMs] been
+         * recording long enough at [nowMs] for an early roll? */
+        fun earlyRollDue(startedAtMs: Long, nowMs: Long): Boolean =
+            nowMs - startedAtMs >= MIN_EARLY_ROLL_AGE_MS
     }
 
     fun start(audio: PolicyAudio = config) { if (recorder != null) return; config = audio; startSegment() }
@@ -58,10 +76,50 @@ class AudioCapture(private val spool: SpoolRepository, private val scope: Corout
             current = Pending(id, key, partial, final, nowMs); recorder = r
             onSegmentStart?.invoke(SegmentInfo(id, nowMs))
             val segmentMs = config.segmentSeconds * 1000L
-            rollover = scope.launch { delay(millisToNextBoundary(System.currentTimeMillis(), segmentMs)); seal(); startSegment() }
+            rollover = scope.launch { delay(millisToNextBoundary(System.currentTimeMillis(), segmentMs)); rollLocked() }
         } catch (e: Exception) { recorder?.release(); recorder = null; onError("Audio start failed: ${e.message}") }
     }
-    suspend fun stop() { rollover?.cancel(); rollover = null; seal() }
+    suspend fun stop() {
+        transitionMutex.withLock {
+            rollover?.cancel(); rollover = null; seal()
+        }
+    }
+
+    /** Boundary rollover: seal the finished segment, start the next. */
+    private suspend fun rollLocked() {
+        transitionMutex.withLock {
+            rollover = null
+            seal()
+            startSegment()
+        }
+    }
+
+    /**
+     * Seal the in-progress segment right now and immediately start the
+     * next one, so the freshest recording becomes uploadable without
+     * waiting for the clock-aligned rollover (the foreground sync kick
+     * uses this). The follow-on segment still ends at the next boundary —
+     * [startSegment] computes its delay from now — so clock alignment is
+     * preserved and the boundary rollover that follows is undisturbed.
+     * The early-sealed segment keeps its content-hash capture id, like
+     * any other segment; the server ingests arbitrary lengths.
+     *
+     * No-op when not recording, or when the segment is younger than
+     * [MIN_EARLY_ROLL_AGE_MS]. Safe to call from any thread.
+     */
+    suspend fun rollNow() {
+        val item = current ?: return
+        if (!earlyRollDue(item.startedAtMs, System.currentTimeMillis())) return
+        transitionMutex.withLock {
+            val cur = current ?: return@withLock
+            if (!earlyRollDue(cur.startedAtMs, System.currentTimeMillis())) return@withLock
+            rollover?.cancel(); rollover = null
+            seal()
+            startSegment()
+        }
+    }
+
+    /** Callers must hold [transitionMutex]. */
     private suspend fun seal() {
         val r = recorder ?: return; val item = current ?: return
         recorder = null; current = null

@@ -28,4 +28,24 @@ class AudioCaptureBoundaryTest {
         val now = Instant.parse("2026-09-18T03:32:05Z").toEpochMilli()
         assertEquals(175_000L, AudioCapture.millisToNextBoundary(now, 300_000L))
     }
+
+    @Test fun `early roll not due for a just-started segment`() {
+        val start = Instant.parse("2026-09-18T03:30:00Z").toEpochMilli()
+        assertFalse(AudioCapture.earlyRollDue(start, start + 5_000L))
+        assertFalse(AudioCapture.earlyRollDue(start, start + AudioCapture.MIN_EARLY_ROLL_AGE_MS - 1))
+    }
+
+    @Test fun `early roll due once the segment is old enough`() {
+        val start = Instant.parse("2026-09-18T03:30:00Z").toEpochMilli()
+        assertTrue(AudioCapture.earlyRollDue(start, start + AudioCapture.MIN_EARLY_ROLL_AGE_MS))
+        // The foreground-after-a-while case: most of a 15-minute segment in.
+        assertTrue(AudioCapture.earlyRollDue(start, start + 12 * 60_000L))
+    }
+
+    @Test fun `segment after an early roll still ends at the next boundary`() {
+        // Early roll at 03:37:00: the follow-on segment's rollover delay is
+        // computed from the roll moment, so it still seals at 03:45:00.
+        val rollAt = Instant.parse("2026-09-18T03:37:00Z").toEpochMilli()
+        assertEquals(480_000L, AudioCapture.millisToNextBoundary(rollAt, seg))
+    }
 }
