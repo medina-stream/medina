@@ -31,6 +31,25 @@ Unregistering a key does not clear latest pointers that name it: a
 pointer to a forgotten key reads back as a key whose bytes are gone
 (the store's read returns none), never as phantom content.
 
+## Public device routes
+
+Two routes sit ahead of the token gate and read the `sco-lifelog`
+bucket (the `BUCKET` R2 binding), so a phone on any network can reach
+them at this worker's public `workers.dev` URL — no tailnet DNS, no
+exe.dev login gate:
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /bucket-capture/<stamp>.apk` | the published recorder APK object `bucket-capture/<stamp>.apk` (public; APKs carry no credentials) |
+| `GET /api/capture-policy/<token>` | the capture policy document `capture-policy/policy.json`, when `<token>` is a known, unrevoked capability token |
+
+Token verification reads `capture-policy/tokens.json`, the registry
+mirror (SHA-256 hashes only) the Medina server rewrites on every
+registry change. Unknown or revoked tokens get a 404, exactly as the
+Medina server's own policy route answers. Devices point their policy
+URL at this host: `https://medina-index.<subdomain>.workers.dev/api/capture-policy/<token>`
+— the same per-device token as before, only the host changes.
+
 ## Deploy
 
 ```sh

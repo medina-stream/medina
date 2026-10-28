@@ -13,7 +13,14 @@
  * registers them (the migration tool does, for the whole tree).
  *
  * Auth: every endpoint except /health requires
- * `Authorization: Bearer <INDEX_API_TOKEN>` (a Worker secret).
+ * `Authorization: Bearer <INDEX_API_TOKEN>` (a Worker secret) — except
+ * the two public device routes, which authenticate differently:
+ * `/bucket-capture/<stamp>.apk` serves public artifacts (APKs carry no
+ * credentials), and `/api/capture-policy/<token>` is gated by the
+ * per-device capability token in its path, verified against the token
+ * registry the Medina server mirrors into the bucket. Both exist so a
+ * phone on any network can fetch its policy and its updates without
+ * reaching the Medina host (no tailnet DNS, no exe.dev login gate).
  */
 
 // Minimal structural types for the Workers runtime surface this file
@@ -39,15 +46,94 @@ interface DurableObjectNamespace {
   get(id: unknown): DurableObjectStub
 }
 
+/** The slice of the R2 bucket binding this worker uses: reads only. */
+interface R2ObjectLike {
+  readonly body: ReadableStream
+  readonly size: number
+  readonly httpEtag: string
+}
+
+interface R2BucketLike {
+  get(key: string): Promise<R2ObjectLike | null>
+}
+
 interface Env {
   readonly INDEX: DurableObjectNamespace
   readonly INDEX_API_TOKEN: string
+  readonly BUCKET: R2BucketLike
 }
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 
 const fail = (status: number, message: string): Response => json({ error: message }, status)
+
+/** SHA-256 hex of a string — the same digest the Medina server stores
+ * per capability token in the registry. */
+const sha256Hex = async (value: string): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")
+}
+
+const APK_CONTENT_TYPE = "application/vnd.android.package-archive"
+const POLICY_OBJECT_KEY = "capture-policy/policy.json"
+const TOKENS_OBJECT_KEY = "capture-policy/tokens.json"
+
+/**
+ * Public: a published recorder APK (`/bucket-capture/<stamp>.apk`).
+ * APKs carry no credentials — the policy URL is entered per-device —
+ * so they are served to anyone, by exact stamp only.
+ */
+const serveApk = async (env: Env, name: string): Promise<Response> => {
+  const match = /^(0\d{12})\.apk$/.exec(name)
+  if (match === null) return fail(404, "not found")
+  const object = await env.BUCKET.get(`bucket-capture/${match[1]}.apk`)
+  if (object === null) return fail(404, "not found")
+  return new Response(object.body, {
+    headers: {
+      "content-type": APK_CONTENT_TYPE,
+      "content-length": String(object.size),
+      "cache-control": "public, max-age=31536000, immutable",
+      etag: object.httpEtag
+    }
+  })
+}
+
+interface TokenRegistryEntry {
+  readonly hash?: unknown
+  readonly revokedAt?: unknown
+}
+
+/**
+ * Public: the capture policy, gated by its capability token
+ * (`/api/capture-policy/<token>` — the same shape as the Medina
+ * server's route). The document and the token registry (hashes only)
+ * live in the bucket, written by the Medina server, so a phone on any
+ * network can fetch its policy without reaching the server host —
+ * no tailnet DNS, no exe.dev login gate. Unknown or revoked tokens
+ * get the same 404 the server gives; the app treats it as terminal.
+ */
+const servePolicy = async (env: Env, token: string): Promise<Response> => {
+  if (!token.startsWith("cpol_") || token.includes("/")) return fail(404, "not found")
+  const registryObject = await env.BUCKET.get(TOKENS_OBJECT_KEY)
+  if (registryObject === null) return fail(404, "not found")
+  let tokens: Array<TokenRegistryEntry>
+  try {
+    const parsed = (await new Response(registryObject.body).json()) as { tokens?: unknown }
+    if (!Array.isArray(parsed.tokens)) return fail(404, "not found")
+    tokens = parsed.tokens as Array<TokenRegistryEntry>
+  } catch {
+    return fail(404, "not found")
+  }
+  const hash = await sha256Hex(token)
+  const known = tokens.some((entry) => entry.revokedAt === null && entry.hash === hash)
+  if (!known) return fail(404, "not found")
+  const policyObject = await env.BUCKET.get(POLICY_OBJECT_KEY)
+  if (policyObject === null) return fail(500, "policy unavailable")
+  return new Response(policyObject.body, {
+    headers: { "content-type": "application/json", "cache-control": "no-store" }
+  })
+}
 
 /** Artifact keys only: relative, no traversal — the same rule as
  * lib/ArtifactKey.ts on the server side. */
@@ -148,6 +234,15 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname === "/health") return json({ ok: true })
+    // Public device routes, ahead of the index token gate: APK
+    // downloads (public artifacts) and the capability-gated policy
+    // fetch. Both read the artifact bucket; neither touches the index.
+    if (request.method === "GET" && url.pathname.startsWith("/bucket-capture/")) {
+      return serveApk(env, url.pathname.slice("/bucket-capture/".length))
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/api/capture-policy/")) {
+      return servePolicy(env, decodeURIComponent(url.pathname.slice("/api/capture-policy/".length)))
+    }
     const authorization = request.headers.get("authorization") ?? ""
     if (env.INDEX_API_TOKEN === "" || authorization !== `Bearer ${env.INDEX_API_TOKEN}`) {
       return fail(401, "unauthorized")

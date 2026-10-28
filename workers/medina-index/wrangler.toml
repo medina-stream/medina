@@ -9,6 +9,14 @@ compatibility_date = "2025-06-01"
 [durable_objects]
 bindings = [{ name = "INDEX", class_name = "MedinaIndex" }]
 
+# The artifact bucket, read-only in practice: the public device routes
+# serve the capture policy document, verify tokens against the mirrored
+# registry, and stream published recorder APKs. All writes are the
+# Medina server's, over its S3 edge endpoint.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "sco-lifelog"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["MedinaIndex"]
