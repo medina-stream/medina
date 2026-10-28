@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.core.content.ContextCompat
 import androidx.work.*
 import dev.exe.bucketcapture.CaptureApplication
+import dev.exe.bucketcapture.CaptureTelemetry
 import dev.exe.bucketcapture.capture.CaptureService
 import dev.exe.bucketcapture.data.PolicyFetchResult
 import dev.exe.bucketcapture.data.UploadItem
@@ -13,7 +14,8 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /** Foreground sync on a metered connection: every pending location batch and
- * transcript (tiny), plus only the newest audio segment. Pure for testing. */
+ * transcript (tiny), plus only the newest audio segment. The input is the
+ * DAO's newest-first order and the selection preserves it. Pure for testing. */
 fun selectForegroundItems(pending: List<UploadItem>): List<UploadItem> {
     val small = pending.filter { it.kind == "location" || it.kind == "transcript" }
     val latestAudio = pending.filter { it.kind == "audio" }.maxByOrNull { it.createdAt }
@@ -28,7 +30,9 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val latestOnly = inputData.getBoolean(SyncScheduler.KEY_LATEST_ONLY, false)
         val pending = app.db.manifest().pendingAll()
         val items = if (latestOnly) selectForegroundItems(pending) else pending
+        try {
         for (item in items) {
+            CaptureTelemetry.uploadingItemId = item.id
             val file = File(item.localPath)
             if (!file.isFile || file.length() != item.byteCount) {
                 app.db.manifest().failed(item.id, "Local payload missing or size changed")
@@ -49,6 +53,9 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             }
         }
         Result.success()
+        } finally {
+            CaptureTelemetry.uploadingItemId = null
+        }
     }
 }
 

@@ -44,9 +44,13 @@ class Converters {
 @Dao
 interface ManifestDao {
     @Insert(onConflict = OnConflictStrategy.ABORT) suspend fun insert(item: UploadItem)
-    @Query("SELECT * FROM upload_items WHERE state = 'PENDING' ORDER BY createdAt LIMIT :limit")
+    // Newest-first is deliberate (Scott, Oct 27): an upload pass works
+    // the freshest recordings first, matching the home screen's queue,
+    // which is also newest-first. This reverses the original
+    // oldest-first drain order.
+    @Query("SELECT * FROM upload_items WHERE state = 'PENDING' ORDER BY createdAt DESC LIMIT :limit")
     suspend fun pending(limit: Int = 20): List<UploadItem>
-    @Query("SELECT * FROM upload_items WHERE state = 'PENDING' ORDER BY createdAt")
+    @Query("SELECT * FROM upload_items WHERE state = 'PENDING' ORDER BY createdAt DESC")
     suspend fun pendingAll(): List<UploadItem>
     @Query("SELECT * FROM upload_items WHERE id = :id LIMIT 1") suspend fun getById(id: String): UploadItem?
     @Query("SELECT * FROM upload_items WHERE kind = 'audio' ORDER BY createdAt DESC LIMIT 1")

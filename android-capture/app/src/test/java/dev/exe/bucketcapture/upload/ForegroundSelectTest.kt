@@ -13,16 +13,27 @@ private fun item(id: String, kind: String, createdAt: Long) = UploadItem(
 
 class ForegroundSelectTest {
     @Test fun `metered pass takes locations transcripts and only the newest audio`() {
+        // Input is the DAO's newest-first order; the selection
+        // preserves it and appends the single newest audio segment.
         val pending = listOf(
-            item("a1", "audio", 1000),
-            item("a2", "audio", 2000),
             item("a3", "audio", 3000),
-            item("l1", "location", 1500),
-            item("l2", "location", 2500),
             item("t1", "transcript", 2800),
+            item("l2", "location", 2500),
+            item("a2", "audio", 2000),
+            item("l1", "location", 1500),
+            item("a1", "audio", 1000),
         )
         val selected = selectForegroundItems(pending)
-        assertEquals(listOf("l1", "l2", "t1", "a3"), selected.map { it.id })
+        assertEquals(listOf("t1", "l2", "l1", "a3"), selected.map { it.id })
+    }
+
+    @Test fun `newest audio is picked by timestamp not list position`() {
+        val pending = listOf(
+            item("a1", "audio", 1000),
+            item("a3", "audio", 3000),
+            item("a2", "audio", 2000),
+        )
+        assertEquals(listOf("a3"), selectForegroundItems(pending).map { it.id })
     }
 
     @Test fun `metered pass with no audio still sends locations`() {

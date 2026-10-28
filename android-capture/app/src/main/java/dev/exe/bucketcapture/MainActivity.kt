@@ -18,11 +18,14 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -41,6 +44,7 @@ import androidx.core.content.ContextCompat.startForegroundService
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import dev.exe.bucketcapture.capture.AudioCapture
 import dev.exe.bucketcapture.capture.CaptureService
 import dev.exe.bucketcapture.transcribe.LiveTranscriber
 import dev.exe.bucketcapture.transcribe.Spectrogram
@@ -271,9 +275,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         val desired by vm.desired.collectAsStateWithLifecycle()
-        val health by vm.health.collectAsStateWithLifecycle()
         val host = remember(vm.policyUrlField) { hostOf(vm.policyUrlField) }
-        var showSyncSheet by remember { mutableStateOf(false) }
 
         val (dot, headline, subline) = when (val s = vm.policyState) {
             PolicyState.NotConfigured ->
@@ -315,11 +317,15 @@ class MainActivity : ComponentActivity() {
                 Modifier.padding(padding).fillMaxSize().padding(horizontal = 24.dp),
                 horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
             ) {
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(24.dp))
                 StatusDot(dot)
                 Spacer(Modifier.height(20.dp))
                 headline?.let { Text(it, style = MaterialTheme.typography.headlineSmall) }
                 if (headline != null) Spacer(Modifier.height(8.dp))
+                subline?.let {
+                    Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                }
                 if (configured) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Switch(
@@ -352,39 +358,19 @@ class MainActivity : ComponentActivity() {
                 }
                 UpdateBanner()
                 LiveCaptureBlock()
-                val statusText = when (val s = vm.policyState) {
-                    is PolicyState.Active ->
-                        if (s.staleError != null) "Running on saved settings" else "Connected"
-                    else -> subline
+                if (configured) {
+                    Spacer(Modifier.height(16.dp))
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(
+                            "Uploads",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    UploadQueue(vm, Modifier.weight(1f))
+                } else {
+                    Spacer(Modifier.weight(1f))
                 }
-                if (statusText != null) {
-                    HomeTapRow(
-                        label = "Status",
-                        value = statusText,
-                        valueColor = MaterialTheme.colorScheme.onSurface,
-                        onClick = { showSyncSheet = true },
-                    )
-                }
-                if (vm.policyState is PolicyState.Active) {
-                    val inError = health.errorCount > 0
-                    HomeTapRow(
-                        label = "Issues",
-                        value = if (inError) "${health.errorCount} upload error${if (health.errorCount == 1) "" else "s"}" else "Nominal",
-                        valueColor = if (inError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                        onClick = { showSyncSheet = true },
-                    )
-                    val lastSyncedAt by vm.lastSyncedAt.collectAsStateWithLifecycle()
-                    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
-                    LaunchedEffect(Unit) { while (true) { delay(30_000); nowMs = System.currentTimeMillis() } }
-                    HomeTapRow(
-                        label = "Last synced",
-                        value = lastSyncedText(nowMs, lastSyncedAt),
-                        valueColor = MaterialTheme.colorScheme.onSurface,
-                        onClick = { showSyncSheet = true },
-                    )
-                }
-                if (showSyncSheet) SyncStateSheet(vm, onDismiss = { showSyncSheet = false })
-                Spacer(Modifier.weight(1f))
             }
         }
     }
@@ -448,6 +434,115 @@ private fun formatBytes(bytes: Long): String = when {
     bytes >= 1_000_000 -> "%.1fMB".format(bytes / 1_000_000.0)
     bytes >= 1_000 -> "%.0fKB".format(bytes / 1_000.0)
     else -> "${bytes}B"
+}
+
+/** "12:34" under an hour, "1:02:34" beyond it. */
+private fun formatElapsed(ms: Long): String {
+    val s = (ms / 1000).coerceAtLeast(0)
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
+    else "%d:%02d".format(s / 60, s % 60)
+}
+
+/** "Today 14:00" — the day-word style recordingRange() uses, for a bare start instant. */
+private fun segmentStartText(startedAtMs: Long): String {
+    val zone = ZoneId.systemDefault()
+    val start = ZonedDateTime.ofInstant(Instant.ofEpochMilli(startedAtMs), zone)
+    val day = when (start.toLocalDate()) {
+        LocalDate.now(zone) -> "Today"
+        LocalDate.now(zone).minusDays(1) -> "Yesterday"
+        else -> start.format(DateTimeFormatter.ofPattern("MMM d"))
+    }
+    return "$day ${start.format(DateTimeFormatter.ofPattern("HH:mm"))}"
+}
+
+/**
+ * The home screen's bottom half: the upload queue itself, newest
+ * first — replacing the old Status / Issues / Last synced summary
+ * rows. The top row is the segment being recorded right now,
+ * synthesized from recorder telemetry (it becomes a manifest row when
+ * it seals); below it, manifest recordings in the DAO's newest-first
+ * order, down through the retained uploaded history. Rows are pure
+ * display: retries are the scheduler's business, so nothing here is
+ * tappable.
+ */
+@Composable
+private fun UploadQueue(vm: MainViewModel, modifier: Modifier = Modifier) {
+    val items by vm.items.collectAsStateWithLifecycle()
+    val syncingIds by vm.syncing.collectAsStateWithLifecycle()
+    var segment by remember { mutableStateOf<AudioCapture.SegmentInfo?>(null) }
+    var uploadingId by remember { mutableStateOf<String?>(null) }
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            segment = CaptureTelemetry.audio?.currentSegment
+            uploadingId = CaptureTelemetry.uploadingItemId
+            nowMs = System.currentTimeMillis()
+            delay(500)
+        }
+    }
+    val recordings = items.filter { it.kind == "audio" }
+    LazyColumn(modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 16.dp)) {
+        segment?.let { seg ->
+            item(key = "recording") { RecordingRow(seg, nowMs) }
+        }
+        items(recordings, key = { it.id }) { item ->
+            UploadQueueRow(item, nowMs, uploading = item.id == uploadingId || item.id in syncingIds)
+        }
+    }
+}
+
+/** The in-progress segment, presented as the queue's future top upload. */
+@Composable
+private fun RecordingRow(segment: AudioCapture.SegmentInfo, nowMs: Long) {
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("Recording · ${segmentStartText(segment.startedAtMs)}") },
+            supportingContent = {
+                Text("${formatElapsed(nowMs - segment.startedAtMs)} so far · uploads when it seals")
+            },
+            trailingContent = {
+                Icon(
+                    Icons.Filled.FiberManualRecord,
+                    contentDescription = "Recording",
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+        )
+    }
+}
+
+@Composable
+private fun UploadQueueRow(item: UploadItem, nowMs: Long, uploading: Boolean) {
+    val errored = item.state == UploadState.PENDING && item.lastError != null
+    ListItem(
+        headlineContent = { Text(recordingRange(item)) },
+        supportingContent = {
+            when {
+                errored -> Text(
+                    item.lastError!!,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                item.state == UploadState.UPLOADED ->
+                    Text("${formatBytes(item.byteCount)} · uploaded ${lastSyncedText(nowMs, item.uploadedAt)}")
+                uploading -> Text("${formatBytes(item.byteCount)} · uploading…")
+                else -> Text("${formatBytes(item.byteCount)} · queued")
+            }
+        },
+        trailingContent = {
+            when {
+                uploading -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                item.state == UploadState.UPLOADED -> Icon(
+                    Icons.Filled.Check,
+                    contentDescription = "Uploaded",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                else -> {}
+            }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

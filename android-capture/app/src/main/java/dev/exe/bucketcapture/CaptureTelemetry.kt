@@ -24,4 +24,12 @@ object CaptureTelemetry {
      * treat empty as "no transcript", never as a placeholder.
      */
     @Volatile var liveTranscriptLine: String = ""
+
+    /**
+     * The manifest id an upload pass is putting right now, or null
+     * between items/passes. Written by UploadWorker, read by the home
+     * screen's queue so the in-flight row can show a spinner. A marker,
+     * not progress: no byte counts.
+     */
+    @Volatile var uploadingItemId: String? = null
 }
