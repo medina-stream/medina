@@ -358,6 +358,94 @@ the obvious optimization when the bucket grows.
   deserve the same audit). Re-run the converge pass, then flip
   again with the same procedure.
 
+### Re-flip (Oct 28, evening) — seam fixed, converged, flip held
+
+- **The seam fix** (commit `fca8222`, "capture: land blobs and
+  receipts through the artifact store seam"). `Files` gains
+  `putBytes` / `putFile` / `size` over the store (with a no-store
+  fallback that reproduces the old local behavior), and the local
+  store's `putFile` streams instead of buffering whole blobs.
+  `ingestAudioFile` (Audio.ts) and `HttpIngest.ts` now land blobs
+  through the seam, so blob, provenance, and receipt live in the
+  same store; `archiveCapture` sizes files through the seam
+  (`Files.size`, store head) and its bucket uploads stream local
+  bytes or pull through the store when the blob is bucket-only
+  (`putArtifactToBucket`). The Media.ts audit found the same
+  disease in chunk landing, manifest-chunk upload, settle markers,
+  and transcript checks — all routed through the seam; receipt and
+  marker existence checks in LocalTranscripts / DeviceEvents /
+  TransloaditNormalize likewise. `CapturePolicy.ts`'s direct fs
+  use is its own server-local token registry, not a store path —
+  left alone deliberately. Regression tests ingest against an
+  in-memory non-local store and assert blob + provenance + receipt
+  land together with nothing on local disk. Suite: 348 pass / 1
+  fail (the same pre-existing failure as the 346/1 baseline);
+  typecheck clean. Deployed and verified healthy on the LOCAL
+  store first (capture passes clean, fresh segment ingested via
+  the fixed path, zero error lines).
+- **Converge** (explicit-key sweeps in the first run's pattern;
+  the repo tool's per-key Durable Object cost makes a full re-run
+  ~4 h): round 1 — 2,777 keys scanned, 1,606 uploaded
+  (201,165,702 bytes), 1,171 already OK, 0 failures; round 2 —
+  2,885 scanned, 111 uploaded, 2,773 OK, 1 transient failure
+  (retried clean in a 134-key touch-up: 0 uploaded, 0 failures).
+  Every sampled hash mismatch was the same benign class, verified
+  by direct comparison: a provenance/receipt written during the
+  first flipped window and rewritten by the post-rollback
+  re-ingest — identical facts, differing only in a timestamp, same
+  size. Nothing deleted anywhere.
+- **A second seam the copy exposed** (commit `fcfa631`):
+  `bucket-audio` lists the archive bucket and mapped everything
+  outside `capture/ archive/ media/ normalize/` to a recording.
+  Safe while the bucket held only drops; since the copy it holds
+  the whole artifact namespace, and the source began ingesting
+  its own run reports and receipts as captures. Its discovery is
+  now a positive filter over the bucket's real drop zones
+  (`gps/inbox/`, plus root-level files other than the store's
+  `places.json`). The junk captures created between the copy and
+  this fix are inert (non-media, no transcripts) and were left in
+  place — nothing was deleted.
+- **Flip**: `ARTIFACT_STORE=bucket` appended to `.env` at
+  2026-10-28T21:33:31Z (fresh backup
+  `/home/exedev/env-pre-m3-reflip.bak`), one controlled restart
+  (MainPID 976736); a second restart at ~21:47Z deployed `fcfa631`
+  (MainPID 977269) with the flip continuously in effect. Rollback
+  was not needed and the backup is retained.
+- **Verification (~60 minutes of flipped operation)**: capture
+  passes cycle against the bucket and write their reports into
+  it (394 pass reports by 22:13Z; recent passes all sources
+  empty/healthy, 0 failures). The split signature
+  (`FileSystem.stat … NotFound`) occurred **0 times** since the
+  flip. Fresh captures verified whole in the bucket — blob,
+  provenance, and receipt for the same capture id: the 16
+  GPS-inbox captures of the 21:12–21:14Z batch, audio segment
+  `20261028T214500Z` (ingested 22:00:12Z through the fixed
+  `ingestAudioFile` path), and a live `POST /in` (200 at
+  21:43:07Z) through the fixed HttpIngest path. Archive receipts
+  exist in the bucket for flipped-window captures (2,253 total).
+  `GET /` returns 200 (110 s cold under the DayIndex tax, 0.03 s
+  warm); `GET /status` 200. No mass re-submission to providers:
+  receipts migrated with the store, and the first flipped main
+  pass reproduced the local store's behavior exactly (including
+  its two pre-existing Transloadit chunk-validation failures,
+  captures `414fe3fa` / `4b380c0a`, unchanged).
+- **Known limitations after the re-flip**: (1) Device-events
+  ingest throttles under burst: every `location.fix` rewrites
+  the same per-device latest-location object, which R2 rate-
+  limits (`ServiceUnavailable: Reduce your concurrent request
+  rate`) when a backlog lands at once. 26 event files failed in
+  bursts at 21:51–21:55Z, retried on later passes, and the
+  backlog drained fully by ~22:03Z — no data loss (source
+  objects are immutable, receipts only on success), but the
+  latest-location write wants serializing or debouncing.
+  (2) `Media.ts` `blobPathFor` still only returns a path for
+  blobs readable on local disk (by design, so a remote-only blob
+  never gets a cached failed probe): while flipped, a brand-new
+  capture's local probing/transcoding waits — pre-existing
+  captures with cached probe records transcribe normally via
+  signed R2 URLs. Follow-up: probe via presigned URL or bounded
+  materialization.
+
 ## 5. Risks and open questions
 
 - **Workers CPU limits vs derivations.** Paid Workers allow 30 s CPU
