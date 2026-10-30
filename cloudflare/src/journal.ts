@@ -29,8 +29,10 @@
  * day-index snapshot artifact plus that day's transcript artifacts.
  * Nothing recomputes the DayIndex basis, so the >110 s read tax the
  * server pays on a cold mount does not exist on this side. Reads
- * decode a persisted read-model snapshot the minutely cron rebuilds
- * in the background whenever the inputs move (see the snapshot
+ * decode the expensive half of the read model (journal + day-index
+ * selection) from a persisted snapshot the minutely cron rebuilds
+ * in the background when those inputs move, and read the small
+ * artifacts (previews, run reports) fresh (see the snapshot
  * section below); an in-isolate memo with a 60 s TTL absorbs repeat
  * reads on top. (The server's own previews run a 10-minute
  * stale-while-revalidate, so a minute or two of lag is well inside
@@ -368,18 +370,35 @@ interface RawReadModel {
   readonly reportsJson: ReadonlyArray<readonly [string, unknown]>;
 }
 
-const gatherRawModel = (
+/** The cheap inputs: the server's previews snapshot and the three
+ * run reports — small artifacts, read fresh on every model load. */
+const gatherCheapRaw = (
   bucket: JournalBucket,
-): Effect.Effect<RawReadModel> =>
+): Effect.Effect<{
+  rowsJson: unknown;
+  reportsJson: ReadonlyArray<readonly [string, unknown]>;
+}> =>
   Effect.gen(function* () {
     const rowsJson = yield* getJson(bucket, PREVIEWS_KEY);
-    const journalsJson = yield* loadJournalsRaw(bucket);
-    const indexJson = yield* loadDayIndexJson(bucket);
     const reportsJson: Array<readonly [string, unknown]> = [];
     for (const [name, key] of REPORT_KEYS) {
       reportsJson.push([name, yield* getJson(bucket, key)]);
     }
-    return { rowsJson, journalsJson, indexJson, reportsJson };
+    return { rowsJson, reportsJson };
+  });
+
+/** The expensive inputs: the journal selection scan and the
+ * day-index selection. These are what the persisted snapshot holds. */
+const gatherExpensiveRaw = (
+  bucket: JournalBucket,
+): Effect.Effect<{
+  journalsJson: ReadonlyArray<unknown>;
+  indexJson: unknown;
+}> =>
+  Effect.gen(function* () {
+    const journalsJson = yield* loadJournalsRaw(bucket);
+    const indexJson = yield* loadDayIndexJson(bucket);
+    return { journalsJson, indexJson };
   });
 
 /** Decode gathered inputs into the read model — the same decodes,
@@ -410,22 +429,31 @@ const modelFromRaw = (
 
 // ---------------------------------------------------------------------------
 // The persisted read-model snapshot: the cron-built copy of the
-// gathered inputs, stored as one bucket artifact. Serving reads
-// decode from the snapshot (one GET + decode) instead of gathering
-// from the corpus per request — the gather's journal scan measured
-// 30–95 s, which is what put the SPA into its "could not load the
-// journal" state whenever a request landed on a cold isolate or an
-// expired isolate cache. The minutely Cron Trigger refreshes the
-// snapshot whenever a cheap inputs fingerprint (listings + HEADs,
-// no body reads) changes; requests never wait on the scan again.
+// *expensive* gathered inputs (the journal selection and the
+// day-index selection), stored as one bucket artifact. Serving
+// reads decode those from the snapshot (one GET + decode) instead
+// of gathering them from the corpus per request — the journal scan
+// measured 30–95 s, which is what put the SPA into its "could not
+// load the journal" state whenever a request landed on a cold
+// isolate or an expired isolate cache. The cheap inputs (previews
+// rows, run reports) are small and are read fresh on every model
+// load, so they neither wait on the scan nor trigger it: the
+// minutely Cron Trigger rebuilds the snapshot only when a
+// fingerprint of the journal + day-index *listings* moves. (The
+// first version fingerprinted the run reports too; they are
+// rewritten every pipeline pass, so the fingerprint moved every
+// minute and the scan re-ran near-constantly — same serving
+// latency, pointless background churn.)
 // ---------------------------------------------------------------------------
 
 const SNAPSHOT_KEY = "views/worker-read-model-v1.json";
 
-interface SnapshotEnvelope extends RawReadModel {
-  readonly version: 1;
+interface SnapshotEnvelope {
+  readonly version: 2;
   readonly builtAt: number;
   readonly fingerprint: string;
+  readonly journalsJson: ReadonlyArray<unknown>;
+  readonly indexJson: unknown;
 }
 
 const sha256Hex = (value: string): Effect.Effect<string> =>
@@ -440,11 +468,12 @@ const sha256Hex = (value: string): Effect.Effect<string> =>
   });
 
 /**
- * A fingerprint of everything the gather reads, computed from
- * listings and HEADs only: object keys, etags, and sizes for the
- * journal and day-index prefixes, and the etags of the previews
- * snapshot and the three run reports. Any artifact write that could
- * change the read model changes the fingerprint.
+ * A fingerprint of the expensive inputs, computed from listings
+ * only: object keys, etags, and sizes under the journal and
+ * day-index prefixes. A new journal generation or day-index
+ * snapshot changes the fingerprint; the per-pass run reports and
+ * the previews snapshot deliberately do not (they are read fresh
+ * at load time instead of being snapshotted).
  */
 const inputsFingerprint = (
   bucket: JournalBucket,
@@ -452,18 +481,7 @@ const inputsFingerprint = (
   Effect.gen(function* () {
     const journalObjects = yield* listAll(bucket, `${JOURNAL_PREFIX}/`);
     const indexObjects = yield* listAll(bucket, `${DAY_INDEX_PREFIX}/`);
-    const previewsHead = yield* Effect.promise(() =>
-      bucket.head(PREVIEWS_KEY),
-    );
-    const lines: Array<string> = [
-      `previews:${previewsHead?.etag ?? "absent"}:${previewsHead?.size ?? -1}`,
-    ];
-    for (const [name, key] of REPORT_KEYS) {
-      const head = yield* Effect.promise(() => bucket.head(key));
-      lines.push(
-        `report:${name}:${head?.etag ?? "absent"}:${head?.size ?? -1}`,
-      );
-    }
+    const lines: Array<string> = [];
     for (const object of journalObjects) {
       lines.push(`j:${object.key}:${object.etag}:${object.size}`);
     }
@@ -475,19 +493,20 @@ const inputsFingerprint = (
 
 const writeSnapshot = (
   bucket: JournalBucket,
-  raw: RawReadModel,
+  expensive: {
+    journalsJson: ReadonlyArray<unknown>;
+    indexJson: unknown;
+  },
   fingerprint: string,
   builtAt: number,
 ): Effect.Effect<number> =>
   Effect.promise(async () => {
     const envelope: SnapshotEnvelope = {
-      version: 1,
+      version: 2,
       builtAt,
       fingerprint,
-      rowsJson: raw.rowsJson,
-      journalsJson: raw.journalsJson,
-      indexJson: raw.indexJson,
-      reportsJson: raw.reportsJson,
+      journalsJson: expensive.journalsJson,
+      indexJson: expensive.indexJson,
     };
     const body = JSON.stringify(envelope);
     await bucket.put(SNAPSHOT_KEY, body, {
@@ -536,9 +555,14 @@ export const refreshReadModelSnapshot = (
       };
     }
     const startedAt = Date.now();
-    const raw = yield* gatherRawModel(bucket);
+    const expensive = yield* gatherExpensiveRaw(bucket);
     const builtAt = Date.now();
-    const bytes = yield* writeSnapshot(bucket, raw, fingerprint, builtAt);
+    const bytes = yield* writeSnapshot(
+      bucket,
+      expensive,
+      fingerprint,
+      builtAt,
+    );
     return {
       rebuilt: true,
       fingerprint,
@@ -548,10 +572,14 @@ export const refreshReadModelSnapshot = (
     };
   });
 
-/** The snapshot as a read model; null when absent or unusable. */
-const loadSnapshotModel = (
+/** The snapshot's expensive inputs; null when absent or unusable. */
+const loadSnapshotParts = (
   bucket: JournalBucket,
-): Effect.Effect<ReadModel | null> =>
+): Effect.Effect<{
+  journalsJson: ReadonlyArray<unknown>;
+  indexJson: unknown;
+  builtAt: number;
+} | null> =>
   Effect.gen(function* () {
     const text = yield* getText(bucket, SNAPSHOT_KEY);
     if (text === null) return null;
@@ -560,41 +588,43 @@ const loadSnapshotModel = (
     ).pipe(Effect.catch(() => Effect.succeed(null)));
     if (
       parsed === null ||
-      parsed.version !== 1 ||
+      parsed.version !== 2 ||
       typeof parsed.builtAt !== "number" ||
-      !Array.isArray(parsed.journalsJson) ||
-      !Array.isArray(parsed.reportsJson)
+      !Array.isArray(parsed.journalsJson)
     ) {
       return null;
     }
-    return yield* modelFromRaw(
-      {
-        rowsJson: parsed.rowsJson ?? null,
-        journalsJson: parsed.journalsJson,
-        indexJson: parsed.indexJson ?? null,
-        reportsJson: parsed.reportsJson,
-      },
-      parsed.builtAt,
-    );
+    return {
+      journalsJson: parsed.journalsJson,
+      indexJson: parsed.indexJson ?? null,
+      builtAt: parsed.builtAt,
+    };
   }).pipe(Effect.catch(() => Effect.succeed(null)));
 
 /**
- * Load the read model for a request: the persisted snapshot when
- * one exists (the normal case — the cron keeps it current), else a
- * live gather, which also persists its result as the snapshot so
- * the next cold isolate does not pay the scan again.
+ * Load the read model for a request: the cheap inputs read fresh,
+ * the expensive inputs decoded from the persisted snapshot (the
+ * normal case — the cron keeps it current). With no usable
+ * snapshot, gather the expensive inputs live and persist them as
+ * the snapshot so the next cold isolate does not pay the scan.
  */
 const loadModel = (bucket: JournalBucket): Effect.Effect<ReadModel> =>
   Effect.gen(function* () {
-    const snapshot = yield* loadSnapshotModel(bucket);
-    if (snapshot !== null) return snapshot;
-    const raw = yield* gatherRawModel(bucket);
+    const cheap = yield* gatherCheapRaw(bucket);
+    const snapshot = yield* loadSnapshotParts(bucket);
+    if (snapshot !== null) {
+      return yield* modelFromRaw(
+        { ...cheap, journalsJson: snapshot.journalsJson, indexJson: snapshot.indexJson },
+        snapshot.builtAt,
+      );
+    }
+    const expensive = yield* gatherExpensiveRaw(bucket);
     const builtAt = Date.now();
     const fingerprint = yield* inputsFingerprint(bucket);
-    yield* writeSnapshot(bucket, raw, fingerprint, builtAt).pipe(
+    yield* writeSnapshot(bucket, expensive, fingerprint, builtAt).pipe(
       Effect.ignore,
     );
-    return yield* modelFromRaw(raw, builtAt);
+    return yield* modelFromRaw({ ...cheap, ...expensive }, builtAt);
   });
 
 let readModelCache: Promise<ReadModel> | null = null;

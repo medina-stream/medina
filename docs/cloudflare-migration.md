@@ -763,20 +763,32 @@ before the fix: `ListDays` (limit 40) **82.5 s and 83.0 s**,
 
 Fix, mirroring the server's own answer (process memo + persisted
 snapshot, stale-while-revalidate): the gather and the decode are
-split, and the gathered inputs are persisted as one bucket
-artifact, **`views/worker-read-model-v1.json`** (~1.07 MB), with
-an inputs fingerprint in its R2 custom metadata. The minutely
-Cron Trigger (the milestone-2 handler) recomputes the fingerprint
-from listings + HEADs only — journal and day-index prefixes,
-previews and run-report etags — and rebuilds the snapshot in the
-background only when it moves (a rebuild measured 47 s, entirely
-off the request path). Requests decode the read model from the
-snapshot — one GET plus decode, memoized 60 s per isolate as
-before — and a live gather remains only as the fallback for a
-missing/corrupt snapshot (which also persists its result, so the
-next cold isolate starts from the snapshot). A token-gated
-`POST /journal/refresh` runs the same refresh synchronously for
-ops and seeding.
+split, and the *expensive* gathered inputs — the journal
+selection and the day-index selection — are persisted as one
+bucket artifact, **`views/worker-read-model-v1.json`** (~0.98 MB),
+with a fingerprint of the journal + day-index listings in its R2
+custom metadata. The minutely Cron Trigger (the milestone-2
+handler) recomputes the fingerprint from listings only and
+rebuilds the snapshot in the background only when it moves (a
+rebuild measured ~50 s, entirely off the request path). Requests
+decode the expensive half from the snapshot and read the cheap
+artifacts (previews rows, the three run reports) fresh — four
+small GETs — memoized 60 s per isolate as before; a live gather
+remains only as the fallback for a missing/corrupt snapshot
+(which also persists its result, so the next cold isolate starts
+from the snapshot). A token-gated `POST /journal/refresh` runs
+the same refresh synchronously for ops and seeding.
+**First-cut flaw, caught and fixed the same day:** the original
+fingerprint also covered the run reports and the previews
+snapshot, which the pipeline rewrites every pass — two refresh
+checks 65 s apart both rebuilt (distinct fingerprints, ~65 s per
+rebuild), i.e. the scan would have re-run near-constantly in the
+background. Serving latency was never affected (the previous
+snapshot serves during a rebuild), but the churn defeated the
+design; narrowing the fingerprint to the expensive inputs'
+listings and reading the cheap artifacts fresh at load fixed
+it — the +65 s check after the fix answers `rebuilt: false` on
+a stable fingerprint.
 
 After the fix, same vantage: `ListDays` limit 40 **1.4 s /
 1.2 s**, and **1.2 s** on a hit after the isolate memo expired;
@@ -791,11 +803,13 @@ the server's own endpoint): `ListDays` 116 rows payload-equal,
 mismatches**, the settled day page (2026-10-28, HTML)
 **byte-identical** (sha256 `0e0f84f9…`), and the SPA shell
 byte-identical to the server's own capture. The accepted
-`GetStatus`-totals divergence is untouched. Cron liveness:
-the shadow's run count advanced 1640 → 1642 across a 75 s
-window, and a manual refresh check answered `rebuilt: false`
-with a stable fingerprint — no rebuild churn when inputs are
-quiet. Freshness contract: a corpus change lands in serving
+`GetStatus`-totals divergence is untouched. (Re-measured after
+the fingerprint fix: `ListDays` 1.1 s, `GetStatus` 0.9 s,
+`ListJournals` 2.2 s, the day page still byte-identical.) Cron
+liveness: the shadow's run count advanced across a 75 s
+observation window — the refresh rides the same scheduled
+handler — and the post-fix refresh check answered
+`rebuilt: false` on a stable fingerprint. Freshness contract: a corpus change lands in serving
 within a cron tick plus one background rebuild, the same order
 as the server's own 10-minute previews cycle.
 
