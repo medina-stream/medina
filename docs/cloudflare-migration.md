@@ -1,8 +1,9 @@
 # Medina on Cloudflare: migration plan
 
-Status: milestone 2 (shadow ingest live and parity-checked), Oct 27, 2026.
-Milestone 1 (plan + scaffold + policy-serving proof) completed earlier
-the same day.
+Status: milestone 4 in progress (§4.3) — milestones 1–3 done,
+milestone 3's fresh-capture follow-up closed Oct 30 (§4.2).
+Milestone 1 (plan + scaffold + policy-serving proof) completed
+Oct 27, 2026.
 Decision (Scott, Oct 27): Medina leaves exe.dev. Development stays on the
 `effect-rethink` branch; deployment target is Cloudflare, **Workers-native**,
 infra declared with **Alchemy** on the standard path (the hskping pattern:
@@ -517,6 +518,178 @@ the obvious optimization when the bucket grows.
   index failure degrades the whole stage for that pass (as in
   the pre-fix 02:39Z pass) — hardening that is a separate
   follow-up.
+
+## 4.3 Milestone 4 — move the app (in progress, Oct 30)
+
+§3 phases 3–6. Scott's go (Oct 29) with the scope limit: **this
+affects medina-dev only** — Graze, Immich, and everything else on
+exe.dev stay untouched. The transcription fix (§4.2) is landed, so
+fresh captures flow end to end on the bucket store before any stage
+moves.
+
+### Live inventory (from the code and the host's environment, Oct 30)
+
+Loops on medina-dev (one bun process, `ARTIFACT_STORE=bucket`):
+
+| Loop | Cadence | Contents |
+| --- | --- | --- |
+| `ingest` | 1 min (passes run long) | Sources: `audio-drive`, `drive-allow`, `notes-git`, `bucket-audio`. Stages: `archive` → `media-normalize` (Transloadit) → `media-transcribe` (AssemblyAI) → `gps-compact` → `gps-stays`. Resources: `attribution`, `day-index`, `transcript-search`, `movement`, `notes` (LLM), `journal` (LLM, Effect Cluster workflows), `stars`. |
+| `capture` | 1 min | Sources only: `local-transcripts`, `device-events`, `capture-bucket` (all read `sco-lifelog-in` via the read-only SourceBucket API). |
+| `inventory` | 1 h | `drive-inventory` (metadata-only Drive crawl; nothing downstream reads it in real time). |
+| star detector | 90 s | Re-scans recent transcripts for spoken "star …" commands; retention sweep. |
+
+HTTP surface: journal SPA (`/` + `/app.js`, data via `POST /rpc`),
+`/journal/:day`, `/movement/:day`, `/gps/:day`, `/api/days/:day/gps`,
+`/stays/:day`, `/stars/:day`, `/star/:id`, `/location`, `/status`,
+`/events` (SSE), the auth/delegation routes, `POST /in`, the
+capture-policy routes, `/bucket-capture/:name`, `/devices`.
+
+### The provider-access finding (changes the shape of every stage move)
+
+medina-dev holds almost no raw provider keys. Its `.env` points the
+provider clients at **exe.dev internal proxy hosts**: AssemblyAI via
+`assemblyai.int.exe.xyz`, the journal LLM via `openai.int.exe.xyz`
+(OpenAI-compatible; the key never leaves the proxy), and Google via a
+token broker at `googlesa-*.int.exe.xyz` (`GOOGLE_TOKEN_URL`). Only
+Transloadit has raw keys in the server environment. Those
+`int.exe.xyz` hosts are exe.dev-platform internals — a Worker cannot
+use them — so **every provider stage's move includes re-homing its
+credential**, exactly Scott's direction: the key lands in the
+Cloudflare Secrets Store (account `default_secrets_store`) under the
+name the code already reads, attached to the Worker out-of-band, and
+the client points at the provider's public endpoint. Creating those
+secrets is Scott's action (values never transit the repo, the stack,
+or this plan). Needed, by stage:
+
+| Stage | Secrets Store entries to create | Endpoint change |
+| --- | --- | --- |
+| `media-transcribe` | `ASSEMBLYAI_API_KEY` | `ASSEMBLYAI_API_URL` → `https://api.assemblyai.com` |
+| `media-normalize` | `TRANSLOADIT_API_KEY`, `TRANSLOADIT_AUTH_SECRET` | none (public API today) |
+| `notes` + `journal` (LLM) | the journal LLM's API key (name TBD with the endpoint) | `JOURNAL_LLM_API_URL` → the provider's public OpenAI-compatible endpoint; `META_MODEL_API_KEY` already exists in the store — whether it is this credential is Scott's to confirm |
+| Drive sources + `inventory` | Google service-account material (shape TBD) | `GOOGLE_TOKEN_URL` broker replaced by Worker-side token exchange |
+| capture-loop ingest (Worker writes) | `INDEX_API_TOKEN` (Medina-internal machine token) | none — `MEDINA_INDEX_URL` is already the public medina-index Worker |
+
+Checked Oct 30: the store today holds only hskping's secrets plus
+`META_MODEL_API_KEY` and Alchemy's state keys — **no Medina provider
+secret exists yet**, so every provider stage is gated on Scott
+creating the entries above. Stages that need no secrets (serving)
+move first; nothing below blocks on anything else.
+
+A second gate for every Worker *write* stage: new artifacts must be
+registered in the medina-index DO, or medina-dev's bucket-store
+listings cannot see them (the milestone-3 seam lesson). Until the
+index is absorbed into this stack (a later move — its data is the
+full artifact census), Worker writes go through the existing index
+HTTP API with the token above.
+
+### Cutover order (safest first; one submitter at every moment)
+
+1. **Journal serving (reads)** — this pass. No provider contact, no
+   writes; medina-dev keeps producing everything. Design below.
+2. **Capture loop** (`capture-bucket`, `device-events`,
+   `local-transcripts`) — ingest-only, receipt-guarded; the shadow
+   already proves discovery parity. The device-events hardening
+   (below) is built into the Worker version by construction: a pass
+   writes the per-device latest-location object once, from the
+   newest fix in the batch, instead of once per event. Cutover =
+   Worker starts writing receipts; medina-dev's capture loop is
+   disabled in the same change batch (its sources are individually
+   excludable via `MEDINA_SOURCES`).
+3. **Star detector** — reads transcripts, writes star records; rides
+   the capture cron (60 s for 90 s is fine, idempotent).
+4. **Archive sweep** — bucket-to-bucket, no provider; index
+   registration is its only gate.
+5. **`media-normalize`** (Transloadit) — submit-then-poll; handover
+   per §3 phase 3: medina-dev stops submitting (stage flag), the
+   Worker polls existing job receipts first, submits only where no
+   receipt exists. The index-failure hardening (below) lands in the
+   Worker version: per-capture list failures degrade that capture,
+   never the whole pass.
+6. **`media-transcribe`** (AssemblyAI) — same handover shape, after
+   normalize (its inputs are normalize's outputs).
+7. **`gps-compact` / `gps-stays`** — pure derivations, but the points
+   store is Parquet partitions; a Worker-side Parquet writer is a
+   design item of its own, so these sit late deliberately.
+8. **Resources** (`attribution`, `day-index`, `transcript-search`,
+   `movement`) — the §2 incremental-DO redesign; the largest single
+   work item (§5). The day-index *snapshot artifacts* the pipeline
+   already writes are what the serving pass reads meanwhile.
+9. **`notes` + `journal`** (LLM) — Cloudflare Workflows port of the
+   cluster workflows; needs the LLM credential row above.
+10. **Drive sources + `inventory`** — needs the Google credential
+    row above.
+11. **`POST /in`** — moves with the Access milestone (service tokens
+    replace the tailnet-identity trust, per the addendum).
+12. **Write surface** (`SavePlaces`, `/devices`, token admin) — stays
+    on medina-dev until Access; the MCP bridge and CLI repoint at
+    the read cutover (phase 5) without it.
+
+Retirement (§3 phase 6) is last and conditional: medina-dev stops
+only when every row above is verified on Cloudflare. Until then it
+is the fallback and keeps running.
+
+### Serving design (step 1, this pass)
+
+- **Data**: reads only, all from the `ARTIFACTS` binding. The days
+  list is the server's own persisted snapshot `views/days-v6.json`
+  (the exact payload `ListDays` serves — the server refreshes it on
+  a 10-min stale-while-revalidate cycle and after every pass, so
+  the Worker inherits server-computed staleness with minutes of
+  lag). Day pages resolve like `Views.currentJournals`' on-disk
+  rule: list `journal/journal-v12/<day>/`, newest by `generatedAt`.
+  `GetDayTranscripts` reads the newest day-index snapshot artifact
+  (`index/days-v1/`, chosen by `builtAt` among the most recently
+  uploaded) plus that day's transcript artifacts — bounded per-day
+  reads; **the corpus is never re-decoded**, so the DayIndex tax is
+  not recreated. `/status` is composed from the loops' run-report
+  artifacts (`runs/…/latest.json`), the journal listing, and the
+  day-index snapshot; process-local fields medina-dev fills from
+  memory (`running`, `nextRunAt`) are reported as null/false by the
+  Worker and marked as such.
+- **Surface**: `GET /` (the SPA shell, markup ported from
+  `Pages.tsx`), `GET /app.js`, `GET /inter.woff2`, the app-icon
+  routes, `GET /journal/:day` (HTML + JSON, same selection rule),
+  `GET /status`, and `POST /rpc` for the read RPCs the SPA needs —
+  `ListDays`, `ListJournals`, `GetJournal`, `GetDayTranscripts`,
+  `GetStatus` — via the repo's own `JournalsGroup` schemas
+  (`lib/lifelog/JournalApi.ts`, imported with the bundler's `effect`
+  alias pinned to this package's effect 4.0.5 so one copy ships).
+  Not yet moved, answering a typed `ApiError` instead of drifting:
+  `SearchTranscripts` (needs the search index), the places RPCs,
+  `SavePlaces` (a write), `StreamEvents` (no live hub on the Worker
+  yet). `/devices` is not served (its token-issuing APIs stay on
+  medina-dev).
+- **Client assets**: `/app.js` and the font/icons are build outputs,
+  not artifacts the pipeline writes. A new repo script
+  (`scripts/publish-client-assets.ts`, run on medina-dev where the
+  build and the bucket credentials live) publishes them under
+  `client/` keys in `sco-lifelog`; the Worker streams them from the
+  binding. Content is unversioned for the transition (the server's
+  own cache headers are mirrored); a hashed-asset scheme can come
+  with the domain cutover.
+- **Gate**: Access cannot apply to workers.dev (addendum), and the
+  journal is private — so until the custom domain exists, every
+  journal route sits behind the existing per-device capability
+  token (the same registry the policy route verifies). A token
+  presented once at `/?token=…` is exchanged for an HttpOnly cookie
+  so the stock SPA (which knows nothing of tokens) works unchanged;
+  `/rpc` also accepts the Bearer header. Fail-closed: no token, no
+  journal — the routes 404 like the other gated routes.
+- **Parity**: verified against medina-dev over the same artifacts —
+  `ListDays` payload equality, sampled `/journal/:day` report-text
+  equality, `GetDayTranscripts` turn equality for a sampled day,
+  `/status` totals and last-run equality — using a dedicated,
+  revocable check token, revoked when the pass ends.
+
+### Access + domain (staged, one open decision)
+
+Everything not needing the domain is prepared by the serving pass
+(the gate above is the pre-Access placeholder, shaped to be deleted
+when Access asserts identity). **Open decision (Scott): the custom
+domain** for the Access application and the Worker's human-facing
+routes. Nothing is bought or attached without it. Phone routes stay
+outside Access regardless; `/in`'s service-token story waits for
+the same milestone.
 
 ## 5. Risks and open questions
 
