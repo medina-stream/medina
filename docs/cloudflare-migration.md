@@ -745,6 +745,59 @@ migration keeps producing.
 - **Cost note**: the `generatedAt` scan reads every journal
   candidate (~2,500 objects) once per read-model build (60 s
   isolate cache). Correctness first; the §2 index retires it.
+  (Serving no longer pays this on requests — see the latency fix
+  below; the scan now runs only in the background snapshot
+  builder.)
+
+### Step 1 latency fix (Oct 30) — persisted read-model snapshot
+
+Step 1 verified content, never latency, and the defect shipped:
+the read model was rebuilt from the bucket *per request* whenever
+an isolate's 60 s memo was cold or expired — the ~2,500-object
+journal scan plus the day-index decode, paid synchronously by
+whichever request arrived first. Scott hit it in the browser the
+same day (the SPA's `ListDays` never landed; "Could not load the
+journal"). Measured from the sandbox against the live Worker
+before the fix: `ListDays` (limit 40) **82.5 s and 83.0 s**,
+`GetStatus` **94.5 s** — every hit, warm or cold, paid the build.
+
+Fix, mirroring the server's own answer (process memo + persisted
+snapshot, stale-while-revalidate): the gather and the decode are
+split, and the gathered inputs are persisted as one bucket
+artifact, **`views/worker-read-model-v1.json`** (~1.07 MB), with
+an inputs fingerprint in its R2 custom metadata. The minutely
+Cron Trigger (the milestone-2 handler) recomputes the fingerprint
+from listings + HEADs only — journal and day-index prefixes,
+previews and run-report etags — and rebuilds the snapshot in the
+background only when it moves (a rebuild measured 47 s, entirely
+off the request path). Requests decode the read model from the
+snapshot — one GET plus decode, memoized 60 s per isolate as
+before — and a live gather remains only as the fallback for a
+missing/corrupt snapshot (which also persists its result, so the
+next cold isolate starts from the snapshot). A token-gated
+`POST /journal/refresh` runs the same refresh synchronously for
+ops and seeding.
+
+After the fix, same vantage: `ListDays` limit 40 **1.4 s /
+1.2 s**, and **1.2 s** on a hit after the isolate memo expired;
+full window (116 rows) **1.2 s**; `GetStatus` **0.9 s**;
+`ListJournals` **1.6 s**. Full browser-equivalent flow: token
+exchange 302 in 0.9 s → shell 200 in 0.8 s → `/app.js` 200 in
+1.6 s → `ListDays` (cookie) 1.1 s → `GetStatus` (cookie) 1.1 s;
+anonymous `/rpc` still 404. Parity re-verified against
+medina-dev (dedicated check token, minted and revoked through
+the server's own endpoint): `ListDays` 116 rows payload-equal,
+`ListJournals` **116/116 with 0 mismatches and 0 stale-flag
+mismatches**, the settled day page (2026-10-28, HTML)
+**byte-identical** (sha256 `0e0f84f9…`), and the SPA shell
+byte-identical to the server's own capture. The accepted
+`GetStatus`-totals divergence is untouched. Cron liveness:
+the shadow's run count advanced 1640 → 1642 across a 75 s
+window, and a manual refresh check answered `rebuilt: false`
+with a stable fingerprint — no rebuild churn when inputs are
+quiet. Freshness contract: a corpus change lands in serving
+within a cron tick plus one background rebuild, the same order
+as the server's own 10-minute previews cycle.
 
 What remains of milestone 4, in the recorded order: capture loop
 (gated on an `INDEX_API_TOKEN` secret for index registration),

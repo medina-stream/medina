@@ -42,7 +42,10 @@
  * health check, the program below is the whole router).
  */
 import * as Effect from "effect/Effect";
-import { handleJournal } from "./journal.ts";
+import {
+  handleJournal,
+  refreshReadModelSnapshot,
+} from "./journal.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -68,8 +71,24 @@ interface R2ListPageLike {
   readonly cursor?: string;
 }
 
+interface R2ObjectHeadLike {
+  readonly size: number;
+  readonly etag: string;
+  readonly uploaded: Date;
+  readonly customMetadata: Record<string, string>;
+}
+
 interface R2BucketLike {
   get(key: string): Promise<R2ObjectLike | null>;
+  head(key: string): Promise<R2ObjectHeadLike | null>;
+  put(
+    key: string,
+    value: string,
+    options?: {
+      readonly httpMetadata?: { readonly contentType?: string };
+      readonly customMetadata?: Record<string, string>;
+    },
+  ): Promise<unknown>;
   list(options: {
     readonly prefix?: string;
     readonly limit?: number;
@@ -378,6 +397,42 @@ const serveShadowStatus = (
     });
   });
 
+/**
+ * Manual trigger for one read-model snapshot refresh (same
+ * device-token gate) — ops tooling: it runs exactly what the Cron
+ * Trigger runs for the journal, synchronously, with the outcome in
+ * the response. `?force=1` rebuilds even when the inputs
+ * fingerprint is unchanged.
+ */
+const serveJournalRefresh = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    const bearer = request.headers.get("authorization");
+    const token =
+      bearer !== null && bearer.startsWith("Bearer ")
+        ? bearer.slice("Bearer ".length)
+        : (url.searchParams.get("token") ?? "");
+    if (!(yield* isValidToken(env, token))) {
+      return fail(404, "not found");
+    }
+    const outcome = yield* refreshReadModelSnapshot(
+      env.ARTIFACTS,
+      url.searchParams.get("force") === "1",
+    ).pipe(
+      Effect.map((stats) => ({ ok: true as const, ...stats })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
 const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
@@ -388,6 +443,9 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   }
   if (request.method === "POST" && url.pathname === "/shadow/run") {
     return serveShadowRun(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/journal/refresh") {
+    return serveJournalRefresh(env, request, url);
   }
   if (request.method === "GET" && url.pathname.startsWith("/bucket-capture/")) {
     return serveApk(env, url.pathname.slice("/bucket-capture/".length));
@@ -443,6 +501,22 @@ export default {
         runShadowDiscovery(env, ranAt).pipe(
           Effect.catch((cause) =>
             Effect.logError("shadow discovery pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // Journal read-model snapshot (§4.3): keep the persisted
+    // snapshot the journal routes serve from current with the
+    // corpus, so a journal request never pays the corpus gather
+    // (the ~30–95 s scan that put the SPA into its error state).
+    // The refresh rebuilds only when the inputs fingerprint moved.
+    // Same failure posture as the shadow: log and swallow, the
+    // next minute's pass self-heals.
+    ctx.waitUntil(
+      Effect.runPromise(
+        refreshReadModelSnapshot(env.ARTIFACTS).pipe(
+          Effect.catch((cause) =>
+            Effect.logError("read-model snapshot refresh failed", cause),
           ),
         ),
       ),
