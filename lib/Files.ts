@@ -106,6 +106,42 @@ export const putFile = (
     }).pipe(Effect.mapError(asError))
   )
 
+/**
+ * Materialize the artifact at `file` to the local scratch path
+ * `destPath` — the inverse of `putFile`. Returns false when the artifact
+ * does not exist. The artifact itself stays where it lives; the copy is
+ * the caller's scratch and the caller removes it. Through a store the
+ * bytes pass through memory, so callers materialize only bounded sizes.
+ * With no store in context this is a plain copy of the local file.
+ */
+export const getFile = (
+  file: string,
+  destPath: string
+): Effect.Effect<boolean, Error, FileSystem.FileSystem> =>
+  withStore(
+    file,
+    (store, key) =>
+      Effect.flatMap(store.getBytes(key), (bytes) =>
+        Option.isNone(bytes)
+          ? Effect.succeed(false)
+          : Effect.gen(function*() {
+            const fs = yield* FileSystem.FileSystem
+            const tmp = `${destPath}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+            yield* fs.makeDirectory(dirname(destPath), { recursive: true })
+            yield* fs.writeFile(tmp, bytes.value)
+            yield* fs.rename(tmp, destPath)
+            return true
+          }).pipe(Effect.mapError(asError))
+      ),
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      if (!(yield* fs.exists(file))) return false
+      yield* fs.makeDirectory(dirname(destPath), { recursive: true })
+      yield* fs.writeFile(destPath, yield* fs.readFile(file))
+      return true
+    }).pipe(Effect.mapError(asError))
+  )
+
 /** The file's text, or none when it does not exist. */
 export const readText = (
   file: string

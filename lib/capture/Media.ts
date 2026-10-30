@@ -12,6 +12,11 @@
  *   hash, so the answer can never change; a probe that found no media is
  *   recorded too, and never re-asked. Interpretation of what the probe saw
  *   (creation_time tags, durations) belongs downstream, to attribution.
+ *   A blob that lives only in the artifact store is probed the same way:
+ *   materialized to a bounded scratch copy, or — past the size where a
+ *   download is the wrong tool — read in place through a presigned URL
+ *   (`blobAccessFor`). The probe record is the only lasting trace either
+ *   way; scratch copies are removed with the probe.
  *
  * - Normalize: any capture whose probe shows an audio stream -- audio files,
  *   video files, whatever a capturer was rude enough to upload -- is
@@ -165,25 +170,94 @@ const run = (command: ReadonlyArray<string>): Effect.Effect<{ ok: boolean; stdou
     catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause)))
   })
 
-/** The capture's blob on disk: the one file that is not pipeline metadata. */
-export const blobPathFor = (captureId: string) =>
+/** The capture's blob name: the one file that is not pipeline metadata.
+ * Names come through the store seam — with the bucket store the capture
+ * exists only there, and a direct directory read sees nothing at all. */
+const blobNameFor = (captureId: string) =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
-    const dir = dataPath(captureDir(captureId))
-    // Names through the store seam: with the bucket store the capture
-    // exists only there, and a direct directory read sees nothing at all.
-    const listed = yield* Files.listFiles(dir)
+    const listed = yield* Files.listFiles(dataPath(captureDir(captureId)))
     const name = listed
       .filter((entry) => !entry.includes("/"))
       .find((candidate) => !METADATA_NAMES.has(candidate) && !/\.tmp-[^/]*$/.test(candidate))
-    if (name === undefined) return null
-    const path = `${dir}/${name}`
-    // Probing and transcoding read bytes from this disk, though: a blob
-    // that lives only in a remote store has no readable path yet, so
-    // report none. The probe then stays uncached and the capture waits,
-    // instead of caching a failed probe of a path that does not exist.
+    return name ?? null
+  })
+
+/** The capture's blob on disk, when it is readable on this disk at all. */
+export const blobPathFor = (captureId: string) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const name = yield* blobNameFor(captureId)
+    if (name === null) return null
+    const path = `${dataPath(captureDir(captureId))}/${name}`
     if (!(yield* fs.exists(path))) return null
     return { name, path }
+  }).pipe(
+    Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause))))
+  )
+
+/** Blobs up to this size are materialized to a scratch file for probing:
+ * the download is bounded and one-time (the probe record caches forever),
+ * and a local probe's verdict is byte-exact. Larger blobs are probed in
+ * place through a presigned URL instead of being downloaded wholesale. */
+const PROBE_MATERIALIZE_MAX_BYTES = 512 * 1024 * 1024
+
+const PROBE_URL_TTL_SECONDS = 60 * 60
+
+export interface BlobAccess {
+  readonly name: string
+  /** What ffprobe/ffmpeg should read: a local path or a presigned URL. */
+  readonly input: string
+  /** Whether a failed probe of `input` is a final answer about the
+   * bytes. Local and materialized inputs are byte-exact, so their
+   * verdicts cache like any local probe; a failed URL probe may have
+   * failed on the fetch rather than the bytes, so it never caches. */
+  readonly cacheable: boolean
+  /** Removes any scratch file; a no-op for paths and URLs. */
+  readonly cleanup: Effect.Effect<void, never>
+}
+
+/**
+ * A readable input for the capture's blob, wherever the blob lives: the
+ * local path when it is on this disk; otherwise — for a blob that exists
+ * only in the artifact store — a scratch materialization (bounded by
+ * PROBE_MATERIALIZE_MAX_BYTES) or a presigned URL for ffprobe to
+ * range-read in place. Null when the capture has no blob, or the blob
+ * exists but no read path is available yet (the capture waits, exactly
+ * as it did before remote probing existed).
+ */
+export const blobAccessFor = (captureId: string) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const name = yield* blobNameFor(captureId)
+    if (name === null) return null
+    const artifactPath = dataPath(`${captureDir(captureId)}/${name}`)
+    if (yield* fs.exists(artifactPath)) {
+      return { name, input: artifactPath, cacheable: true, cleanup: Effect.void } as BlobAccess
+    }
+    const size = yield* Files.size(artifactPath)
+    if (Option.isSome(size) && size.value <= PROBE_MATERIALIZE_MAX_BYTES) {
+      const scratchDir = dataPath(`tmp/probe-${captureId.slice(0, 12)}-${Date.now()}`)
+      const scratch = `${scratchDir}/${name}`
+      if (!(yield* Files.getFile(artifactPath, scratch))) return null
+      return {
+        name,
+        input: scratch,
+        cacheable: true,
+        cleanup: fs.remove(scratchDir, { recursive: true, force: true }).pipe(Effect.ignore)
+      } as BlobAccess
+    }
+    const r2 = yield* Effect.serviceOption(R2TempCreds)
+    if (Option.isSome(r2) && r2.value.configured) {
+      const url = yield* r2.value.presignGet(
+        `${captureDir(captureId)}/${name}`,
+        PROBE_URL_TTL_SECONDS
+      ).pipe(
+        Effect.map((signed) => signed as string | null),
+        Effect.orElseSucceed(() => null)
+      )
+      if (url !== null) return { name, input: url, cacheable: false, cleanup: Effect.void } as BlobAccess
+    }
+    return null
   }).pipe(
     Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause))))
   )
@@ -238,8 +312,8 @@ export const probeCapture = (captureId: string) =>
     )
     if (Option.isSome(existing)) return existing.value
 
-    const blob = yield* blobPathFor(captureId)
-    const result = blob === null
+    const access = yield* blobAccessFor(captureId)
+    const result = access === null
       ? null
       : yield* run([
         "ffprobe",
@@ -250,8 +324,8 @@ export const probeCapture = (captureId: string) =>
         "-show_format",
         "-show_streams",
         "-show_chapters",
-        blob.path
-      ])
+        access.input
+      ]).pipe(Effect.ensuring(access.cleanup))
 
     const ffprobe = result === null
       ? { error: "no blob on disk" }
@@ -261,13 +335,17 @@ export const probeCapture = (captureId: string) =>
     const record = new ProbeRecord({
       captureId,
       probedAt: new Date().toISOString(),
-      blobName: blob?.name ?? null,
+      blobName: access?.name ?? null,
       media: result !== null && result.ok && hasAudioStream(ffprobe),
       ffprobe
     })
-    // A missing blob is the one non-final answer: legacy captures kept no
-    // audio, and a blob may land later. Everything else is cached forever.
-    if (blob !== null) {
+    // Two answers are non-final and stay uncached: a missing blob (legacy
+    // captures kept no audio, and a blob may land later) and a failed
+    // probe of a presigned URL, which may have failed on the fetch rather
+    // than the bytes. Everything else is cached forever — local and
+    // materialized probes are byte-exact, and a successful URL probe did
+    // read the bytes it describes.
+    if (access !== null && (access.cacheable || (result !== null && result.ok))) {
       yield* Files.writeJson(dataPath(ffprobeKey(captureId)), record)
     }
     return record
@@ -332,13 +410,18 @@ export const segmentToChunks = (
     return manifest
   })
 
-/** Transcode a local capture to canonical chunks. */
+/** Transcode a capture to canonical chunks, reading the blob from
+ * wherever it lives (local path, scratch materialization, or URL). */
 export const normalizeCapture = (captureId: string) =>
   Effect.gen(function*() {
-    const blob = yield* blobPathFor(captureId)
-    if (blob === null) return yield* Effect.fail(new Error(`no blob on disk for capture ${captureId}`))
-    const probe = yield* probeCapture(captureId)
-    return yield* segmentToChunks(captureId, blob.path, { sourceDurationSeconds: probeDuration(probe.ffprobe) })
+    const access = yield* blobAccessFor(captureId)
+    if (access === null) return yield* Effect.fail(new Error(`no blob on disk for capture ${captureId}`))
+    return yield* Effect.gen(function*() {
+      const probe = yield* probeCapture(captureId)
+      return yield* segmentToChunks(captureId, access.input, {
+        sourceDurationSeconds: probeDuration(probe.ffprobe)
+      })
+    }).pipe(Effect.ensuring(access.cleanup))
   })
 
 const captureIds = Effect.gen(function*() {
