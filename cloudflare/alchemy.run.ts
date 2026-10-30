@@ -3,6 +3,9 @@ import { adopt } from "alchemy/AdoptPolicy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import { localState } from "alchemy/State";
 import * as Effect from "effect/Effect";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Medina's Cloudflare infrastructure, declared as an Alchemy stack —
 // the same standard path as the hskping repo's alchemy.run.ts.
@@ -50,9 +53,51 @@ export const CaptureIn = Cloudflare.R2.Bucket("CaptureIn", {
   name: "sco-lifelog-in",
 }).pipe(adopt(true));
 
+// Milestone 4: the Worker bundle imports the repo's own schema
+// modules (lib/lifelog/JournalApi.ts and friends), which resolve
+// `effect` to the repo-root install (4.0.0) while this package pins
+// effect 4.0.5. Two copies of effect in one bundle would break the
+// schema/RPC class identity the client protocol relies on, so this
+// rolldown plugin pins every `effect` / `effect/*` specifier — from
+// any importer — to this package's single copy, resolving subpaths
+// against its dist tree the way its exports map does.
+const effectDist = [
+  fileURLToPath(new URL("./node_modules/effect/dist", import.meta.url)),
+  join(process.cwd(), "node_modules/effect/dist"),
+].find((dir) => existsSync(join(dir, "index.js")));
+if (effectDist === undefined) {
+  throw new Error("cannot locate this package's effect/dist for bundling");
+}
+const probeEffectFile = (base: string): string | null => {
+  for (const candidate of [
+    `${base}.js`,
+    `${base}.mjs`,
+    join(base, "index.js"),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+};
+const singleEffectCopy = {
+  name: "single-effect-copy",
+  resolveId(source: string): string | null {
+    if (source === "effect") return join(effectDist, "index.js");
+    if (source.startsWith("effect/")) {
+      return probeEffectFile(join(effectDist, source.slice("effect/".length)));
+    }
+    return null;
+  },
+};
+
 export const Api = Cloudflare.Worker("Api", {
   main: "./src/worker.ts",
-  compatibility: { date: "2026-10-13" },
+  compatibility: { date: "2026-10-13", flags: ["nodejs_compat"] },
+  build: {
+    // The analyzer output is the parity evidence that the bundle
+    // carries exactly one copy of effect (see §4.3).
+    bundleAnalyzer: true,
+    input: { plugins: [singleEffectCopy] },
+  },
   // No explicit `name`: Alchemy derives a stage-scoped physical name
   // (stage dev produced medina-api-dev-<suffix>), which cannot collide
   // with the hand-made `medina*` workers already in the account or

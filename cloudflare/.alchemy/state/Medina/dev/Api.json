@@ -7,7 +7,20 @@
   "props": {
     "main": "./src/worker.ts",
     "compatibility": {
-      "date": "2026-10-13"
+      "date": "2026-10-13",
+      "flags": [
+        "nodejs_compat"
+      ]
+    },
+    "build": {
+      "bundleAnalyzer": true,
+      "input": {
+        "plugins": [
+          {
+            "name": "single-effect-copy"
+          }
+        ]
+      }
     },
     "workersDev": true,
     "crons": [
@@ -46,8 +59,8 @@
     ],
     "tailConsumers": [],
     "hash": {
-      "bundle": "61ed473961778a81795efcaca1f236860ff5463313051842e434f8d80a0c489a",
-      "metadata": "f8bd8287df78ee5298d1c2ce631c4f55bae29a311b77154cf27ea62b4898d073"
+      "bundle": "11c51cd8bcb4fe4c7e0d6069dec3c1c4ca3b70215092f6a81ab4da0578d0fd45",
+      "metadata": "59c84afc4175914a3f1bf06be724022f5f0b557bfc09bcc3bdb46b6acae1bdaf"
     }
   },
   "bindings": [

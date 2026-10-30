@@ -42,6 +42,7 @@
  * health check, the program below is the whole router).
  */
 import * as Effect from "effect/Effect";
+import { handleJournal } from "./journal.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -400,7 +401,15 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
       decodeURIComponent(url.pathname.slice("/api/capture-policy/".length)),
     );
   }
-  return Effect.succeed(fail(404, "not found"));
+  // Journal serving (migration milestone 4, §4.3 step 1): the read
+  // surface over the same bucket, gated by the same token registry.
+  // handleJournal returns null for paths outside the journal family.
+  return Effect.flatMap(
+    handleJournal(request, env.ARTIFACTS, (token) =>
+      isValidToken(env, token),
+    ),
+    (response) => Effect.succeed(response ?? fail(404, "not found")),
+  );
 };
 
 interface ScheduledControllerLike {
