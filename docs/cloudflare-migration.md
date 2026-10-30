@@ -447,7 +447,76 @@ the obvious optimization when the bucket grows.
   capture's local probing/transcoding waits — pre-existing
   captures with cached probe records transcribe normally via
   signed R2 URLs. Follow-up: probe via presigned URL or bounded
-  materialization.
+  materialization. **Closed Oct 30 — see "Fresh-capture probing
+  fix" below.**
+
+### Fresh-capture probing fix (Oct 30) — limitation (2) closed
+
+- **Design** (commit `04675ca`): a `blobAccessFor` resolver in
+  `Media.ts` gives probing and the local transcode fallback a
+  readable input wherever the blob lives. On local disk, the
+  plain path — behavior unchanged. Store-only and ≤ 512 MiB:
+  materialized through the store seam (new `Files.getFile`) into
+  a `tmp/probe-<id>-<ts>/` scratch file, removed after use; the
+  download is byte-exact, so the ffprobe verdict caches forever
+  exactly like a local probe. Store-only and larger: probed in
+  place through a presigned R2 URL (1 h TTL), and the record
+  caches only on probe success — a failed URL probe may have
+  failed on the fetch rather than the bytes, so the capture
+  waits and retries instead of caching a wrong verdict.
+  `normalizeCapture` consumes the same resolution. Settle /
+  dead-letter semantics and the receipt guards are untouched;
+  nothing syncs the store back to local disk wholesale.
+- **Tests**: `lib/capture/MediaProbeRemote.test.ts` — 4 tests
+  (remote probe + store-side caching + scratch cleanup,
+  non-media probe, remote normalize, and a recorder-shaped
+  capture end to end through normalize + transcribe against an
+  in-memory store with vendor fakes, asserting no duplicate
+  submission). Suite 352 pass / 1 fail — the baseline 348/1 plus
+  the 4 new tests; the one failure is the same pre-existing
+  `currentDayIndex` failure. Typecheck clean.
+- **Deployed** 2026-10-30T03:25:39Z (bundle-courier, build, one
+  controlled restart; `ARTIFACT_STORE=bucket` unchanged).
+- **Backlog, counted pre-deploy** (03:23Z; method: every capture
+  whose provenance's earliest `fetchedAt` is at/after the
+  re-flip instant 2026-10-28T21:33:31Z and whose provenance
+  mime/filename looked like media): **200 captures — 0 probed,
+  0 manifested, 0 transcribed.** Probing reclassified the
+  cohort: 114 of the 200 are GPS ndjson batches (bucket-audio
+  labels them `audio/application`; verdict media=false, nothing
+  to transcribe by design), so the true media backlog was 86.
+- **Drain** (same 200, by 05:05Z): probed 200/200; manifested
+  86/86 media; AssemblyAI job receipts 86/86; canonical
+  transcripts 85/86 — the last, `a664ddd0`, was delayed by the
+  index wobble below, then probed/manifested/submitted and
+  awaits its next poll. Segments recorded during the window
+  flowed through the same path (the proof segment below is one).
+- **End-to-end proof**: segment `20261030T033000Z` (recorded
+  03:30Z, after the deploy; bucket-only blob) → capture
+  `6ec3fe368b96a1c35f226dc2866cdc408c3810b57ae1c2663b4c83eb25aa8ac5`:
+  probe record 03:50:30Z (media=true), direct-path manifest
+  03:50:31Z (899.4 s), AssemblyAI job
+  `801eb9bb-5529-410f-82b5-cfc9f210d169` submitted 04:09:50Z,
+  canonical transcript at
+  `transcript/assemblyai-u35p-v1/6ec3fe368b96….json` completed
+  04:55:31Z. That segment is silent (empty text); other drained
+  captures carry real speech (e.g. 562 chars / 4 utterances).
+- **Error census**, first ~100 min post-restart: split
+  signature (`FileSystem.stat` … NotFound) 0; "no blob on disk"
+  0; panics 0. The two pre-existing Transloadit validation
+  failures (`414fe3fa`, `4b380c0a`) recurred identically in both
+  passes — unchanged. One 1-second index-500 burst at 03:49:39Z
+  failed 3 normalize items (`09525b61`, `09e62ef5`, `a664ddd0`);
+  all recovered on the next pass (two are GPS; `a664ddd0` is
+  the in-flight transcript above). The Oct 29 02:20Z index-500
+  pair (`ec6521e3…`, `1425f78e…` — both GPS captures) likewise
+  recovered: probe records written 03:50:17/23Z, and the
+  post-fix pass's sources all reported healthy. **Residual
+  risk, unchanged by this fix:** `media-normalize` discovery
+  still depends on per-capture index lists, so a stage-level
+  index failure degrades the whole stage for that pass (as in
+  the pre-fix 02:39Z pass) — hardening that is a separate
+  follow-up.
 
 ## 5. Risks and open questions
 
