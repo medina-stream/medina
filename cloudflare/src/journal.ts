@@ -47,7 +47,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -57,7 +56,9 @@ import {
   ApiError,
   DayRow,
   DayTranscript,
+  GetStatus,
   JournalEntry,
+  ListJournals,
   JournalsGroup,
   LastRun,
   ListDays,
@@ -203,42 +204,102 @@ const decodeOrNull = <S extends Schema.Constraint>(
       );
 
 /**
- * Newest journal per day. Generation files are content-addressed and
- * written once, so the most recently *uploaded* candidate in a day's
- * listing is the newest generation in all but the re-upload edge
- * cases; only that one is fetched and decoded.
+ * Newest journal per day, by the journal's own `generatedAt` — the
+ * server's selection rule in `Views.currentJournals`. Upload order
+ * cannot be trusted for this: the milestone-3 converge pass
+ * re-uploaded generations in key order, so the most recently
+ * *uploaded* candidate is often an older generation. Every
+ * candidate's text is fetched (only its `generatedAt` is read) and
+ * just the winner is decoded — a few thousand small reads per
+ * read-model build, amortized by the isolate cache; the §2
+ * incremental-index redesign retires this scan.
  */
 const loadJournals = (
   bucket: JournalBucket,
 ): Effect.Effect<ReadonlyMap<string, Journal>> =>
   Effect.gen(function* () {
     const listed = yield* listAll(bucket, `${JOURNAL_PREFIX}/`);
-    const newestKeyByDay = new Map<string, ListedObject>();
+    const keysByDay = new Map<string, Array<string>>();
     for (const object of listed) {
       const rest = object.key.slice(JOURNAL_PREFIX.length + 1);
       const [day, file] = rest.split("/");
       if (!day || !file || !file.endsWith(".json")) continue;
-      const current = newestKeyByDay.get(day);
-      if (
-        current === undefined ||
-        object.uploaded.getTime() > current.uploaded.getTime()
-      ) {
-        newestKeyByDay.set(day, object);
-      }
+      const keys = keysByDay.get(day) ?? [];
+      keys.push(object.key);
+      keysByDay.set(day, keys);
     }
     const journals = new Map<string, Journal>();
     yield* Effect.forEach(
-      [...newestKeyByDay.values()],
-      (object) =>
-        Effect.flatMap(getJson(bucket, object.key), (json) =>
-          Effect.map(decodeOrNull(Journal, json), (journal) => {
-            if (journal !== null) journals.set(journal.day, journal);
-          }),
-        ),
+      [...keysByDay.values()],
+      (keys) =>
+        Effect.gen(function* () {
+          const candidates = yield* Effect.forEach(
+            keys,
+            (key) =>
+              Effect.map(getText(bucket, key), (text) =>
+                text === null
+                  ? null
+                  : {
+                      generatedAt:
+                        /"generatedAt"\s*:\s*"([^"]+)"/.exec(text)?.[1] ??
+                        "",
+                      text,
+                    },
+              ),
+            { concurrency: 8 },
+          );
+          let winner: { generatedAt: string; text: string } | null = null;
+          for (const candidate of candidates) {
+            if (
+              candidate !== null &&
+              (winner === null ||
+                candidate.generatedAt > winner.generatedAt)
+            ) {
+              winner = candidate;
+            }
+          }
+          if (winner === null) return;
+          const json = yield* Effect.try(() =>
+            JSON.parse(winner.text) as unknown,
+          ).pipe(Effect.catch(() => Effect.succeed(null)));
+          const journal = yield* decodeOrNull(Journal, json);
+          if (journal !== null) journals.set(journal.day, journal);
+        }),
       { concurrency: 8 },
     );
     return journals;
   });
+
+/** sha256("") — the input hash of the server's transient empty
+ * journal (Journal.ts `emptyJournal`), for days with no inputs. */
+const EMPTY_INPUT_HASH =
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+const emptyJournal = (day: string): Journal =>
+  new Journal({
+    version: JOURNAL_PREFIX.slice("journal/".length),
+    day,
+    inputHash: EMPTY_INPUT_HASH,
+    transcriptKeys: [],
+    model: null,
+    generatedAt: new Date().toISOString(),
+    status: "completed",
+    report: "",
+  });
+
+/** Days the server's own snapshot marks stale: their current-input
+ * journal is not on disk, which is exactly the condition under
+ * which the server's `journalCachedForDay` answers None (the RPC
+ * GetJournal returns null; the day page answers 202 pending). */
+const staleDay = (model: ReadModel, day: string): boolean =>
+  model.rows.some((row) => row.day === day && row.stale);
+
+/** Whether a day has anything a journal could be written from, as
+ * far as artifacts can tell: it appears in the day rows or carries
+ * transcripts in the current day-index snapshot. */
+const hasInputs = (model: ReadModel, day: string): boolean =>
+  model.rows.some((row) => row.day === day) ||
+  (model.index?.days[day]?.length ?? 0) > 0;
 
 /**
  * The current day-index snapshot: among the most recently uploaded
@@ -499,161 +560,317 @@ const esc = (value: string): string =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
-const STYLE = `:root {
-      color-scheme: light dark;
-      --bg: #f7f5f0; --fg: #1d2733; --muted: #68707c; --card: #fffdf8;
-      --line: #e6e0d2; --accent: #b4551f; --accent-fg: #fff7ec;
-      --input: #fffdf8;
+const STYLE = `
+  /* Inter, self-hosted (see the /inter.woff2 route). One typeface for the
+     whole UI: no serif stack, no second family for controls. */
+  @font-face {
+    font-family: "Inter";
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: url("/inter.woff2") format("woff2");
+  }
+  :root {
+    color-scheme: light dark;
+    --ui: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    font-family: var(--ui);
+    /* Inter's optical sizing and tabular figures: dates line up in a column
+       when the digits are all the same width. */
+    font-optical-sizing: auto;
+    --ink: #1a1a1a;
+    --muted: #6b6b6b;
+    --rule: #d8d4cc;
+    --rule-soft: #e8e5df;
+    --bg: #fdfdfc;
+    --surface: #f5f3ef;
+    --accent: #2f6f4f;
+    --tl-fill: #2f6fb2;
+    --bad: #b93f3f;
+    --warn: #b07d1a;
+    /* Tap targets: 44px is the accessibility floor on touch. */
+    --tap: 2.75rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #ececec; --muted: #9a9a9a; --rule: #3a3a3a; --rule-soft: #2c2c2c;
+      --bg: #151515; --surface: #1e1e1e; --accent: #6fbf8f; --bad: #e07070; --warn: #d6a94a;
+      --tl-fill: #6aa5e0;
     }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #14181d; --fg: #e8e4da; --muted: #9aa3ad; --card: #1d232a;
-        --line: #333a42; --accent: #e08a4c; --accent-fg: #1d130a;
-        --input: #232a32;
-      }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: var(--ui);
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 1.25rem 1.25rem 4rem;
+    line-height: 1.55;
+    color: var(--ink);
+    background: var(--bg);
+    /* Keep long place names and URLs from forcing a sideways scroll. */
+    overflow-wrap: break-word;
+  }
+  @media (max-width: 34rem) { body { padding: .75rem 1rem 3rem; } }
+  h1 { font-size: 1.5rem; margin: 0; line-height: 1.2; letter-spacing: -.01em; }
+  h2 { font-size: 1.15rem; margin: 0 0 1rem; line-height: 1.3; letter-spacing: -.01em; }
+  h3 { font-size: 1rem; margin: 1.5rem 0 .25rem; }
+  header p, .empty { color: var(--muted); }
+  section { border-top: 1px solid var(--rule); margin-top: 2.5rem; padding-top: 1.5rem; }
+  h2 a { color: inherit; text-decoration: none; }
+  h2 a:hover { text-decoration: underline; }
+  p { margin: .7rem 0; }
+  a { color: var(--accent); }
+  .stale { font-size: .7rem; font-weight: 500; color: var(--muted); }
+
+  /* A quiet instance label: enough presence to orient the viewer without
+     competing with the journal. The client scales only unusually long names. */
+  .site-header {
+    padding: .45rem 3.4rem .15rem 0;
+    margin-bottom: 1.65rem;
+    overflow: hidden;
+  }
+  .hostname {
+    width: 100%; overflow: hidden; white-space: nowrap;
+    font-family: "Inter"; font-size: .875rem; font-weight: 500;
+    line-height: 1.35; letter-spacing: .025em;
+  }
+  .hostname-lead {
+    color: var(--ink);
+    font-weight: 620;
+  }
+  .hostname-rest { color: var(--muted); }
+
+  /* A little separation below the instance name, without changing the
+     virtual table's one-to-one mapping from scrollTop to row index. */
+  #app { padding-top: .25rem; }
+
+  /* Controls: one look, and never smaller than a comfortable tap. */
+  input, button, select {
+    font-family: var(--ui);
+    font-size: 1rem; /* iOS zooms the page on focus below 16px. */
+    color: inherit;
+    border: 1px solid var(--rule);
+    border-radius: .4rem;
+    background: var(--bg);
+    padding: .45rem .6rem;
+    min-height: var(--tap);
+  }
+  button {
+    background: var(--surface);
+    cursor: pointer;
+    padding-inline: .9rem;
+    white-space: nowrap;
+  }
+  button:hover { border-color: var(--muted); }
+  button:active { transform: translateY(1px); }
+  button.danger { color: var(--bad); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* The account button floats over the list's top-right corner. The list
+     gets matching top padding so the first row's badge never sits under it.
+     The events button sits just left of it: live activity, one tap away. */
+  .accountbutton {
+    position: fixed; top: .6rem; right: max(.6rem, calc((100vw - 46rem) / 2));
+    z-index: 2; background: var(--bg); border-color: var(--rule-soft);
+  }
+  .eventsbutton {
+    position: fixed; top: .6rem; right: calc(max(.6rem, calc((100vw - 46rem) / 2)) + var(--tap) + .35rem);
+    z-index: 2; background: var(--bg); border-color: var(--rule-soft);
+  }
+  .iconbutton {
+    display: inline-flex; align-items: center; justify-content: center; gap: .35rem;
+    min-width: var(--tap); min-height: var(--tap);
+    padding: .25rem .5rem; border-radius: .5rem;
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+  }
+  .iconbutton:hover { background: var(--surface); border-color: var(--rule); color: var(--ink); }
+  #account-dot { margin: 0; }
+  .accountnav { display: flex; gap: 1rem; padding-bottom: .9rem; margin-bottom: .3rem; border-bottom: 1px solid var(--rule-soft); }
+  .accountnav a { font-weight: 550; text-decoration: none; }
+  .accountnav a:hover { text-decoration: underline; }
+
+  /* Status and live feed (inside the account modal) */
+  .status { font-size: .875rem; }
+  .status-line { margin: 0 0 .5rem; font-weight: 600; }
+  .status-dot {
+    display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
+    background: var(--muted); flex: none;
+  }
+  .status.good #account-dot, .status-dot.good { background: var(--accent); }
+  .status.warn #account-dot, .status-dot.warn { background: var(--warn); }
+  .status.bad #account-dot, .status-dot.bad { background: var(--bad); }
+  .status ul { margin: .5rem 0 1rem; padding-left: 1.25rem; }
+  .status li { margin: .15rem 0; }
+  .live-list {
+    font-size: .8rem;
+    max-height: 40vh; overflow-y: auto; margin: .5rem 0 0; padding-left: 1.5rem;
+  }
+  .live-list li { margin: .2rem 0; }
+  .event-time { color: var(--muted); margin-right: .4rem; }
+  .event-failing { color: var(--bad); }
+  /* The events sheet is the dedicated live view, so its list gets the room. */
+  .events-list { max-height: 70vh; }
+
+  /* Modals. A native dialog gives focus trapping and Esc for free. */
+  .modal {
+    width: min(42rem, 100vw - 2rem);
+    max-height: min(85vh, 60rem);
+    padding: 0; border: 1px solid var(--rule); border-radius: .75rem;
+    background: var(--bg); color: var(--ink);
+    box-shadow: 0 12px 40px rgb(0 0 0 / .28);
+    overflow: hidden;
+  }
+  .modal::backdrop { background: rgb(0 0 0 / .45); }
+  .modal-head {
+    display: flex; align-items: center; gap: .75rem;
+    padding: .85rem 1.1rem; border-bottom: 1px solid var(--rule-soft);
+    position: sticky; top: 0; background: var(--bg);
+  }
+  .modal-head h2 { flex: 1 1 auto; margin: 0; font-size: 1.15rem; }
+  .day-search { display: flex; align-items: center; gap: .25rem; flex: 1 1 16rem; min-width: 0; }
+  .day-search input { width: 100%; min-width: 0; min-height: 2.2rem; padding: .3rem .45rem; }
+  .day-search button { min-width: 2.2rem; min-height: 2.2rem; padding: .25rem; }
+  #day-search-count { min-width: 2.8rem; color: var(--muted); font-size: .75rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  mark.day-match { background: color-mix(in srgb, var(--warn) 35%, transparent); color: inherit; border-radius: .15rem; }
+  mark.day-match.current { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .modal-body { padding: 1rem 1.1rem 1.5rem; overflow-y: auto; max-height: calc(85vh - 4rem); }
+  .modal-body h3 { margin-top: 1.25rem; }
+    .day-map-wrap { margin: 0 0 1rem; }
+    .day-map { height: 300px; border-radius: 12px; overflow: hidden; background: #e2e8f0; }
+    .place-chip {
+      display: inline-block; margin-left: 0.5rem; padding: 0.1rem 0.55rem;
+      font-size: 0.72rem; font-weight: 600; line-height: 1.5; border-radius: 999px;
+      background: #eef2ff; color: #3730a3; vertical-align: middle; white-space: nowrap;
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; background: var(--bg); color: var(--fg);
-      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text",
-        "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  @media (max-width: 34rem) {
+    /* Full-bleed sheet on a phone: more room, and a familiar shape. */
+    .modal {
+      width: 100vw; max-width: 100vw; max-height: 92vh;
+      margin: auto auto 0; border-radius: .9rem .9rem 0 0; border-bottom: 0;
     }
-    main { max-width: 44rem; margin: 0 auto; padding: 1rem 1.25rem 4rem; }
-    a { color: var(--accent); }
-    .site-header {
-      display: flex; align-items: baseline; gap: 1rem;
-      max-width: 44rem; margin: 0 auto; padding: 1.25rem 1.25rem 0;
-    }
-    .site-header h1 { font-size: 1.35rem; margin: 0; letter-spacing: -.01em; }
-    .site-header nav { display: flex; gap: 1rem; margin-left: auto; align-items: baseline; }
-    .site-header nav a { font-weight: 600; text-decoration: none; }
-    .site-header nav a:hover { text-decoration: underline; }
-    .icon-button {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 2rem; height: 2rem; padding: 0; border-radius: 999px;
-      color: var(--muted); background: none; border: 0; cursor: pointer;
-    }
-    .icon-button:hover { color: var(--fg); background: var(--line); }
-    .icon-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .icon-button svg { display: block; }
-    .day article, article.day {
-      background: var(--card); border: 1px solid var(--line);
-      border-radius: 14px; padding: 1.1rem 1.25rem; margin: 0 0 1rem;
-    }
-    .day h2 { font-size: 1.12rem; margin: 0 0 .35rem; letter-spacing: -.01em; }
-    .day h2 a { color: inherit; text-decoration: none; }
-    .day h2 a:hover { color: var(--accent); }
-    .day .meta { color: var(--muted); font-size: .82rem; margin: 0 0 .6rem; }
-    .md h3 { font-size: 1rem; margin: 1.1rem 0 .3rem; }
-    .md h3:first-child { margin-top: 0; }
-    .md p { margin: .45rem 0; }
-    .empty { color: var(--muted); text-align: center; margin-top: 3rem; }
-    .load-more { text-align: center; margin: 1.5rem 0 0; }
-    .card {
-      background: var(--card); border: 1px solid var(--line);
-      border-radius: 14px; padding: 1.1rem 1.25rem; margin: 0 0 1rem;
-    }
-    .card h2 { font-size: 1.05rem; margin: 0 0 .6rem; }
-    form.stack { display: grid; gap: .7rem; }
-    label { display: grid; gap: .25rem; font-weight: 600; font-size: .9rem; }
-    input, select {
-      font: inherit; font-weight: 400; padding: .45rem .6rem;
-      border: 1px solid var(--line); border-radius: 8px;
-      background: var(--input); color: var(--fg); width: 100%;
-    }
-    button {
-      font: inherit; font-weight: 600; padding: .5rem 1rem; border: 0;
-      border-radius: 999px; background: var(--accent); color: var(--accent-fg);
-      cursor: pointer;
-    }
-    button.secondary {
-      background: none; color: var(--accent);
-      border: 1px solid var(--line);
-    }
-    .form-error { color: #b3261e; font-size: .9rem; margin: 0; }
-    .form-ok { color: #256029; font-size: .9rem; margin: 0; }
-    dialog {
-      border: 1px solid var(--line); border-radius: 14px; padding: 0;
-      background: var(--card); color: var(--fg);
-      width: min(26rem, calc(100vw - 2rem));
-    }
-    dialog::backdrop { background: rgba(20, 16, 8, .45); }
-    .dialog-body { padding: 1.25rem; display: grid; gap: .9rem; }
-    .dialog-body h2 { margin: 0; font-size: 1.15rem; }
-    .dialog-body p { margin: 0; }
-    .dialog-actions { display: flex; gap: .6rem; justify-content: flex-end; }
-    .account-line { display: flex; align-items: center; gap: .5rem; }
-    .status-dot { width: .55rem; height: .55rem; border-radius: 999px; background: var(--muted); flex: none; }
-    .status-dot.on { background: #2e9e4f; }
-    .passkey-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
-    .passkey-list li {
-      display: flex; align-items: center; gap: .6rem;
-      border: 1px solid var(--line); border-radius: 10px; padding: .5rem .7rem;
-    }
-    .passkey-list .pk-name { font-weight: 600; overflow-wrap: anywhere; }
-    .passkey-list .pk-meta { color: var(--muted); font-size: .8rem; margin-left: auto; text-align: right; flex: none; }
-    .delegations { display: grid; gap: .9rem; }
-    .delegation { border-top: 1px solid var(--line); padding-top: .9rem; display: grid; gap: .45rem; }
-    .delegation:first-child { border-top: 0; padding-top: 0; }
-    .delegation h3 { margin: 0; font-size: .98rem; }
-    .delegation p { margin: 0; font-size: .9rem; }
-    .delegation .muted, .muted { color: var(--muted); }
-    .delegation code {
-      font-size: .78rem; background: var(--bg); border: 1px solid var(--line);
-      border-radius: 6px; padding: .1rem .35rem; overflow-wrap: anywhere;
-    }
-    .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-    .token-line { display: flex; gap: .5rem; }
-    .token-line code {
-      flex: 1; overflow-x: auto; white-space: nowrap; align-self: center;
-      font-size: .8rem; background: var(--bg); border: 1px solid var(--line);
-      border-radius: 8px; padding: .45rem .6rem;
-    }
-    .events-wrap { width: min(58rem, calc(100vw - 2rem)); }
-    .events-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .6rem; max-height: 65vh; overflow: auto; }
-    .events-list li { border: 1px solid var(--line); border-radius: 10px; padding: .6rem .75rem; display: grid; gap: .3rem; }
-    .event-head { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
-    .event-kind { font-weight: 700; font-size: .82rem; }
-    .event-time, .event-day { color: var(--muted); font-size: .8rem; }
-    .event-summary { font-size: .9rem; overflow-wrap: anywhere; }
-    .event-raw-toggle { justify-self: start; padding: 0; background: none; color: var(--accent); font-size: .82rem; }
-    .event-raw {
-      margin: 0; font-size: .72rem; line-height: 1.45; white-space: pre-wrap;
-      overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line);
-      border-radius: 8px; padding: .55rem .65rem; max-height: 18rem; overflow: auto;
-    }
-    #timeline { margin: 0 0 1rem; }
-    .tl-card {
-      background: var(--card); border: 1px solid var(--line);
-      border-radius: 14px; padding: 1rem 1.25rem;
-    }
-    .tl-head { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .6rem; }
-    .tl-title { font-weight: 700; font-size: .95rem; letter-spacing: -.01em; }
-    .tl-coverage { color: var(--muted); font-size: .82rem; margin-left: auto; }
-    .tl-track {
-      position: relative; height: 3rem; border-radius: 8px;
-      background: var(--line); overflow: hidden;
-    }
-    .tl-seg { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .8; }
-    .tl-hours { position: relative; height: 1.1rem; margin-top: .25rem; color: var(--muted); font-size: .7rem; }
-    .tl-hours span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
-    .tl-note { color: var(--muted); font-size: .82rem; margin: .6rem 0 0; }
-    .transcripts { margin-top: 1.25rem; }
-    .transcripts > summary {
-      cursor: pointer; font-weight: 600; font-size: .95rem;
-      padding: .4rem 0; color: var(--fg);
-    }
-    .transcripts > summary:hover { color: var(--accent); }
-    .turn {
-      display: flex; gap: .6rem; margin: .3rem 0; font-size: .9rem;
-      line-height: 1.5; align-items: baseline;
-    }
-    .turn .t {
-      color: var(--muted); font-size: .75rem; font-variant-numeric: tabular-nums;
-      flex: none; width: 4.2rem; text-align: right;
-    }
-    .turn .who { font-weight: 700; flex: none; min-width: 1.1rem; }
-    .turn .what { overflow-wrap: anywhere; }`;
+    .modal-head { flex-wrap: wrap; }
+    .modal-head h2 { flex: 1 1 auto; }
+    .day-search { order: 3; flex-basis: 100%; }
+    .modal-body { max-height: calc(92vh - 4rem); }
+  }
+
+  /* Days table. No page header any more, so the list starts at the top. */
+  .vtable { overflow-y: auto; height: min(84vh, 58rem); position: relative; -webkit-overflow-scrolling: touch; }
+  .vspacer { position: relative; width: 100%; }
+  .vrow { position: absolute; left: 0; right: 0; height: 100px; }
+  /* The whole row is the target, so it is a button, not a link inside text. */
+  .vrow-inner {
+    display: block; width: 100%; height: 100px; text-align: left;
+    padding: 14px .5rem; margin: 0; overflow: hidden;
+    background: none; border: 0; border-bottom: 1px solid var(--rule-soft);
+    border-radius: 0; cursor: pointer; color: inherit;
+  }
+  .vrow-inner:hover { background: var(--surface); }
+  .vrow-inner:active { transform: none; }
+  .vrow-title { display: flex; align-items: baseline; gap: .55rem; margin-bottom: .3rem; }
+  /* Tabular figures keep the compact dates in a true column. */
+  .vrow-day {
+    font-size: 1rem; font-weight: 620; letter-spacing: -.01em;
+    font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1;
+  }
+  .vrow-rel { font-size: .8rem; color: var(--muted); }
+  .vrow-audio {
+    margin-left: auto; flex: none;
+    font-size: .7rem; font-variant-numeric: tabular-nums;
+    color: var(--muted); background: var(--surface);
+    border: 1px solid var(--rule-soft); border-radius: 999px;
+    padding: .1rem .45rem;
+  }
+  .vrow-inner p { margin: 0; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vrow-inner p.preview { color: var(--ink); }
+  /* Per-day coverage timeline: a full-width 24h line, blue where audio was
+     ingested, with quiet inactive ticks at 6am, noon, and 6pm. */
+  .vrow-timeline {
+    position: relative; height: 8px; margin-top: .55rem;
+    border-radius: 999px; background: var(--rule-soft);
+  }
+  .tl-seg { position: absolute; top: 0; bottom: 0; border-radius: 999px; background: var(--tl-fill); }
+  .tl-tick { position: absolute; top: -2px; height: 12px; width: 1px; background: var(--muted); opacity: .45; }
+
+  /* Search lives above either primary main view: the days list or a result
+     set. The route swaps only the content below this header. */
+  .home-header { padding-bottom: .75rem; border-bottom: 1px solid var(--rule-soft); margin-bottom: .25rem; }
+  .search-form { display: flex; gap: .5rem; margin: 0; }
+  .search-form input { flex: 1 1 auto; min-width: 0; }
+  .search-hit { display: flex; flex-direction: column; gap: .2rem; width: 100%; text-align: left; white-space: normal; border: 0; border-bottom: 1px solid var(--rule-soft); border-radius: 0; padding: .85rem 0; background: transparent; }
+  .search-hit:hover { background: var(--surface); }
+  .search-hit-meta { color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
+
+  /* Day detail keeps the generated summary first, followed by the source
+     turns. Chunk headings behave as links to their nearest transcript time. */
+  .transcripts { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+  .transcript-jump { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-weight: inherit; text-align: left; }
+  .transcript-jump:hover { color: var(--accent); text-decoration: underline; }
+  .transcript-recording { margin: 1rem 0 1.35rem; }
+  .transcript-recording h4 { margin: 0 0 .45rem; color: var(--muted); font-size: .8rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .transcript-turn { margin: 0; padding: .42rem 0 .42rem 4.4rem; position: relative; scroll-margin-block: 5rem; }
+  .transcript-time { position: absolute; left: 0; width: 3.6rem; color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
+  .transcript-speaker { display: block; margin: 0 0 .15rem; font-weight: 650; }
+  .transcript-text { display: block; }
+
+  .transcript-legend { color: var(--bad); font-size: .78rem; font-weight: 650; }
+  .transcript-legend i { display: inline-block; width: .5rem; height: .5rem; margin-right: .25rem; border-radius: 50%; background: var(--bad); }
+  .transcript-note { margin: .25rem 0 .75rem; color: var(--muted); font-size: .76rem; }
+  .transcript-turn-own { color: var(--bad); font-weight: 560; }
+  .transcript-turn-own .transcript-speaker { color: var(--bad); }
+  .transcript-text { display: block; }
+
+  /* Places editor. The row is a wrapping grid: wide screens get one line,
+     narrow screens stack into labelled fields instead of a jumble. */
+  .pplace, .pcand { border-bottom: 1px solid var(--rule-soft); padding: 1rem 0; }
+  .prow { display: flex; gap: .5rem .6rem; flex-wrap: wrap; align-items: end; margin: .5rem 0; }
+  .pfield { display: flex; flex-direction: column; gap: .15rem; flex: 1 1 7rem; min-width: 0; }
+  .pfield-name { flex: 2 1 11rem; }
+  .pfield-narrow { flex: 0 1 6rem; }
+  .pfield span { font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .pfield input { width: 100%; }
+  .prow button { align-self: end; }
+  @media (max-width: 34rem) {
+    .pfield, .pfield-name, .pfield-narrow { flex: 1 1 100%; }
+    .prow button { width: 100%; }
+  }
+  .pcand-head { display: flex; flex-wrap: wrap; gap: .25rem .5rem; align-items: baseline; }
+  .pcand-meta { font-size: .8rem; color: var(--muted); }
+  .psave { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: 1rem 0; }
+  #place-status { font-size: .85rem; color: var(--muted); }
+  .paddr { display: flex; gap: .5rem; margin: .5rem 0; }
+  .paddr input { flex: 1 1 auto; min-width: 0; }
+
+  /* Map: a tile grid with a fixed centre pin. Clipped to its box, so the
+     tiles that overhang the edges simply do not show. */
+  .pmap {
+    position: relative; overflow: hidden; cursor: crosshair;
+    width: 100%; height: 220px; margin: .5rem 0;
+    border: 1px solid var(--rule); border-radius: .5rem;
+    background: var(--surface); touch-action: manipulation;
+  }
+  .ptiles {
+    position: absolute; top: 0; bottom: 0;
+    /* The grid is generated for the widest case (MAP_COVER) and centred, so
+       one set of tiles covers every viewport without a refetch on resize. */
+    left: 50%; width: 768px; margin-left: -384px;
+  }
+  .ptile { position: absolute; width: 256px; height: 256px; user-select: none; }
+  .ppin {
+    position: absolute; left: 50%; top: 50%; width: 14px; height: 14px;
+    margin: -7px 0 0 -7px; border-radius: 50%;
+    background: var(--bad); border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgb(0 0 0 / .5); pointer-events: none;
+  }
+  .pattrib {
+    position: absolute; right: 0; bottom: 0; z-index: 1;
+    font-size: .65rem; color: var(--ink);
+    background: rgb(255 255 255 / .75); padding: .1rem .3rem; border-top-left-radius: .3rem;
+  }
+  @media (prefers-color-scheme: dark) { .pattrib { background: rgb(0 0 0 / .6); } }
+
+  .skel { height: .9rem; margin: .2rem 0; background: var(--rule-soft); border-radius: .2rem; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+`;
 
 interface IconSet {
   readonly manifest?: string;
@@ -688,72 +905,42 @@ const iconSet = (bucket: JournalBucket): Effect.Effect<IconSet> =>
     return iconSetCache;
   });
 
+/** Pages.tsx `Layout`, byte-exact: no whitespace between elements,
+ * icon links in the server's order (manifest, svg, ico, apple), the
+ * title after them, and a deferred classic script at the body's end. */
 const layout = (
   icons: IconSet,
   title: string,
   body: string,
   scriptSrc?: string,
 ): string =>
-  `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">` +
+  `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
   `<meta name="viewport" content="width=device-width, initial-scale=1">` +
   `<meta name="theme-color" content="#0f172a">` +
-  `<title>${esc(title)}</title>` +
   (icons.manifest
     ? `<link rel="manifest" href="/icons/${esc(icons.manifest)}">`
     : "") +
   (icons.svg
     ? `<link rel="icon" type="image/svg+xml" href="/icons/${esc(icons.svg)}">`
     : "") +
-  (icons.ico ? `<link rel="icon" href="/icons/${esc(icons.ico)}">` : "") +
+  (icons.ico
+    ? `<link rel="icon" type="image/x-icon" href="/icons/${esc(icons.ico)}">`
+    : "") +
   (icons.apple
     ? `<link rel="apple-touch-icon" href="/icons/${esc(icons.apple)}">`
     : "") +
-  `<style>${STYLE}</style>\n</head>\n<body>${body}` +
-  (scriptSrc ? `<script type="module" src="${esc(scriptSrc)}"></script>` : "") +
-  `</body>\n</html>\n`;
+  `<title>${esc(title)}</title>` +
+  `<style>${STYLE}</style></head><body>${body}` +
+  (scriptSrc ? `<script src="${esc(scriptSrc)}" defer></script>` : "") +
+  `</body></html>`;
 
-/** The SPA shell, ported from Pages.tsx `spaHome`. The client script
- * hydrates everything; the server-rendered content is the frame. */
+/** The SPA shell: Pages.tsx `spaHome`, transcribed byte-for-byte
+ * (the parity harness byte-compares it against medina-dev's shell).
+ * Static markup — all journal data arrives over the RPC. */
 const spaHome = (icons: IconSet): string =>
-  layout(
-    icons,
-    "Medina",
-    `<header class="site-header"><h1>Medina</h1><nav>` +
-      `<button class="icon-button" id="events-button" type="button" aria-haspopup="dialog" title="Recent events" hidden>` +
-      `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
-      `<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path>` +
-      `<path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path></svg>` +
-      `<span class="sr">Recent events</span></button>` +
-      `<button id="account-button" type="button">Sign in</button>` +
-      `</nav></header>` +
-      `<main id="app" aria-live="polite"></main>` +
-      `<dialog id="account-dialog" aria-labelledby="account-title"><div class="dialog-body">` +
-      `<h2 id="account-title">Account</h2>` +
-      `<p class="account-line"><span className="status-dot" id="account-dot"></span><span id="account-status">Checking sign-in…</span></p>` +
-      `<div id="sign-in-panel"><p class="muted">Sign in with the passkey on this device. Your journal stays on this server — sign-in only proves the browser is yours.</p>` +
-      `<div class="dialog-actions"><button class="secondary" id="sign-in-close" type="button">Close</button><button id="sign-in-start" type="button">Sign in with passkey</button></div></div>` +
-      `<div id="signed-in-panel" hidden><div id="passkeys-panel"><h3 class="sr">Passkeys</h3><ul class="passkey-list" id="passkey-list"></ul>` +
-      `<p class="form-error" id="passkey-error" hidden></p>` +
-      `<div class="dialog-actions"><button class="secondary" id="add-passkey" type="button">Add a passkey</button></div></div>` +
-      `<div id="delegations-panel"><h3>Delegated agents</h3><p class="muted">Agents you have authorized to act for you. Revoking takes effect immediately.</p>` +
-      `<div class="delegations" id="delegation-list"></div>` +
-      `<p class="form-error" id="delegation-error" hidden></p>` +
-      `<form class="stack" id="mint-form"><label>Label<input id="mint-label" maxlength="120" placeholder="Mark — laptop" autocomplete="off"></label>` +
-      `<label>Access<select id="mint-preset"><option value="read">Read the journal</option><option value="read-write">Read and write</option><option value="admin">Administer this server</option></select></label>` +
-      `<label>Expires<select id="mint-expiry"><option value="7776000">90 days</option><option value="2592000">30 days</option><option value="31536000">1 year</option><option value="never">Never</option></select></label>` +
-      `<div id="mint-result" hidden><p>Give this token to the agent. It is shown once — the server keeps only a hash.</p>` +
-      `<div class="token-line"><code id="mint-token"></code><button class="secondary" id="mint-copy" type="button">Copy</button></div></div>` +
-      `<div class="dialog-actions"><button class="secondary" id="delegate-close" type="button">Close</button><button id="mint-submit" type="submit">Mint token</button></div></form></div>` +
-      `<div class="dialog-actions"><button class="secondary" id="account-close" type="button">Close</button><button class="secondary" id="sign-out" type="button">Sign out</button></div></div>` +
-      `</div></dialog>` +
-      `<dialog id="events-dialog" aria-labelledby="events-title"><div class="dialog-body events-wrap">` +
-      `<h2 id="events-title">Recent events</h2>` +
-      `<p class="muted" id="events-status">Listening for events…</p>` +
-      `<ul class="events-list" id="events-list"></ul>` +
-      `<div class="dialog-actions"><button class="secondary" id="events-close" type="button">Close</button></div>` +
-      `</div></dialog>`,
-    "/app.js",
-  );
+  layout(icons, "Medina", SPA_BODY, "/app.js");
+
+const SPA_BODY = `<header class="site-header"><h1 id="hostname" class="hostname" aria-label="Hostname"><span id="hostname-lead" class="hostname-lead"></span><span id="hostname-rest" class="hostname-rest"></span></h1></header><button type="button" id="account-open" class="iconbutton accountbutton" aria-label="Account and status" aria-haspopup="dialog"><span className="status-dot" id="account-dot"></span><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7"></circle><path d="M4.5 20c0-4.1 3.4-6.4 7.5-6.4s7.5 2.3 7.5 6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg></button><button type="button" id="events-open" class="iconbutton eventsbutton" aria-label="Live events" aria-haspopup="dialog"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M2.5 12h4l2.5-6.5 4 13 2.5-6.5h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path></svg></button><main id="app"><p class="empty">Loading…</p></main><noscript><p class="empty">The journal loads over a typed RPC and needs JavaScript.</p></noscript><dialog id="account-modal" class="modal" aria-labelledby="account-title"><div class="modal-head"><h2 id="account-title">Account</h2><button type="button" class="iconbutton" data-close-modal aria-label="Close">✕</button></div><div class="modal-body"><nav class="accountnav"><a href="#/places" data-close-modal>Places</a><a href="/devices" data-close-modal>Devices</a></nav><div class="status" id="pipeline-status"><p id="status-summary" class="status-line">Checking data flow…</p><div id="status-details"></div></div><h3>Live events</h3><ol id="live-event-list" class="live-list"><li class="empty">Waiting for events…</li></ol></div></dialog><dialog id="events-modal" class="modal" aria-labelledby="events-title"><div class="modal-head"><h2 id="events-title">Events</h2><button type="button" class="iconbutton" data-close-modal aria-label="Close">✕</button></div><div class="modal-body"><ol id="events-list" class="live-list events-list"><li class="empty">Waiting for events…</li></ol></div></dialog><dialog id="day-modal" class="modal" aria-labelledby="day-title"><div class="modal-head"><h2 id="day-title"></h2><form id="day-search" class="day-search" role="search"><input id="day-search-query" type="search" placeholder="Search this day" aria-label="Search this day"><button type="button" id="day-search-prev" aria-label="Previous match">↑</button><button type="button" id="day-search-next" aria-label="Next match">↓</button><span id="day-search-count" role="status"></span></form><button type="button" class="iconbutton" data-close-modal aria-label="Close">✕</button></div><div class="modal-body" id="day-body"></div></dialog>`;
 
 const parseDayId = (value: string): string | null => {
   const dashed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -770,19 +957,23 @@ const dayIdLabel = (day: string): string => {
   return `0${year}${month}${date}`;
 };
 
+/** Pages.tsx `Report`, byte-exact: blocks split on blank lines; a
+ * block opening with `## ` becomes an <h3> plus a <p> of its lines;
+ * lines inside a <p> are separated by <br> (none trailing). */
 const renderReport = (text: string): string =>
   text
     .split(/\n\s*\n/)
-    .filter((block) => block.trim())
+    .filter(Boolean)
     .map((block) => {
-      // Pages.tsx renders every line followed by <br>, last included.
       const linesHtml = (lines: ReadonlyArray<string>): string =>
-        lines.map((line) => `${esc(line)}<br>`).join("");
-      const [first = "", ...lines] = block.split("\n");
-      if (first && first.startsWith("## ")) {
+        lines
+          .map((line, index) => `${index > 0 ? "<br>" : ""}${esc(line)}`)
+          .join("");
+      const [first = "", ...rest] = block.split("\n");
+      if (first.trim().startsWith("## ")) {
         return (
-          `<h3>${esc(first.replace(/^##\s+/, ""))}</h3>` +
-          (lines.length > 0 ? `<p>${linesHtml(lines)}</p>` : "")
+          `<h3>${esc(first.trim().replace(/^##\s+/, ""))}</h3>` +
+          (rest.length > 0 ? `<p>${linesHtml(rest)}</p>` : "")
         );
       }
       return `<p>${linesHtml(block.split("\n"))}</p>`;
@@ -794,21 +985,25 @@ const dayPage = (icons: IconSet, journal: Journal): string =>
     icons,
     `Medina — ${dayIdLabel(journal.day)}`,
     `<header><h1>${esc(dayIdLabel(journal.day))}</h1><p><a href="/">All days</a></p></header>` +
-      `<main><article class="day" data-day="${esc(journal.day)}"><div class="day-body md">${renderReport(journal.report)}</div></article></main>`,
+      `<main>${
+        journal.report
+          ? renderReport(journal.report)
+          : `<p class="empty">Nothing recorded.</p>`
+      }</main>`,
   );
 
 const pendingPage = (icons: IconSet, day: string): string =>
   layout(
     icons,
-    `Medina — ${day}`,
-    `<header><h1>${esc(day)}</h1><p><a href="/">All days</a></p></header>` +
-      `<main><p class="empty">This day's journal is still being written. Check back shortly.</p></main>`,
+    `Medina — ${dayIdLabel(day)}`,
+    `<header><h1>${esc(dayIdLabel(day))}</h1><p><a href="/">All days</a></p></header>` +
+      `<main><p class="empty">writing…</p></main>`,
   );
 
 
 // ---------------------------------------------------------------------------
 // RPC: the repo's own JournalsGroup, served from the read model. The
-// bundle carries exactly one copy of effect (see the resolve plugin
+// bundle carries exactly one copy of effect (see the resolve alias
 // in alchemy.run.ts), so the group/schema classes the client protocol
 // names are the same instances this server decodes with.
 // ---------------------------------------------------------------------------
@@ -835,7 +1030,14 @@ const loadPlaces = (
 
 const makeHandlers = (bucket: JournalBucket) =>
   JournalsGroup.toLayer({
-    ListDays: () => Effect.map(readModel(bucket), (model) => model.rows),
+    ListDays: ({ limit, offset }) =>
+      Effect.map(readModel(bucket), (model) => {
+        // Same windowing as the server's handler.
+        const start = offset ?? 0;
+        const end =
+          limit === undefined ? model.rows.length : start + limit;
+        return model.rows.slice(start, end);
+      }),
     ListJournals: ({ limit }) =>
       Effect.map(readModel(bucket), (model) => {
         const staleByDay = new Map(
@@ -852,14 +1054,20 @@ const makeHandlers = (bucket: JournalBucket) =>
           );
         return limit === undefined ? entries : entries.slice(0, limit);
       }),
-    // GetJournal's success is NullOr(Journal): a day with no journal
-    // is a null, not an error (the server reserves its 202-pending
-    // dance for the HTML page, not this RPC).
+    // GetJournal mirrors the server's `journalCachedForDay`: the
+    // current-input journal when it is on disk, null when the day
+    // is stale or its journal has not been generated yet, and the
+    // transient empty journal for a day with no inputs at all.
+    // (Success is NullOr(Journal) — absence is a null, not an
+    // error.) The stale signal is the server's own, from its
+    // persisted day snapshot.
     GetJournal: ({ day }) =>
-      Effect.map(
-        readModel(bucket),
-        (model) => model.journals.get(day) ?? null,
-      ),
+      Effect.map(readModel(bucket), (model) => {
+        if (staleDay(model, day)) return null;
+        const journal = model.journals.get(day) ?? null;
+        if (journal !== null) return journal;
+        return hasInputs(model, day) ? null : emptyJournal(day);
+      }),
     GetDayTranscripts: ({ day }) => dayTranscripts(bucket, day),
     GetStatus: () => Effect.map(readModel(bucket), rpcStatus),
     SearchTranscripts: () => notMoved("transcript search"),
@@ -876,39 +1084,57 @@ const makeHandlers = (bucket: JournalBucket) =>
       ),
   });
 
-type RpcApp = (request: Request) => Promise<Response>;
-
-let rpcAppPromise: Promise<RpcApp> | null = null;
-
-const rpcApp = (bucket: JournalBucket): Promise<RpcApp> => {
-  if (rpcAppPromise === null) {
-    rpcAppPromise = (async () => {
-      // One long-lived scope for the protocol server, mirroring how
-      // the bun server's layerHttp keeps its server alive.
-      const scope: Scope.Scope = Scope.makeUnsafe();
-      const httpEffect = await Effect.runPromise(
-        RpcServer.toHttpEffect(JournalsGroup).pipe(
-          Effect.provide(makeHandlers(bucket)),
-          Effect.provide(RpcSerialization.layerNdjson),
-          Effect.provideService(Scope.Scope, scope),
-        ),
-      );
-      return async (request: Request): Promise<Response> => {
-        const response = await Effect.runPromise(
-          httpEffect.pipe(
+/**
+ * Serve one RPC request. The protocol server is built per request,
+ * inside the request's own scope: RpcServer forks its server loop
+ * into the build scope, and on Workers a loop forked during one
+ * fetch event is not guaranteed to survive into the next. Building
+ * per request costs a few layer constructions (no I/O; the
+ * expensive part, the bucket reads, is cached in the read model)
+ * and keeps every lifetime inside the one event workerd
+ * guarantees: this request. The response stream is likewise
+ * drained here rather than handed to the runtime as a web body.
+ */
+const serveRpc = (
+  bucket: JournalBucket,
+  request: Request,
+): Effect.Effect<Response> =>
+  Effect.promise(async () => {
+    const response = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const httpEffect = yield* RpcServer.toHttpEffect(
+            JournalsGroup,
+          ).pipe(
+            Effect.provide(makeHandlers(bucket)),
+            Effect.provide(RpcSerialization.layerNdjson),
+          );
+          const res = yield* httpEffect.pipe(
             Effect.provideService(
               HttpServerRequest.HttpServerRequest,
               HttpServerRequest.fromWeb(request),
             ),
-            Effect.provideService(Scope.Scope, scope),
-          ),
-        );
-        return HttpServerResponse.toWeb(response);
-      };
-    })();
-  }
-  return rpcAppPromise;
-};
+          );
+          if (res.body._tag !== "Stream") return res;
+          const chunks = yield* Stream.runCollect(res.body.stream);
+          const bytes = new Uint8Array(
+            chunks.reduce((sum, chunk) => sum + chunk.length, 0),
+          );
+          let offset = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.length;
+          }
+          return HttpServerResponse.uint8Array(bytes, {
+            status: res.status,
+            statusText: res.statusText,
+            headers: res.headers,
+          });
+        }),
+      ),
+    );
+    return HttpServerResponse.toWeb(response);
+  });
 
 // ---------------------------------------------------------------------------
 // The gate and the routes
@@ -1021,8 +1247,7 @@ export const handleJournal = (
 
     if (path === "/rpc") {
       if (request.method !== "POST") return notFound();
-      const app = yield* Effect.promise(() => rpcApp(bucket));
-      return yield* Effect.promise(() => app(request));
+      return yield* serveRpc(bucket, request);
     }
 
     if (request.method !== "GET") return notFound();
@@ -1062,38 +1287,65 @@ export const handleJournal = (
         headers: { "content-type": "application/json" },
       });
     }
-    // /journal/:day
+    // /journal/:day — the server's handler shape: HTML when the
+    // Accept header asks for it, the journal record otherwise; a
+    // day whose current journal is not on disk (stale, or inputs
+    // with no generation yet) answers 202 pending in both
+    // representations; a day with no inputs at all answers the
+    // transient empty journal. Cache headers mirror the server's:
+    // settled past days cache for a day, everything else a minute.
     const dayParam = decodeURIComponent(path.slice("/journal/".length));
     const day = parseDayId(dayParam);
     if (day === null) {
-      return new Response("Invalid day", { status: 400 });
+      return new Response("not a day: use 020260907 or 2026-09-07", {
+        status: 400,
+      });
     }
     const model = yield* readModel(bucket);
+    const wantsHtml = (request.headers.get("accept") ?? "").includes(
+      "text/html",
+    );
     const journal = model.journals.get(day) ?? null;
-    const accept = request.headers.get("accept") ?? "";
-    const wantsJson =
-      accept.includes("application/json") &&
-      (!accept.includes("text/html") || url.searchParams.has("format"));
-    if (journal === null) {
-      if (wantsJson) {
+    const served =
+      journal !== null && staleDay(model, day)
+        ? null
+        : journal ??
+          (hasInputs(model, day) ? null : emptyJournal(day));
+    if (served === null) {
+      if (!wantsHtml) {
         return new Response(JSON.stringify({ status: "pending", day }), {
           status: 202,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "cache-control": "private, max-age=60",
+          },
         });
       }
       const icons = yield* iconSet(bucket);
-      return new Response(pendingPage(icons, dayParam), {
+      return new Response(pendingPage(icons, day), {
         status: 202,
-        headers: { "content-type": "text/html; charset=utf-8" },
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "private, max-age=60",
+        },
       });
     }
-    if (wantsJson) {
-      return new Response(JSON.stringify(journal), {
-        headers: { "content-type": "application/json" },
+    const today = new Date().toISOString().slice(0, 10);
+    const cacheControl =
+      served.day < today ? "private, max-age=86400" : "private, max-age=60";
+    if (!wantsHtml) {
+      return new Response(JSON.stringify(served), {
+        headers: {
+          "content-type": "application/json",
+          "cache-control": cacheControl,
+        },
       });
     }
     const icons = yield* iconSet(bucket);
-    return new Response(dayPage(icons, journal), {
-      headers: { "content-type": "text/html; charset=utf-8" },
+    return new Response(dayPage(icons, served), {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": cacheControl,
+      },
     });
   });

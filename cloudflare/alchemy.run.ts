@@ -56,11 +56,14 @@ export const CaptureIn = Cloudflare.R2.Bucket("CaptureIn", {
 // Milestone 4: the Worker bundle imports the repo's own schema
 // modules (lib/lifelog/JournalApi.ts and friends), which resolve
 // `effect` to the repo-root install (4.0.0) while this package pins
-// effect 4.0.5. Two copies of effect in one bundle would break the
-// schema/RPC class identity the client protocol relies on, so this
-// rolldown plugin pins every `effect` / `effect/*` specifier — from
-// any importer — to this package's single copy, resolving subpaths
-// against its dist tree the way its exports map does.
+// effect 4.0.5. Two copies of effect in one bundle break the RPC
+// codec's class handling (a 4.0.0 DayRow encodes as a defect
+// through the 4.0.5 JSON codec), so every `effect` / `effect/*`
+// specifier — from any importer — is aliased to this package's
+// single copy, via the build.input.resolve.alias mechanism
+// Alchemy documents for module replacement. Subpaths land on the
+// dist tree the package's exports map points at; the resolver
+// supplies the .js extension.
 const effectDist = [
   fileURLToPath(new URL("./node_modules/effect/dist", import.meta.url)),
   join(process.cwd(), "node_modules/effect/dist"),
@@ -68,26 +71,6 @@ const effectDist = [
 if (effectDist === undefined) {
   throw new Error("cannot locate this package's effect/dist for bundling");
 }
-const probeEffectFile = (base: string): string | null => {
-  for (const candidate of [
-    `${base}.js`,
-    `${base}.mjs`,
-    join(base, "index.js"),
-  ]) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-};
-const singleEffectCopy = {
-  name: "single-effect-copy",
-  resolveId(source: string): string | null {
-    if (source === "effect") return join(effectDist, "index.js");
-    if (source.startsWith("effect/")) {
-      return probeEffectFile(join(effectDist, source.slice("effect/".length)));
-    }
-    return null;
-  },
-};
 
 export const Api = Cloudflare.Worker("Api", {
   main: "./src/worker.ts",
@@ -96,7 +79,17 @@ export const Api = Cloudflare.Worker("Api", {
     // The analyzer output is the parity evidence that the bundle
     // carries exactly one copy of effect (see §4.3).
     bundleAnalyzer: true,
-    input: { plugins: [singleEffectCopy] },
+    input: {
+      resolve: {
+        alias: {
+          // Exact-match key for the bare specifier; the prefix
+          // key rewrites every effect/* subpath onto the dist
+          // tree (the resolver supplies the .js extension).
+          "effect$": join(effectDist, "index.js"),
+          effect: effectDist,
+        },
+      },
+    },
   },
   // No explicit `name`: Alchemy derives a stage-scoped physical name
   // (stage dev produced medina-api-dev-<suffix>), which cannot collide

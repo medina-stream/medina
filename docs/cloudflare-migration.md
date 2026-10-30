@@ -1,7 +1,10 @@
 # Medina on Cloudflare: migration plan
 
 Status: milestone 4 in progress (§4.3) — milestones 1–3 done,
-milestone 3's fresh-capture follow-up closed Oct 30 (§4.2).
+milestone 3's fresh-capture follow-up closed Oct 30 (§4.2);
+milestone 4 step 1 (journal serving on the Worker) done Oct 30,
+pipeline-stage cutovers next, each gated on its Secrets Store /
+index-token prerequisites (§4.3).
 Milestone 1 (plan + scaffold + policy-serving proof) completed
 Oct 27, 2026.
 Decision (Scott, Oct 27): Medina leaves exe.dev. Development stays on the
@@ -680,6 +683,78 @@ is the fallback and keeps running.
   equality, `GetDayTranscripts` turn equality for a sampled day,
   `/status` totals and last-run equality — using a dedicated,
   revocable check token, revoked when the pass ends.
+
+### Step 1 result (Oct 30) — journal serving DONE
+
+The Worker now serves the journal (shell, day pages, `/status`,
+and the read RPCs) from the bucket with content parity against
+medina-dev. Two defects had to be found and fixed first; both are
+recorded here because they are exactly the failure shapes this
+migration keeps producing.
+
+- **Two-effect-copies bundle (the RPC defect).** As first built,
+  `ListDays`/`ListJournals`/`GetStatus`/`GetDayTranscripts`
+  answered every request with an RPC `Failure [Die]` while
+  `GetJournal` worked. Root cause: the bundle silently contained
+  **two copies of effect** — the lib modules' `effect` imports
+  resolved to the repo-root install (4.0.0) while the Worker's own
+  code used this package's 4.0.5 — because the pinning plugin had
+  been passed as `build.input.plugins`, a slot Alchemy does not
+  consume (it was ignored without a word). A 4.0.0 `DayRow`
+  encodes as a defect through the 4.0.5 JSON codec (its Number
+  fields demand `"Infinity" | "NaN"` literals); `Journal` has no
+  Number fields, which is why `GetJournal` alone survived. Fix:
+  the documented mechanism, `build.input.resolve.alias`
+  (`{ "effect$": <dist>/index.js, effect: <dist> }`). Verified in
+  the bundle's source map: 124 sources, zero root-copy effect
+  modules (the earlier "single copy" reading of the analyzer
+  output was wrong — its relative paths hid the second tree).
+- **Selection and page-state parity.** The first read model
+  picked each day's journal by R2 upload order — wrong twice
+  over: the milestone-3 converge pass re-uploaded generations in
+  key order (68 of 116 reports mismatched), and the server's
+  day page / `GetJournal` follow `journalCachedForDay`, under
+  which a stale day has *no* servable journal (RPC null, page
+  202 pending). The read model now picks newest by the journal's
+  own `generatedAt` (the `currentJournals` rule; every candidate
+  is fetched, only the winner decoded), takes the stale signal
+  from the server's own persisted snapshot, and mirrors the
+  pending/empty-journal/cache-header shapes exactly. The page
+  renderers were also re-ported byte-faithfully from the current
+  `Pages.tsx` (the first port had drifted to an older design).
+- **Parity evidence** (final harness run, 19 checks, dedicated
+  token minted and revoked in-run): **17 pass** — `ListDays`
+  full + window (116 rows, payload-equal), `ListJournals`
+  reports 116/116 with 0 mismatches and 0 stale-flag mismatches,
+  `GetJournal` on a stale day (both null), a settled recent day,
+  and a 2021 day, `GetDayTranscripts` turn equality (523 turns;
+  and 0/0), `ListPlaces`, shell **byte-identical** (18,527 B,
+  same sha), a settled day page byte-identical in HTML and JSON,
+  `/app.js` and the font byte-equal, gate fail-closed (anonymous
+  and revoked-token 404s). **2 fail, one root cause, accepted
+  divergence:** `GetStatus` totals. The server computes totals
+  over `journalCachedInstances` against its *current day-index
+  window* (stable at 8 days / 179 transcripts during these runs)
+  using per-day instance keys derived from live movement/note
+  basis hashes — not reproducible from bucket artifacts. The
+  Worker's totals are corpus-wide over the server-persisted
+  snapshot (116 days / 1,768 transcripts); the `lastRun` window
+  matches to the millisecond in both checks. Unifying this is
+  part of the step-8 resource redesign (§2), where status is
+  recomputed incrementally rather than derived per request.
+- **Cost note**: the `generatedAt` scan reads every journal
+  candidate (~2,500 objects) once per read-model build (60 s
+  isolate cache). Correctness first; the §2 index retires it.
+
+What remains of milestone 4, in the recorded order: capture loop
+(gated on an `INDEX_API_TOKEN` secret for index registration),
+star detector, archive, media-normalize and media-transcribe
+(gated on their provider secrets in the Secrets Store — none
+exist yet), gps stages, the resource-layer redesign, notes +
+journal generation, Drive sources, `/in`, the write surface, and
+finally phone cutover + medina-dev retirement. medina-dev remains
+the serving fallback and the sole pipeline runner until each
+stage's cutover is proven.
 
 ### Access + domain (staged, one open decision)
 

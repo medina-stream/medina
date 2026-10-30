@@ -15,11 +15,12 @@
     "build": {
       "bundleAnalyzer": true,
       "input": {
-        "plugins": [
-          {
-            "name": "single-effect-copy"
+        "resolve": {
+          "alias": {
+            "effect$": "/home/hatch/workspace/medina/cloudflare/node_modules/effect/dist/index.js",
+            "effect": "/home/hatch/workspace/medina/cloudflare/node_modules/effect/dist"
           }
-        ]
+        }
       }
     },
     "workersDev": true,
@@ -59,7 +60,7 @@
     ],
     "tailConsumers": [],
     "hash": {
-      "bundle": "11c51cd8bcb4fe4c7e0d6069dec3c1c4ca3b70215092f6a81ab4da0578d0fd45",
+      "bundle": "962ceca5ba024fc9180229994033f446d9664fa4dc58c1039e3e6da86abb7417",
       "metadata": "59c84afc4175914a3f1bf06be724022f5f0b557bfc09bcc3bdb46b6acae1bdaf"
     }
   },

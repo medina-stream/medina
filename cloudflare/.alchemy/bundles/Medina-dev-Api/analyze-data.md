@@ -18,7 +18,7 @@ This report helps identify bundle size issues, dependency bloat, and optimizatio
 
 | Metric | Value |
 |--------|-------|
-| Total output size | 265.7 kB |
+| Total output size | 273.2 kB |
 | Input modules | 126 |
 | Entry points | 1 |
 | Code-split chunks | 0 |
@@ -29,109 +29,109 @@ Modules sorted by bytes contributed to the output bundle. Large modules may indi
 
 | Output Bytes | % of Total | Module |
 |--------------|------------|--------|
-| 312.4 kB | 117.6% | `node_modules/effect/dist/Schema.js` |
-| 258.7 kB | 97.4% | `node_modules/effect/dist/Effect.js` |
-| 240.9 kB | 90.7% | `node_modules/effect/dist/Stream.js` |
-| 145.5 kB | 54.7% | `node_modules/effect/dist/Channel.js` |
-| 122.4 kB | 46.1% | `node_modules/effect/dist/internal/effect.js` |
-| 110.7 kB | 41.7% | `node_modules/effect/dist/Array.js` |
-| 101.8 kB | 38.3% | `node_modules/effect/dist/SchemaAST.js` |
-| 72.3 kB | 27.2% | `node_modules/effect/dist/PubSub.js` |
-| 66.6 kB | 25.1% | `node_modules/effect/dist/Layer.js` |
-| 65.0 kB | 24.5% | `node_modules/effect/dist/Iterable.js` |
-| 61.2 kB | 23.0% | `node_modules/effect/dist/DateTime.js` |
-| 56.9 kB | 21.4% | `node_modules/effect/dist/Option.js` |
-| 56.8 kB | 21.4% | `node_modules/effect/dist/SchemaGetter.js` |
-| 51.8 kB | 19.5% | `node_modules/effect/dist/Queue.js` |
-| 50.1 kB | 18.9% | `node_modules/effect/dist/SchemaTransformation.js` |
-| 48.8 kB | 18.4% | `node_modules/effect/dist/net/NetAddress.js` |
-| 45.6 kB | 17.2% | `node_modules/effect/dist/BigDecimal.js` |
-| 41.9 kB | 15.8% | `node_modules/effect/dist/Duration.js` |
-| 41.8 kB | 15.7% | `src/journal.ts` |
-| 40.3 kB | 15.2% | `node_modules/effect/dist/rpc/RpcServer.js` |
-| 38.9 kB | 14.7% | `node_modules/effect/dist/Result.js` |
-| 35.9 kB | 13.5% | `node_modules/effect/dist/Cause.js` |
-| 34.3 kB | 12.9% | `node_modules/effect/dist/SchemaParser.js` |
-| 32.8 kB | 12.3% | `node_modules/effect/dist/Predicate.js` |
-| 29.7 kB | 11.2% | `node_modules/effect/dist/http/HttpServerResponse.js` |
-| 28.2 kB | 10.6% | `node_modules/effect/dist/internal/dateTime.js` |
-| 27.8 kB | 10.5% | `node_modules/effect/dist/Record.js` |
-| 24.3 kB | 9.2% | `node_modules/effect/dist/Order.js` |
-| 24.2 kB | 9.1% | `node_modules/effect/dist/Context.js` |
-| 23.5 kB | 8.9% | `node_modules/effect/dist/http/HttpServerRequest.js` |
-| 22.7 kB | 8.6% | `node_modules/effect/dist/Deferred.js` |
-| 22.0 kB | 8.3% | `node_modules/effect/dist/Exit.js` |
-| 21.3 kB | 8.0% | `node_modules/effect/dist/Equivalence.js` |
-| 21.3 kB | 8.0% | `node_modules/effect/dist/Path.js` |
-| 21.2 kB | 8.0% | `node_modules/effect/dist/SchemaIssue.js` |
-| 21.0 kB | 7.9% | `src/worker.ts` |
-| 20.9 kB | 7.9% | `node_modules/effect/dist/MutableRef.js` |
-| 20.3 kB | 7.7% | `node_modules/effect/dist/http/HttpClientRequest.js` |
-| 19.7 kB | 7.4% | `../lib/lifelog/Resources.ts` |
-| 19.5 kB | 7.3% | `node_modules/effect/dist/Struct.js` |
-| 19.4 kB | 7.3% | `node_modules/effect/dist/Number.js` |
-| 19.0 kB | 7.2% | `node_modules/effect/dist/http/Multipart.js` |
-| 18.9 kB | 7.1% | `node_modules/effect/dist/net/Dns.js` |
-| 18.3 kB | 6.9% | `node_modules/effect/dist/References.js` |
-| 18.2 kB | 6.8% | `node_modules/effect/dist/http/Cookies.js` |
-| 16.3 kB | 6.1% | `node_modules/effect/dist/ByteSize.js` |
-| 16.2 kB | 6.1% | `node_modules/effect/dist/MutableList.js` |
-| 15.7 kB | 5.9% | `node_modules/effect/dist/Tuple.js` |
-| 15.3 kB | 5.8% | `node_modules/effect/dist/Function.js` |
-| 15.3 kB | 5.7% | `node_modules/effect/dist/rpc/RpcSerialization.js` |
-| 14.2 kB | 5.3% | `node_modules/effect/dist/internal/core.js` |
-| 13.8 kB | 5.2% | `node_modules/effect/dist/http/UrlParams.js` |
-| 13.4 kB | 5.1% | `node_modules/effect/dist/http/HttpBody.js` |
-| 13.0 kB | 4.9% | `node_modules/effect/dist/Hash.js` |
-| 12.8 kB | 4.8% | `node_modules/effect/dist/net/Host.js` |
-| 12.5 kB | 4.7% | `node_modules/effect/dist/FileSystem.js` |
-| 11.5 kB | 4.3% | `node_modules/effect/dist/ErrorReporter.js` |
-| 11.1 kB | 4.2% | `node_modules/effect/dist/Scope.js` |
-| 11.0 kB | 4.2% | `node_modules/effect/dist/Semaphore.js` |
-| 11.0 kB | 4.2% | `node_modules/effect/dist/Fiber.js` |
-| 10.9 kB | 4.1% | `node_modules/effect/dist/Equal.js` |
-| 10.4 kB | 3.9% | `node_modules/effect/dist/Formatter.js` |
-| 9.8 kB | 3.7% | `node_modules/effect/dist/rpc/Rpc.js` |
-| 9.8 kB | 3.7% | `node_modules/effect/dist/Tracer.js` |
-| 9.7 kB | 3.6% | `../lib/lifelog/JournalApi.ts` |
-| 9.4 kB | 3.5% | `node_modules/effect/dist/http/HttpServerError.js` |
+| 312.4 kB | 114.4% | `node_modules/effect/dist/Schema.js` |
+| 258.7 kB | 94.7% | `node_modules/effect/dist/Effect.js` |
+| 240.9 kB | 88.2% | `node_modules/effect/dist/Stream.js` |
+| 145.5 kB | 53.2% | `node_modules/effect/dist/Channel.js` |
+| 122.4 kB | 44.8% | `node_modules/effect/dist/internal/effect.js` |
+| 110.7 kB | 40.5% | `node_modules/effect/dist/Array.js` |
+| 101.8 kB | 37.3% | `node_modules/effect/dist/SchemaAST.js` |
+| 72.3 kB | 26.5% | `node_modules/effect/dist/PubSub.js` |
+| 66.6 kB | 24.4% | `node_modules/effect/dist/Layer.js` |
+| 65.0 kB | 23.8% | `node_modules/effect/dist/Iterable.js` |
+| 61.2 kB | 22.4% | `node_modules/effect/dist/DateTime.js` |
+| 56.9 kB | 20.8% | `node_modules/effect/dist/Option.js` |
+| 56.8 kB | 20.8% | `node_modules/effect/dist/SchemaGetter.js` |
+| 52.9 kB | 19.4% | `src/journal.ts` |
+| 51.8 kB | 19.0% | `node_modules/effect/dist/Queue.js` |
+| 50.1 kB | 18.3% | `node_modules/effect/dist/SchemaTransformation.js` |
+| 48.8 kB | 17.9% | `node_modules/effect/dist/net/NetAddress.js` |
+| 45.6 kB | 16.7% | `node_modules/effect/dist/BigDecimal.js` |
+| 41.9 kB | 15.4% | `node_modules/effect/dist/Duration.js` |
+| 40.3 kB | 14.7% | `node_modules/effect/dist/rpc/RpcServer.js` |
+| 38.9 kB | 14.2% | `node_modules/effect/dist/Result.js` |
+| 35.9 kB | 13.1% | `node_modules/effect/dist/Cause.js` |
+| 34.3 kB | 12.5% | `node_modules/effect/dist/SchemaParser.js` |
+| 32.8 kB | 12.0% | `node_modules/effect/dist/Predicate.js` |
+| 29.7 kB | 10.9% | `node_modules/effect/dist/http/HttpServerResponse.js` |
+| 28.2 kB | 10.3% | `node_modules/effect/dist/internal/dateTime.js` |
+| 27.8 kB | 10.2% | `node_modules/effect/dist/Record.js` |
+| 24.3 kB | 8.9% | `node_modules/effect/dist/Order.js` |
+| 24.2 kB | 8.9% | `node_modules/effect/dist/Context.js` |
+| 23.5 kB | 8.6% | `node_modules/effect/dist/http/HttpServerRequest.js` |
+| 22.7 kB | 8.3% | `node_modules/effect/dist/Deferred.js` |
+| 22.0 kB | 8.0% | `node_modules/effect/dist/Exit.js` |
+| 21.3 kB | 7.8% | `node_modules/effect/dist/Equivalence.js` |
+| 21.3 kB | 7.8% | `node_modules/effect/dist/Path.js` |
+| 21.2 kB | 7.7% | `node_modules/effect/dist/SchemaIssue.js` |
+| 21.0 kB | 7.7% | `src/worker.ts` |
+| 20.9 kB | 7.7% | `node_modules/effect/dist/MutableRef.js` |
+| 20.3 kB | 7.4% | `node_modules/effect/dist/http/HttpClientRequest.js` |
+| 19.7 kB | 7.2% | `../lib/lifelog/Resources.ts` |
+| 19.5 kB | 7.1% | `node_modules/effect/dist/Struct.js` |
+| 19.4 kB | 7.1% | `node_modules/effect/dist/Number.js` |
+| 19.0 kB | 7.0% | `node_modules/effect/dist/http/Multipart.js` |
+| 18.9 kB | 6.9% | `node_modules/effect/dist/net/Dns.js` |
+| 18.3 kB | 6.7% | `node_modules/effect/dist/References.js` |
+| 18.2 kB | 6.6% | `node_modules/effect/dist/http/Cookies.js` |
+| 16.3 kB | 6.0% | `node_modules/effect/dist/ByteSize.js` |
+| 16.2 kB | 5.9% | `node_modules/effect/dist/MutableList.js` |
+| 15.7 kB | 5.7% | `node_modules/effect/dist/Tuple.js` |
+| 15.3 kB | 5.6% | `node_modules/effect/dist/Function.js` |
+| 15.3 kB | 5.6% | `node_modules/effect/dist/rpc/RpcSerialization.js` |
+| 14.2 kB | 5.2% | `node_modules/effect/dist/internal/core.js` |
+| 13.8 kB | 5.0% | `node_modules/effect/dist/http/UrlParams.js` |
+| 13.4 kB | 4.9% | `node_modules/effect/dist/http/HttpBody.js` |
+| 13.0 kB | 4.7% | `node_modules/effect/dist/Hash.js` |
+| 12.8 kB | 4.7% | `node_modules/effect/dist/net/Host.js` |
+| 12.5 kB | 4.6% | `node_modules/effect/dist/FileSystem.js` |
+| 11.5 kB | 4.2% | `node_modules/effect/dist/ErrorReporter.js` |
+| 11.1 kB | 4.1% | `node_modules/effect/dist/Scope.js` |
+| 11.0 kB | 4.0% | `node_modules/effect/dist/Semaphore.js` |
+| 11.0 kB | 4.0% | `node_modules/effect/dist/Fiber.js` |
+| 10.9 kB | 4.0% | `node_modules/effect/dist/Equal.js` |
+| 10.4 kB | 3.8% | `node_modules/effect/dist/Formatter.js` |
+| 9.8 kB | 3.6% | `node_modules/effect/dist/rpc/Rpc.js` |
+| 9.8 kB | 3.6% | `node_modules/effect/dist/Tracer.js` |
+| 9.7 kB | 3.5% | `../lib/lifelog/JournalApi.ts` |
+| 9.4 kB | 3.4% | `node_modules/effect/dist/http/HttpServerError.js` |
 | 9.2 kB | 3.4% | `node_modules/effect/dist/internal/schema/toCodec.js` |
-| 8.7 kB | 3.3% | `node_modules/effect/dist/http/Url.js` |
-| 8.4 kB | 3.2% | `node_modules/effect/dist/http/Headers.js` |
-| 8.4 kB | 3.2% | `node_modules/effect/dist/http/HttpClientResponse.js` |
-| 7.9 kB | 3.0% | `node_modules/effect/dist/internal/schema/interpreter.js` |
+| 8.7 kB | 3.2% | `node_modules/effect/dist/http/Url.js` |
+| 8.4 kB | 3.1% | `node_modules/effect/dist/http/Headers.js` |
+| 8.4 kB | 3.1% | `node_modules/effect/dist/http/HttpClientResponse.js` |
+| 7.9 kB | 2.9% | `node_modules/effect/dist/internal/schema/interpreter.js` |
 | 7.8 kB | 2.9% | `node_modules/effect/dist/Pull.js` |
-| 7.4 kB | 2.8% | `node_modules/effect/dist/http/HttpClientError.js` |
+| 7.4 kB | 2.7% | `node_modules/effect/dist/http/HttpClientError.js` |
 | 7.3 kB | 2.7% | `node_modules/effect/dist/Data.js` |
 | 7.0 kB | 2.6% | `node_modules/effect/dist/Latch.js` |
 | 7.0 kB | 2.6% | `node_modules/effect/dist/Scheduler.js` |
 | 7.0 kB | 2.6% | `node_modules/effect/dist/http/MultipartParser/internal/multipart.js` |
 | 6.7 kB | 2.5% | `node_modules/effect/dist/encoding/Hex.js` |
-| 6.6 kB | 2.5% | `node_modules/effect/dist/http/MultipartParser/internal/headers.js` |
-| 6.3 kB | 2.4% | `node_modules/effect/dist/Inspectable.js` |
+| 6.6 kB | 2.4% | `node_modules/effect/dist/http/MultipartParser/internal/headers.js` |
+| 6.3 kB | 2.3% | `node_modules/effect/dist/Inspectable.js` |
 | 5.4 kB | 2.0% | `node_modules/effect/dist/Redacted.js` |
-| 5.3 kB | 2.0% | `node_modules/effect/dist/encoding/Base64.js` |
+| 5.3 kB | 1.9% | `node_modules/effect/dist/encoding/Base64.js` |
 | 4.5 kB | 1.7% | `node_modules/effect/dist/rpc/RpcGroup.js` |
-| 4.5 kB | 1.7% | `node_modules/effect/dist/internal/schema/compilerRegistry.js` |
-| 4.4 kB | 1.7% | `node_modules/effect/dist/rpc/RpcMessage.js` |
-| 4.2 kB | 1.6% | `node_modules/effect/dist/workers/Transferable.js` |
-| 4.0 kB | 1.5% | `node_modules/effect/dist/Pipeable.js` |
-| 3.9 kB | 1.5% | `node_modules/effect/dist/http/MultipartParser/internal/search.js` |
-| 3.6 kB | 1.4% | `node_modules/effect/dist/Redactable.js` |
+| 4.5 kB | 1.6% | `node_modules/effect/dist/internal/schema/compilerRegistry.js` |
+| 4.4 kB | 1.6% | `node_modules/effect/dist/rpc/RpcMessage.js` |
+| 4.2 kB | 1.5% | `node_modules/effect/dist/workers/Transferable.js` |
+| 4.0 kB | 1.4% | `node_modules/effect/dist/Pipeable.js` |
+| 3.9 kB | 1.4% | `node_modules/effect/dist/http/MultipartParser/internal/search.js` |
+| 3.6 kB | 1.3% | `node_modules/effect/dist/Redactable.js` |
 | 3.3 kB | 1.2% | `node_modules/effect/dist/http/HttpIncomingMessage.js` |
-| 3.1 kB | 1.2% | `node_modules/effect/dist/http/HttpServerRespondable.js` |
-| 3.1 kB | 1.2% | `node_modules/effect/dist/Effectable.js` |
-| 2.8 kB | 1.1% | `../lib/RuntimeEvents.ts` |
+| 3.1 kB | 1.1% | `node_modules/effect/dist/http/HttpServerRespondable.js` |
+| 3.1 kB | 1.1% | `node_modules/effect/dist/Effectable.js` |
+| 2.8 kB | 1.0% | `../lib/RuntimeEvents.ts` |
 | 2.6 kB | 1.0% | `node_modules/effect/dist/internal/result.js` |
 | 2.6 kB | 1.0% | `node_modules/effect/dist/Utils.js` |
-| 2.6 kB | 1.0% | `node_modules/effect/dist/PrimaryKey.js` |
-| 2.6 kB | 1.0% | `node_modules/effect/dist/http/MultipartParser/internal/contentType.js` |
+| 2.6 kB | 0.9% | `node_modules/effect/dist/PrimaryKey.js` |
+| 2.6 kB | 0.9% | `node_modules/effect/dist/http/MultipartParser/internal/contentType.js` |
 | 2.5 kB | 0.9% | `node_modules/effect/dist/rpc/Utils.js` |
 | 2.2 kB | 0.8% | `node_modules/effect/dist/encoding/EncodingError.js` |
 | 2.2 kB | 0.8% | `node_modules/effect/dist/internal/option.js` |
-| 2.0 kB | 0.8% | `node_modules/effect/dist/rpc/RpcSchema.js` |
+| 2.0 kB | 0.7% | `node_modules/effect/dist/rpc/RpcSchema.js` |
 | 1.9 kB | 0.7% | `node_modules/effect/dist/internal/references.js` |
-| 1.7 kB | 0.7% | `node_modules/effect/dist/internal/schema/make.js` |
+| 1.7 kB | 0.6% | `node_modules/effect/dist/internal/schema/make.js` |
 | 1.7 kB | 0.6% | `node_modules/effect/dist/internal/schema/annotations.js` |
 | 1.4 kB | 0.5% | `../lib/lifelog/Places.ts` |
 | 1.1 kB | 0.4% | `node_modules/effect/dist/internal/stackTraceLimit.js` |
@@ -147,7 +147,7 @@ Modules sorted by bytes contributed to the output bundle. Large modules may indi
 | 484 B | 0.2% | `node_modules/effect/dist/internal/stream.js` |
 | 482 B | 0.2% | `node_modules/effect/dist/rpc/internal/tracing.js` |
 | 460 B | 0.2% | `node_modules/effect/dist/internal/redacted.js` |
-| 417 B | 0.2% | `node_modules/effect/dist/internal/count.js` |
+| 417 B | 0.1% | `node_modules/effect/dist/internal/count.js` |
 | 285 B | 0.1% | `node_modules/effect/dist/internal/schemaError.js` |
 | 261 B | 0.1% | `node_modules/effect/dist/internal/array.js` |
 | 225 B | 0.1% | `node_modules/effect/dist/http/internal/headers.js` |
@@ -163,7 +163,7 @@ Each entry point and the total code it loads (including shared chunks).
 ### Entry: `\0distilled:worker-entry:/home/hatch/workspace/medina/cloudflare/src/worker.ts`
 
 **Output file**: `worker.js`
-**Bundle size**: 265.7 kB
+**Bundle size**: 273.2 kB
 
 **Bundled modules** (sorted by contribution):
 
@@ -182,12 +182,12 @@ Each entry point and the total code it loads (including shared chunks).
 | 61.2 kB | `node_modules/effect/dist/DateTime.js` |
 | 56.9 kB | `node_modules/effect/dist/Option.js` |
 | 56.8 kB | `node_modules/effect/dist/SchemaGetter.js` |
+| 52.9 kB | `src/journal.ts` |
 | 51.8 kB | `node_modules/effect/dist/Queue.js` |
 | 50.1 kB | `node_modules/effect/dist/SchemaTransformation.js` |
 | 48.8 kB | `node_modules/effect/dist/net/NetAddress.js` |
 | 45.6 kB | `node_modules/effect/dist/BigDecimal.js` |
 | 41.9 kB | `node_modules/effect/dist/Duration.js` |
-| 41.8 kB | `src/journal.ts` |
 | 40.3 kB | `node_modules/effect/dist/rpc/RpcServer.js` |
 | 38.9 kB | `node_modules/effect/dist/Result.js` |
 | 35.9 kB | `node_modules/effect/dist/Cause.js` |
@@ -336,9 +336,9 @@ Modules imported by many files. Extracting these to shared chunks may help.
 | 8 | `node_modules/effect/dist/SchemaIssue.js` | `node_modules/effect/dist/internal/schema/cause.js`, `node_modules/effect/dist/SchemaGetter.js`, `node_modules/effect/dist/SchemaTransformation.js`, `node_modules/effect/dist/SchemaAST.js`, `node_modules/effect/dist/internal/schema/interpreter.js`, `node_modules/effect/dist/SchemaParser.js`, `node_modules/effect/dist/Schema.js`, `node_modules/effect/dist/rpc/RpcServer.js` |
 | 7 | `node_modules/effect/dist/internal/count.js` | `node_modules/effect/dist/Iterable.js`, `node_modules/effect/dist/Array.js`, `node_modules/effect/dist/MutableList.js`, `node_modules/effect/dist/PubSub.js`, `node_modules/effect/dist/Queue.js`, `node_modules/effect/dist/Channel.js`, `node_modules/effect/dist/Stream.js` |
 | 7 | `node_modules/effect/dist/ByteSize.js` | `node_modules/effect/dist/SchemaTransformation.js`, `node_modules/effect/dist/Schema.js`, `node_modules/effect/dist/Stream.js`, `node_modules/effect/dist/FileSystem.js`, `node_modules/effect/dist/http/HttpBody.js`, `node_modules/effect/dist/http/MultipartParser/internal/multipart.js`, `node_modules/effect/dist/http/Multipart.js` |
-| 6 | `node_modules/effect/dist/Scope.js` | `node_modules/effect/dist/Layer.js`, `node_modules/effect/dist/PubSub.js`, `node_modules/effect/dist/Channel.js`, `node_modules/effect/dist/Stream.js`, `node_modules/effect/dist/rpc/RpcServer.js`, `src/journal.ts` |
 | 5 | `node_modules/effect/dist/internal/stackTraceLimit.js` | `node_modules/effect/dist/Utils.js`, `node_modules/effect/dist/internal/tracer.js`, `node_modules/effect/dist/internal/effect.js`, `node_modules/effect/dist/Layer.js`, `node_modules/effect/dist/Schema.js` |
 | 5 | `node_modules/effect/dist/Tracer.js` | `node_modules/effect/dist/internal/effect.js`, `node_modules/effect/dist/References.js`, `node_modules/effect/dist/Layer.js`, `node_modules/effect/dist/Channel.js`, `node_modules/effect/dist/rpc/RpcServer.js` |
+| 5 | `node_modules/effect/dist/Scope.js` | `node_modules/effect/dist/Layer.js`, `node_modules/effect/dist/PubSub.js`, `node_modules/effect/dist/Channel.js`, `node_modules/effect/dist/Stream.js`, `node_modules/effect/dist/rpc/RpcServer.js` |
 | 5 | `node_modules/effect/dist/Pull.js` | `node_modules/effect/dist/Queue.js`, `node_modules/effect/dist/Channel.js`, `node_modules/effect/dist/Stream.js`, `node_modules/effect/dist/http/Multipart.js`, `node_modules/effect/dist/rpc/RpcServer.js` |
 | 5 | `node_modules/effect/dist/Redacted.js` | `node_modules/effect/dist/http/Headers.js`, `node_modules/effect/dist/http/internal/urlParams.js`, `node_modules/effect/dist/http/UrlParams.js`, `node_modules/effect/dist/Schema.js`, `node_modules/effect/dist/http/Url.js` |
 | 5 | `node_modules/effect/dist/internal/schema/parser.js` | `node_modules/effect/dist/SchemaIssue.js`, `node_modules/effect/dist/SchemaAST.js`, `node_modules/effect/dist/internal/schema/interpreter.js`, `node_modules/effect/dist/internal/schema/compilerRegistry.js`, `node_modules/effect/dist/SchemaParser.js` |
@@ -1076,7 +1076,7 @@ Complete dependency information for each module.
 ### `node_modules/effect/dist/Scope.js`
 
 - **Output contribution**: 11.1 kB
-- **Imported by** (6 files): `node_modules/effect/dist/Layer.js` `node_modules/effect/dist/PubSub.js` `node_modules/effect/dist/Channel.js` `node_modules/effect/dist/Stream.js` `node_modules/effect/dist/rpc/RpcServer.js` `src/journal.ts`
+- **Imported by** (5 files): `node_modules/effect/dist/Layer.js` `node_modules/effect/dist/PubSub.js` `node_modules/effect/dist/Channel.js` `node_modules/effect/dist/Stream.js` `node_modules/effect/dist/rpc/RpcServer.js`
 - **Imports**:
   - `node_modules/effect/dist/internal/effect.js`
 
@@ -1880,10 +1880,9 @@ Complete dependency information for each module.
 
 ### `src/journal.ts`
 
-- **Output contribution**: 41.8 kB
+- **Output contribution**: 52.9 kB
 - **Imported by** (1 files): `src/worker.ts`
 - **Imports**:
-  - `node_modules/effect/dist/Scope.js`
   - `node_modules/effect/dist/Effect.js`
   - `node_modules/effect/dist/Schema.js`
   - `node_modules/effect/dist/Stream.js`
@@ -1942,6 +1941,8 @@ This section contains raw, grep-friendly data. Use these patterns:
 [OUTPUT_BYTES: node_modules/effect/dist/Option.js = 58228 bytes]
 [MODULE: node_modules/effect/dist/SchemaGetter.js]
 [OUTPUT_BYTES: node_modules/effect/dist/SchemaGetter.js = 58181 bytes]
+[MODULE: src/journal.ts]
+[OUTPUT_BYTES: src/journal.ts = 54191 bytes]
 [MODULE: node_modules/effect/dist/Queue.js]
 [OUTPUT_BYTES: node_modules/effect/dist/Queue.js = 53075 bytes]
 [MODULE: node_modules/effect/dist/SchemaTransformation.js]
@@ -1952,8 +1953,6 @@ This section contains raw, grep-friendly data. Use these patterns:
 [OUTPUT_BYTES: node_modules/effect/dist/BigDecimal.js = 46697 bytes]
 [MODULE: node_modules/effect/dist/Duration.js]
 [OUTPUT_BYTES: node_modules/effect/dist/Duration.js = 42946 bytes]
-[MODULE: src/journal.ts]
-[OUTPUT_BYTES: src/journal.ts = 42794 bytes]
 [MODULE: node_modules/effect/dist/rpc/RpcServer.js]
 [OUTPUT_BYTES: node_modules/effect/dist/rpc/RpcServer.js = 41236 bytes]
 [MODULE: node_modules/effect/dist/Result.js]
@@ -2921,7 +2920,6 @@ This section contains raw, grep-friendly data. Use these patterns:
 [IMPORT: node_modules/effect/dist/workers/Transferable.js -> node_modules/effect/dist/Effect.js]
 [IMPORT: node_modules/effect/dist/workers/Transferable.js -> node_modules/effect/dist/SchemaGetter.js]
 [IMPORT: node_modules/effect/dist/workers/Transferable.js -> node_modules/effect/dist/Schema.js]
-[IMPORT: src/journal.ts -> node_modules/effect/dist/Scope.js]
 [IMPORT: src/journal.ts -> node_modules/effect/dist/Effect.js]
 [IMPORT: src/journal.ts -> node_modules/effect/dist/Schema.js]
 [IMPORT: src/journal.ts -> node_modules/effect/dist/Stream.js]
@@ -3480,7 +3478,6 @@ This section contains raw, grep-friendly data. Use these patterns:
 [IMPORTED_BY: node_modules/effect/dist/Scope.js <- node_modules/effect/dist/Channel.js]
 [IMPORTED_BY: node_modules/effect/dist/Scope.js <- node_modules/effect/dist/Stream.js]
 [IMPORTED_BY: node_modules/effect/dist/Scope.js <- node_modules/effect/dist/rpc/RpcServer.js]
-[IMPORTED_BY: node_modules/effect/dist/Scope.js <- src/journal.ts]
 [IMPORTED_BY: node_modules/effect/dist/Semaphore.js <- node_modules/effect/dist/Channel.js]
 [IMPORTED_BY: node_modules/effect/dist/Semaphore.js <- node_modules/effect/dist/rpc/Utils.js]
 [IMPORTED_BY: node_modules/effect/dist/Semaphore.js <- node_modules/effect/dist/rpc/RpcServer.js]
@@ -3705,7 +3702,7 @@ This section contains raw, grep-friendly data. Use these patterns:
 ### Entry Points
 
 ```
-[ENTRY: \0distilled:worker-entry:/home/hatch/workspace/medina/cloudflare/src/worker.ts -> worker.js (272043 bytes)]
+[ENTRY: \0distilled:worker-entry:/home/hatch/workspace/medina/cloudflare/src/worker.ts -> worker.js (279778 bytes)]
 ```
 
 ### Chunks
