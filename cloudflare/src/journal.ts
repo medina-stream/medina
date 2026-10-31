@@ -1363,11 +1363,53 @@ const makeHandlers = (bucket: JournalBucket) =>
  * guarantees: this request. The response stream is likewise
  * drained here rather than handed to the runtime as a web body.
  */
+/**
+ * The RPC protocol loop passes each request envelope's `headers`
+ * through `Headers.fromInput`, which only survives the array-of-pairs
+ * shape. Envelopes that omit `headers` — the journal SPA's client
+ * does whenever no per-call headers are set — or carry it as a
+ * record crash the protocol loop ("TypeError: .for is not
+ * iterable") and the request dies as a Worker exception before any
+ * handler runs. Rewrite Request envelopes so `headers` is always an
+ * array of [name, value] pairs before the protocol layer sees them.
+ */
+const normalizeRpcRequest = async (request: Request): Promise<Request> => {
+  const text = await request.text();
+  let changed = false;
+  const lines = text.split("\n").map((line) => {
+    if (!line.includes("\"Request\"")) return line;
+    try {
+      const message = JSON.parse(line) as Record<string, unknown>;
+      if (message._tag !== "Request") return line;
+      const headers = message.headers;
+      if (Array.isArray(headers)) return line;
+      changed = true;
+      message.headers =
+        headers !== null && typeof headers === "object"
+          ? Object.entries(headers as Record<string, unknown>).map(
+              ([name, value]) => [name, String(value)] as [string, string],
+            )
+          : [];
+      return JSON.stringify(message);
+    } catch {
+      return line;
+    }
+  });
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  return new Request(request.url, {
+    method: request.method,
+    headers,
+    body: changed ? lines.join("\n") : text,
+  });
+};
+
 const serveRpc = (
   bucket: JournalBucket,
   request: Request,
 ): Effect.Effect<Response> =>
   Effect.promise(async () => {
+    const rpcRequest = await normalizeRpcRequest(request);
     const response = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -1380,7 +1422,7 @@ const serveRpc = (
           const res = yield* httpEffect.pipe(
             Effect.provideService(
               HttpServerRequest.HttpServerRequest,
-              HttpServerRequest.fromWeb(request),
+              HttpServerRequest.fromWeb(rpcRequest),
             ),
           );
           if (res.body._tag !== "Stream") return res;
