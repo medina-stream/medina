@@ -1520,7 +1520,9 @@ export const handleJournal = (
 ): Effect.Effect<Response | null> =>
   Effect.gen(function* () {
     const url = new URL(request.url);
-    const path = url.pathname;
+    // The journal client POSTs to /rpc/ (trailing slash); accept
+    // both spellings of the one RPC route.
+    const path = url.pathname === "/rpc/" ? "/rpc" : url.pathname;
     if (!isJournalPath(path)) return null;
 
     const queryToken = url.searchParams.get("token");
