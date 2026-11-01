@@ -5,6 +5,8 @@
     "": {
       "name": "medina-cloudflare",
       "dependencies": {
+        "@yielded/auth": "0.1.0-beta.47",
+        "@yielded/auth-platform-workerd": "0.1.0-beta.47",
         "effect": "4.1.1",
       },
       "devDependencies": {
@@ -350,6 +352,14 @@
     "@types/node": ["@types/node@26.6.5", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg=="],
 
     "@types/ws": ["@types/ws@8.18.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w=="],
+
+    "@yielded/auth": ["@yielded/auth@0.1.0-beta.47", "", { "dependencies": { "@yielded/jose": "0.1.0-beta.47", "@yielded/oauth": "0.1.0-beta.47" }, "peerDependencies": { "effect": "^4.1.0" } }, "sha512-/EiCCzEJxPXzzfpiGdOWgqgYYmoy8HlSl2Rbtzsu1FjFFek/8f8HVHSY5EDd7qowYxrF1EzcjBq2vQBUDzz2UA=="],
+
+    "@yielded/auth-platform-workerd": ["@yielded/auth-platform-workerd@0.1.0-beta.47", "", { "dependencies": { "@yielded/auth": "0.1.0-beta.47" }, "peerDependencies": { "effect": "^4.1.0" } }, "sha512-+mYiB28FYw84e3scWukMDp2Y0bfwCDEB0XhMnpOW34s1w5PyaGl2ulbrTZ/ISNM6RTEfpjktNsGbLLsUzuchDA=="],
+
+    "@yielded/jose": ["@yielded/jose@0.1.0-beta.47", "", { "peerDependencies": { "effect": "^4.1.0" } }, "sha512-xFrwhZ1ljgvF7fFrMCYDrO0ovIDnKDg0aXo3g/3w8ipUylrmyhPf0xCoAruGIuZTEoZNOb9Ct+6VZewKJoQCdQ=="],
+
+    "@yielded/oauth": ["@yielded/oauth@0.1.0-beta.47", "", { "dependencies": { "@yielded/jose": "0.1.0-beta.47" }, "peerDependencies": { "effect": "^4.1.0" } }, "sha512-5cIh18WLSuQSQSj17XUulSCiOwIyPf9jqPvGzfS99ldNrCaTljceh49OSnAgwFDwjmayRb9ptxSl9ezseFj49Q=="],
 
     "alchemy": ["alchemy@2.0.0-beta.83", "", { "dependencies": { "@alchemy.run/cloudflare-runtime": "2.0.0-beta.83", "@alchemy.run/floci": "2.0.0-beta.83", "@alchemy.run/node-utils": "2.0.0-beta.83", "@alchemy.run/sigil": "0.1.0-alpha.1", "@distilled.cloud/acme": "1.0.0-rc.15", "@distilled.cloud/aws": "1.0.0-rc.15", "@distilled.cloud/axiom": "1.0.0-rc.15", "@distilled.cloud/cloudflare": "1.0.0-rc.15", "@distilled.cloud/core": "1.0.0-rc.15", "@distilled.cloud/doppler": "1.0.0-rc.15", "@distilled.cloud/fly-io": "1.0.0-rc.15", "@distilled.cloud/gcp": "1.0.0-rc.15", "@distilled.cloud/hetzner": "1.0.0-rc.15", "@distilled.cloud/iceberg": "1.0.0-rc.15", "@distilled.cloud/infisical": "1.0.0-rc.15", "@distilled.cloud/neon": "1.0.0-rc.15", "@distilled.cloud/planetscale": "1.0.0-rc.15", "@distilled.cloud/prisma": "1.0.0-rc.15", "@distilled.cloud/railway": "1.0.0-rc.15", "@distilled.cloud/stripe": "1.0.0-rc.15", "@distilled.cloud/turso": "1.0.0-rc.15", "@distilled.cloud/zerossl": "1.0.0-rc.15", "@effect/sql-d1": "^4.0.0", "@effect/sql-sqlite-do": "^4.0.0", "@libsql/client": "^0.17.0", "@neon/functions": "0.11.0", "@octokit/rest": "^22.0.1", "@octokit/webhooks": "^14.2.0", "@prisma/dev": "^0.20.0", "@types/aws-lambda": "^8.10.152", "capnweb": "^0.12.0", "fflate": "^0.8.3", "libsodium-wrappers": "^0.8.3", "pathe": "^2.0.3", "picomatch": "^4.0.4", "rolldown": "1.2.5", "tinyglobby": "^0.2.17", "yaml": "^2.9.0" }, "peerDependencies": { "@alchemy.run/frontend-frameworks": "2.0.0-beta.83", "@aws/durable-execution-sdk-js": "^2.1.0", "@effect/platform-bun": "^4.0.0", "@effect/platform-node": "^4.0.0", "@effect/sql-libsql": "^4.0.0", "@effect/sql-mysql2": "^4.0.0", "@effect/sql-pg": "^4.0.0", "@effect/vitest": "^4.0.0", "@prisma/orm-postgres": "^8.0.0-rc.11", "@vercel/nft": "^1.10.2", "drizzle-kit": "1.0.0-rc.5-ab785fc", "drizzle-orm": "1.0.0-rc.5-ab785fc", "effect": "^4.0.0", "mongodb": "^6.10.0", "mysql2": "^3.24.2", "pg": "^8.22.0", "prisma": "^8.0.0-rc.15", "vite": "^8.0.7", "ws": "^8.21.0" }, "optionalPeers": ["@alchemy.run/frontend-frameworks", "@aws/durable-execution-sdk-js", "@effect/platform-bun", "@effect/platform-node", "@effect/sql-libsql", "@effect/sql-mysql2", "@effect/sql-pg", "@effect/vitest", "@prisma/orm-postgres", "@vercel/nft", "drizzle-kit", "drizzle-orm", "mongodb", "mysql2", "pg", "prisma", "vite", "ws"], "bin": { "alchemy": "./bin/cli.js" } }, "sha512-t0N4FwLU1JxLnKZGdsBNdqiycWDM5HEYmmIguMImplE07Vh+FPpMR8ypk3K3TY5Tg0sFFppXFVwtwiDp6xlX9w=="],
 
