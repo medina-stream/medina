@@ -566,10 +566,10 @@ or this plan). Needed, by stage:
 
 | Stage | Secrets Store entries to create | Endpoint change |
 | --- | --- | --- |
-| `media-transcribe` | `ASSEMBLYAI_API_KEY` | `ASSEMBLYAI_API_URL` → `https://api.assemblyai.com` |
-| `media-normalize` | `TRANSLOADIT_API_KEY`, `TRANSLOADIT_AUTH_SECRET` | none (public API today) |
-| `notes` + `journal` (LLM) | the journal LLM's API key (name TBD with the endpoint) | `JOURNAL_LLM_API_URL` → the provider's public OpenAI-compatible endpoint; `META_MODEL_API_KEY` already exists in the store — whether it is this credential is Scott's to confirm |
-| Drive sources + `inventory` | Google service-account material (shape TBD) | `GOOGLE_TOKEN_URL` broker replaced by Worker-side token exchange |
+| `media-transcribe` | `ASSEMBLYAI_API_KEY` — created by Scott Nov 2 ✓ | `ASSEMBLYAI_API_URL` → `https://api.assemblyai.com` |
+| `media-normalize` | `TRANSLOADIT_API_KEY` only — created by Scott Nov 2 (scoped key "cloudflare": assemblies read+write). `TRANSLOADIT_AUTH_SECRET` NOT needed: the workspace has Signature Authentication "Not required", verified Nov 2 by an unsigned create+status test from medina-dev (assembly completed). The Worker port authenticates key-only. | none (public API today) |
+| `notes` + `journal` (LLM) | the OpenAI provider key, stored in the **AI Gateway** config (Scott sets it once in the dashboard; Worker code never holds it). Decided Nov 2 (Scott): skip the custom Meta Model API integration; route the journal LLM through **Cloudflare AI Gateway** to the same model used today, `gpt-5.5` (Workers AI proper is Cloudflare-hosted open-weight models only — not a proxy — and does not carry it). `META_MODEL_API_KEY` stays hskping's, unused by Medina. | `JOURNAL_LLM_API_URL` → the AI Gateway's OpenAI-compatible endpoint for the account gateway |
+| Drive sources + `inventory` | DONE Nov 2 (Scott): new dedicated service account `medina-drive-reader@medina-492522.iam.gserviceaccount.com` (no project roles; access via folder sharing); `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` in the Secrets Store. One folder shared so far — at cutover, parity-check what the new account sees (listAll) against what the broker credential sees, and flag any gap. | `GOOGLE_TOKEN_URL` broker replaced by Worker-side token exchange |
 | capture-loop ingest (Worker writes) | `INDEX_API_TOKEN` (Medina-internal machine token) | none — `MEDINA_INDEX_URL` is already the public medina-index Worker |
 
 Checked Oct 30: the store today holds only hskping's secrets plus
@@ -814,14 +814,76 @@ within a cron tick plus one background rebuild, the same order
 as the server's own 10-minute previews cycle.
 
 What remains of milestone 4, in the recorded order: capture loop
-(gated on an `INDEX_API_TOKEN` secret for index registration),
+(shadow built and at parity, next section — the flip remains),
 star detector, archive, media-normalize and media-transcribe
-(gated on their provider secrets in the Secrets Store — none
-exist yet), gps stages, the resource-layer redesign, notes +
+(their provider secrets landed in the Secrets Store Nov 2),
+gps stages, the resource-layer redesign, notes +
 journal generation, Drive sources, `/in`, the write surface, and
 finally phone cutover + medina-dev retirement. medina-dev remains
 the serving fallback and the sole pipeline runner until each
 stage's cutover is proven.
+
+### Step 2 shadow (Nov 2) — capture loop ported, parity proven, not flipped
+
+The capture loop now exists on the Worker as a shadow
+(`cloudflare/src/capture.ts`), built Effect-natively per Scott's
+Nov 2 direction: the server's domain vocabulary on top (classify,
+receipt identity, artifact keys, payload validation — ported check
+for check from lib/capture/*), Effect services underneath (the
+source bucket and artifact bucket as R2 bindings, the medina-index
+HTTP API as a service, a `CaptureShadow` Durable Object as the
+notebook). Each pass *plans* every item in its window — the receipt
+that guards it, the artifact keys ingest writes, the index keys it
+registers — and diffs the plan against medina-dev's receipts,
+artifacts, and index rows. The Cron Trigger rides the existing
+minutely cron with a trailing 75-minute window; `POST /capture/run`
+and `GET /capture/status` (device-token gate) run and read it on
+demand.
+
+- **INDEX_API_TOKEN**: declared in the stack as a Secrets Store
+  `Secret` resource bound to the Worker (nothing out-of-band). The
+  value is the existing token medina-dev and medina-index already
+  share — medina-index's own mechanism (its Worker secret) needed
+  no change — supplied to the deploy through the environment as a
+  Redacted; `alchemy.run.ts` throws if it is absent, so a deploy
+  can never reconcile the secret to an empty value. The deploy
+  created the entry in `default_secrets_store`; the binding
+  authenticates against medina-index live (every pass's index
+  probe answers 200). **Housekeeping caveat:** Alchemy persists
+  the Redacted value in its local stack state
+  (`.alchemy/state/Medina/dev/IndexApiToken.json`) — that file
+  must not be committed as-is; how stack state is treated
+  (gitignore vs encrypted remote state) is an open item.
+- **Device-events hardening, by construction**: the plan reduces
+  a batch's fixes to one latest-location write per device — the
+  newest fix by the event's own timestamp, ties by sequence —
+  instead of the server's write-per-event that R2 rate-limited in
+  the Oct 28 burst. The shadow diffs that reduction against the
+  believed position medina-dev currently holds.
+- **Parity evidence** (check token minted for the run and revoked
+  after): the trailing 8 h window — 41/41 items matched
+  (capture-bucket 25, device-events 15, local-transcripts 1), the
+  shadow's newest fix identical to medina-dev's believed position;
+  the Oct 28 burst window (21:45–22:15Z) — 69/69 matched,
+  including all 63 burst device-events (receipted after their
+  retries, as §4.2 recorded; no loss), the latest-location verdict
+  `dev-newer`, which is correct for a historical window; the last
+  active evening window — 7/7 matched, latest-location match.
+  Every receipt in every window (117 item checks) was found under
+  the **etag** version derivation, none needed the lastModified
+  fallback: the R2 binding's etag and the server's S3 etag agree,
+  so receipt identity ports exactly. Cron passes record their
+  reports in the notebook continuously.
+- **Not flipped.** medina-dev remains the sole live pipeline.
+  The cutover itself is unchanged from the step-2 row above:
+  the Worker starts performing the plans (bucket writes +
+  `/register` calls, already implemented in the index service)
+  and medina-dev's capture loop is excluded via `MEDINA_SOURCES`
+  in the same change batch. Steps 3–4 were assessed as riders and
+  rejected: the star detector works a different surface
+  (canonical transcripts, star records, a retention sweep) and
+  the archive sweep performs bucket-to-bucket moves — neither is
+  a small extension of this shadow; both stay sequenced steps.
 
 ### Access + domain (staged, one open decision)
 
