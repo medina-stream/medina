@@ -201,12 +201,21 @@ export const Api = Cloudflare.Worker("Api", {
     TranscribeShadow: Cloudflare.DurableObject("TranscribeShadow"),
     // The media stages presign R2 URLs and mint temporary R2
     // credentials — impossible with the native R2 binding — so
-    // the stack mints this Worker a bucket-scoped S3 keypair for
-    // sco-lifelog (object read/write on that bucket only) and
-    // injects it as a secret binding (see src/r2creds.ts).
-    ARTIFACTS_S3: Cloudflare.R2.S3Credentials(Artifacts, {
-      access: "read-write",
-    }),
+    // the Worker needs an S3 keypair for sco-lifelog, delivered
+    // as the ARTIFACTS_S3 secret binding (see src/r2creds.ts).
+    // The first attempt declared it as
+    // Cloudflare.R2.S3Credentials(Artifacts, {access:"read-write"}),
+    // which has Alchemy mint a bucket-scoped account API token at
+    // deploy time — but the Nov 3 deploy FAILED: the deploy
+    // credential is not authorized to create account API tokens
+    // ("Unauthorized to access requested resource" on the
+    // ApiToken resource). The binding therefore waits on one of:
+    // (a) the deploy credential gaining API-token administration,
+    // after which the S3Credentials declaration returns as-is; or
+    // (b) a bucket-scoped R2 keypair supplied through the Secrets
+    // Store (declared like the index token above). Until then the
+    // stages' perform paths report the missing credential
+    // precisely; their shadows need no R2 credential at all.
     NORMALIZE_MODE: "shadow",
     TRANSCRIBE_MODE: "shadow",
   },

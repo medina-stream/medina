@@ -1361,7 +1361,11 @@ export const runTranscribePass = (
     const errors: Array<{ captureId: string; detail: string }> = [];
     let proof: TranscribeReport["proof"] = null;
 
-    for (const captureId of selected) {
+    // Items run 8-wide (medina-dev's own pipeline bound); the
+    // counters below mutate only in synchronous statements
+    // between awaits.
+    const processOne = (captureId: string) =>
+      Effect.gen(function* () {
       const keys =
         options.proof === true
           ? proofKeys(captureId)
@@ -1451,7 +1455,27 @@ export const runTranscribePass = (
           }
           break;
       }
-    }
+      });
+    yield* Effect.forEach(
+      selected,
+      (captureId) =>
+        processOne(captureId).pipe(
+          // Per-item isolation: one capture's failure is a
+          // finding in the report, never a failed pass (the
+          // stage-level medina-index 500 caveat in §4.2).
+          Effect.catch((cause) =>
+            Effect.sync(() => {
+              if (errors.length < MAX_STORED_FINDINGS) {
+                errors.push({
+                  captureId,
+                  detail: `pass item failed: ${String(cause).slice(0, 300)}`,
+                });
+              }
+            }),
+          ),
+        ),
+      { concurrency: 8 },
+    );
 
     const report = new TranscribeReport({
       ranAt: options.now.toISOString(),

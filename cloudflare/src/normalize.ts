@@ -1763,14 +1763,23 @@ const gatherState = (
 > =>
   Effect.gen(function* () {
     const data = yield* NormalizeData;
-    const files = yield* data.listFiles(captureId);
+    // The four reads are independent — run them together (the
+    // sequential version cost ~6s per capture end-to-end).
+    const [files, probeText, manifestText, receiptText] = yield* Effect.all(
+      [
+        data.listFiles(captureId),
+        data.readText(ffprobeKey(captureId)),
+        data.readText(keys.manifestKey),
+        data.readText(keys.receiptKey),
+      ],
+      { concurrency: "unbounded" },
+    );
     const blob = files.find(
       (file) =>
         !file.name.includes("/") &&
         !METADATA_NAMES.has(file.name) &&
         !/\.tmp-[^/]*$/.test(file.name),
     );
-    const probeText = yield* data.readText(ffprobeKey(captureId));
     let stored: CaptureState["stored"] = null;
     if (probeText !== null) {
       try {
@@ -1785,8 +1794,8 @@ const gatherState = (
       blobUploaded: blob?.uploaded ?? null,
       stored,
       settled: settledIds.has(captureId),
-      manifestText: yield* data.readText(keys.manifestKey),
-      receiptText: yield* data.readText(keys.receiptKey),
+      manifestText,
+      receiptText,
     };
   });
 
@@ -2593,7 +2602,11 @@ export const runNormalizePass = (
     const errors: Array<{ captureId: string; detail: string }> = [];
     let proof: NormalizeReport["proof"] = null;
 
-    for (const captureId of selected) {
+    // Items run 8-wide (medina-dev's own pipeline bound): each
+    // capture's work is round-trip-bound, and the counters below
+    // mutate only in synchronous statements between awaits.
+    const processOne = (captureId: string) =>
+      Effect.gen(function* () {
       const keys =
         options.proof === true
           ? proofKeys(captureId)
@@ -2720,7 +2733,27 @@ export const runNormalizePass = (
           }
           break;
       }
-    }
+      });
+    yield* Effect.forEach(
+      selected,
+      (captureId) =>
+        processOne(captureId).pipe(
+          // Per-item isolation: one capture's failure is a
+          // finding in the report, never a failed pass (the
+          // stage-level medina-index 500 caveat in §4.2).
+          Effect.catch((cause) =>
+            Effect.sync(() => {
+              if (errors.length < MAX_STORED_FINDINGS) {
+                errors.push({
+                  captureId,
+                  detail: `pass item failed: ${String(cause).slice(0, 300)}`,
+                });
+              }
+            }),
+          ),
+        ),
+      { concurrency: 8 },
+    );
 
     const report = new NormalizeReport({
       ranAt: options.now.toISOString(),
