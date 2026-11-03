@@ -34,7 +34,9 @@ python3 ~/workspace/bin/cf_env_run.py . bun run deploy:dev
 
 `cf_env_run.py` injects `CLOUDFLARE_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID` for the child process. The deploy prints the
-Worker's workers.dev URL.
+Worker's workers.dev URL, then `scripts/reattach-secrets.ts` runs
+automatically to restore the media stages' out-of-band key
+bindings (see Warnings).
 
 State is local (`.alchemy/`, committed), matching hskping.
 
@@ -45,18 +47,20 @@ State is local (`.alchemy/`, committed), matching hskping.
   upload bucket; the stack declares them only to bind them to the
   Worker. Never run `alchemy destroy` on this stack without
   removing those resources first.
-- **Secrets are declared, never attached out-of-band.** The index
-  token is a Secrets Store Secret resource in `alchemy.run.ts`,
-  its value supplied through the deploy environment
+- **Two secret mechanisms, on purpose.** The index token is a
+  declared Secrets Store Secret resource in `alchemy.run.ts`, its
+  value supplied through the deploy environment
   (`INDEX_API_TOKEN` must be set for any deploy). The media
   stages' provider keys (`ASSEMBLYAI_API_KEY`,
-  `TRANSLOADIT_API_KEY`) are not declared yet — Alchemy
-  reconciles a declared secret's value from the deploy
-  environment, and the values Scott placed in the store are not
-  the deployer's to supply; see the credential-gap note at
-  `docs/cloudflare-migration.md` §4.3 step 6 before declaring
-  them with any other value (declaring would overwrite the
-  stored value).
+  `TRANSLOADIT_API_KEY`) are the opposite: Scott placed their
+  values in the store himself, the values are write-only, and
+  declaring them would reconcile-overwrite them — so they are
+  attached out-of-band as `secrets_store_secret` bindings naming
+  the existing store secrets, and `scripts/reattach-secrets.ts`
+  re-attaches and asserts them as the second half of every
+  `bun run deploy:dev` (a deploy strips undeclared bindings).
+  Never declare those two as Secret resources with any value.
+  See `docs/cloudflare-migration.md` §4.3 step 6.
 - The root repo `.gitignore` ignores `package.json`/`tsconfig.json`
   at every depth (a bun-server-era rule); the local `.gitignore` in
   this directory re-includes them for this package only.

@@ -90,8 +90,8 @@ export const IndexApiToken = Cloudflare.SecretsStore.Secret(
 
 // The media stages' vendor credentials — ASSEMBLYAI_API_KEY
 // (§4.3 step 6) and TRANSLOADIT_API_KEY (§4.3 step 5) — are
-// deliberately NOT declared as Secret resources yet: a known,
-// named gap with a precise unblock, not an oversight.
+// deliberately NOT declared as Secret resources, and never will
+// be in that shape:
 //
 // A Secrets Store Secret resource reconciles its value FROM the
 // deploy environment: Alchemy patches the stored value to match
@@ -111,13 +111,19 @@ export const IndexApiToken = Cloudflare.SecretsStore.Secret(
 //     are the Secrets Store entry Scott created Nov 2 and his own
 //     records.
 //
-// Both declarations land, in the IndexApiToken shape above, the
-// moment the stored values are supplied to a deploy environment
-// (or Scott confirms which values to reconcile to). Until then
-// both stages run their shadows in full — plans, probe
-// derivations, and diffs need no vendor key — and report their
-// vendor paths as unconfigured when asked to perform. The Worker
-// code reads both bindings optionally for exactly this reason.
+// The mechanism instead (Scott confirmed the stored keys and said
+// "flip it live", Nov 3): the two keys are bound to the Worker
+// OUT-OF-BAND as `secrets_store_secret` bindings referencing the
+// existing store secrets by name — the hskping pattern. Alchemy
+// beta.83 cannot declare a binding against a pre-existing store
+// secret without managing its value (ReadSecret still requires a
+// Secret resource), and a deploy reconciles the Worker's settings
+// and strips undeclared bindings — so scripts/reattach-secrets.ts
+// re-attaches and asserts both bindings as the second half of
+// every `bun run deploy:dev`. The Worker code reads both bindings
+// optionally; GET /transcribe/verify and GET /normalize/verify
+// resolve them and make one authenticated read-only vendor call
+// each (the flip gate — verified live Nov 3, §4.3 steps 5–6).
 
 // Milestone 4: the Worker bundle imports the repo's own schema
 // modules (lib/lifelog/JournalApi.ts and friends), which resolve
@@ -209,13 +215,27 @@ export const Api = Cloudflare.Worker("Api", {
     // deploy time — but the Nov 3 deploy FAILED: the deploy
     // credential is not authorized to create account API tokens
     // ("Unauthorized to access requested resource" on the
-    // ApiToken resource). The binding therefore waits on one of:
-    // (a) the deploy credential gaining API-token administration,
-    // after which the S3Credentials declaration returns as-is; or
-    // (b) a bucket-scoped R2 keypair supplied through the Secrets
-    // Store (declared like the index token above). Until then the
-    // stages' perform paths report the missing credential
-    // precisely; their shadows need no R2 credential at all.
+    // ApiToken resource). The fallback — reuse a keypair
+    // medina-dev already holds — was inventoried Nov 3 and does
+    // not exist: the server's sco-lifelog access is edge-injected
+    // (endpoint sco-lifelog.int.exe.xyz, no keypair in its
+    // environment at all), and the one raw S3 keypair on the box
+    // (SOURCE_BUCKET_*, for the capture source) is scoped to
+    // sco-lifelog-in only — an in-place probe got AccessDenied on
+    // sco-lifelog list and write. The binding therefore waits on
+    // Scott, one of: (a) the deploy credential gaining API-token
+    // administration, after which the S3Credentials declaration
+    // returns as-is; or (b) a bucket-scoped R2 API token created
+    // for sco-lifelog, its keypair supplied through the Secrets
+    // Store / deploy environment and declared here like the index
+    // token above. Until then BOTH stages stay in shadow: the
+    // vendor keys are bound and verified (above), but each
+    // stage's perform path also needs ARTIFACTS_S3 — normalize to
+    // presign the import and mint the store credentials,
+    // transcribe to presign chunk URLs for AssemblyAI — and
+    // flipping either mode live without it would make the Worker
+    // the sole submitter while unable to submit. Their shadows
+    // need no R2 credential at all.
     NORMALIZE_MODE: "shadow",
     TRANSCRIBE_MODE: "shadow",
   },

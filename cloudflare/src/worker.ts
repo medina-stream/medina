@@ -77,7 +77,10 @@
  * `POST /transcribe/run`, and `GET /transcribe/status` (same
  * device-token gate) expose both, including the one-capture
  * `?proof=1` rehearsal modes that run the full live flow against
- * a proof namespace.
+ * a proof namespace. `GET /normalize/verify` and
+ * `GET /transcribe/verify` (same gate) resolve the stage's
+ * vendor key binding and make one authenticated read-only vendor
+ * call — the flip gate for steps 5–6.
  *
  * The handler is an Effect program (the repo's HTTP precedent is
  * Effect HttpRouter on the server; the full router port arrives with
@@ -115,6 +118,7 @@ import {
   transcribePlatformLayer,
   type TranscribeEnv,
 } from "./transcribe.ts";
+import { parseS3Credentials } from "./r2creds.ts";
 import {
   handleJournal,
   refreshReadModelSnapshot,
@@ -207,15 +211,17 @@ interface Env {
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
   /** Secrets Store bindings for the media stages' vendor keys
-   * (steps 5–6). Optional in the type because their stack
-   * declarations land with the stored values' deploy supply —
-   * see alchemy.run.ts for the full explanation; both stages
-   * report their vendor paths unconfigured until then. */
+   * (steps 5–6), attached out-of-band against the store secrets
+   * Scott placed there — see alchemy.run.ts and
+   * scripts/reattach-secrets.ts. Optional in the type because a
+   * fresh deploy strips them until the reattach step runs; both
+   * stages report their vendor paths unconfigured while absent. */
   readonly ASSEMBLYAI_API_KEY?: SecretsStoreSecretLike;
   readonly TRANSLOADIT_API_KEY?: SecretsStoreSecretLike;
-  /** secret_text binding (declared in alchemy.run.ts via
-   * Cloudflare.R2.S3Credentials): the JSON-encoded S3 keypair for
-   * sco-lifelog the media stages presign and mint with. */
+  /** secret_text binding (declared in alchemy.run.ts once a
+   * bucket-scoped keypair is supplied): the JSON-encoded S3
+   * keypair for sco-lifelog the media stages presign and mint
+   * with. Absent until then — see alchemy.run.ts. */
   readonly ARTIFACTS_S3?: string;
   /** Plain deploy variable (declared in alchemy.run.ts): "live" makes
    * the capture loop perform; anything else keeps it a shadow. */
@@ -1070,6 +1076,255 @@ const serveTranscribeRun = (
     return json(outcome, outcome.ok ? 200 : 500);
   });
 
+/**
+ * The media stages' credential check (§4.3 steps 5–6 flip gate),
+ * same device-token gate: resolve the stage's vendor key binding
+ * and authenticate with it — AssemblyAI lists a single transcript
+ * (read-only); Transloadit takes the key-only handshake
+ * checkTransloaditKey documents (the list endpoint demands a
+ * signature this workspace doesn't otherwise use). No capture is
+ * submitted and no artifact is written; reports carry status +
+ * counts only — never key material or transcript content. The
+ * shared ARTIFACTS_S3 readiness is reported alongside (state +
+ * bucket name, never the keypair).
+ */
+type StoreSecretResolution =
+  | { readonly state: "missing" }
+  | { readonly state: "unreadable"; readonly error: string }
+  | { readonly state: "empty" }
+  | { readonly state: "ok"; readonly value: string };
+
+const resolveStoreSecret = (
+  binding: SecretsStoreSecretLike | undefined,
+): Effect.Effect<StoreSecretResolution> =>
+  binding === undefined
+    ? Effect.succeed({ state: "missing" } as const)
+    : Effect.promise(async (): Promise<StoreSecretResolution> => {
+        try {
+          const value = await binding.get();
+          return typeof value === "string" && value.length > 0
+            ? { state: "ok", value }
+            : { state: "empty" };
+        } catch (cause) {
+          return { state: "unreadable", error: String(cause).slice(0, 200) };
+        }
+      });
+
+const checkAssemblyAiKey = (apiKey: string) =>
+  Effect.promise(async () => {
+    try {
+      const response = await fetch(
+        "https://api.assemblyai.com/v2/transcript?limit=1",
+        { headers: { authorization: apiKey } },
+      );
+      const body = (await response
+        .json()
+        .catch(() => null)) as Record<string, unknown> | null;
+      const transcripts =
+        body !== null && Array.isArray(body["transcripts"])
+          ? body["transcripts"].length
+          : null;
+      const error =
+        !response.ok &&
+        body !== null &&
+        typeof body["error"] === "string"
+          ? String(body["error"]).slice(0, 200)
+          : null;
+      return {
+        status: response.status,
+        ok: response.ok,
+        transcripts,
+        ...(error !== null ? { error } : {}),
+      };
+    } catch (cause) {
+      return {
+        status: 0,
+        ok: false,
+        transcripts: null,
+        error: String(cause).slice(0, 200),
+      };
+    }
+  });
+
+const transloaditErrorText = (body: Record<string, unknown> | null) => {
+  if (body === null) return null;
+  const raw = body["error"];
+  if (typeof raw === "string") return raw.slice(0, 200);
+  if (
+    raw !== null &&
+    typeof raw === "object" &&
+    typeof (raw as Record<string, unknown>)["code"] === "string"
+  ) {
+    return String((raw as Record<string, unknown>)["code"]).slice(0, 200);
+  }
+  return null;
+};
+
+/**
+ * The Transloadit key check. The assemblies LIST endpoint demands
+ * a signature (NO_SIGNATURE_FIELD) even on this
+ * signature-not-required workspace, so the authenticated probe is
+ * the key-only handshake Nov 2 established: create one EMPTY
+ * assembly (a lone /upload/handle step, no files — it processes
+ * nothing and stores nothing) and read its status back. That is
+ * the vendor's auth check, not a pipeline submission: no capture
+ * is involved and no artifact is written.
+ */
+const checkTransloaditKey = (apiKey: string) =>
+  Effect.promise(async () => {
+    try {
+      const form = new FormData();
+      form.set(
+        "params",
+        JSON.stringify({
+          auth: { key: apiKey },
+          steps: { ":original": { robot: "/upload/handle" } },
+        }),
+      );
+      const created = await fetch("https://api2.transloadit.com/assemblies", {
+        method: "POST",
+        body: form,
+      });
+      const createdBody = (await created
+        .json()
+        .catch(() => null)) as Record<string, unknown> | null;
+      if (!created.ok) {
+        return {
+          status: created.status,
+          ok: false,
+          assembly: null,
+          error: transloaditErrorText(createdBody) ?? `HTTP ${created.status}`,
+        };
+      }
+      const assemblyId =
+        createdBody !== null &&
+        typeof createdBody["assembly_id"] === "string"
+          ? createdBody["assembly_id"]
+          : null;
+      if (assemblyId === null) {
+        return {
+          status: created.status,
+          ok: false,
+          assembly: null,
+          error: "create returned no assembly_id",
+        };
+      }
+      let assemblyStatus: string | null = null;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const polled = await fetch(
+          `https://api2.transloadit.com/assemblies/${encodeURIComponent(assemblyId)}`,
+        );
+        const polledBody = (await polled
+          .json()
+          .catch(() => null)) as Record<string, unknown> | null;
+        if (!polled.ok) {
+          return {
+            status: polled.status,
+            ok: false,
+            assembly: assemblyStatus,
+            error:
+              transloaditErrorText(polledBody) ?? `HTTP ${polled.status}`,
+          };
+        }
+        assemblyStatus =
+          polledBody !== null && typeof polledBody["ok"] === "string"
+            ? polledBody["ok"]
+            : null;
+        if (
+          assemblyStatus === "ASSEMBLY_COMPLETED" ||
+          assemblyStatus === "ASSEMBLY_EXECUTING"
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      return {
+        status: created.status,
+        ok:
+          assemblyStatus === "ASSEMBLY_COMPLETED" ||
+          assemblyStatus === "ASSEMBLY_EXECUTING",
+        assembly: assemblyStatus,
+        ...(assemblyStatus !== "ASSEMBLY_COMPLETED" &&
+        assemblyStatus !== "ASSEMBLY_EXECUTING"
+          ? { error: `unexpected assembly status: ${assemblyStatus}` }
+          : {}),
+      };
+    } catch (cause) {
+      return {
+        status: 0,
+        ok: false,
+        assembly: null,
+        error: String(cause).slice(0, 200),
+      };
+    }
+  });
+
+const serveMediaVerify = (
+  env: Env,
+  request: Request,
+  url: URL,
+  stage: "normalize" | "transcribe",
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const s3 = parseS3Credentials(env.ARTIFACTS_S3);
+    const artifactsS3 =
+      s3 !== null
+        ? { state: "ok" as const, bucket: s3.bucketName }
+        : {
+            state:
+              env.ARTIFACTS_S3 === undefined
+                ? ("missing" as const)
+                : ("unparseable" as const),
+          };
+    if (stage === "transcribe") {
+      const resolved = yield* resolveStoreSecret(env.ASSEMBLYAI_API_KEY);
+      const vendor =
+        resolved.state === "ok"
+          ? {
+              binding: "ok" as const,
+              check: yield* checkAssemblyAiKey(resolved.value),
+            }
+          : {
+              binding: resolved.state,
+              ...(resolved.state === "unreadable"
+                ? { error: resolved.error }
+                : {}),
+              check: null,
+            };
+      return json({
+        ok: true,
+        stage,
+        mode: transcribeMode(env),
+        vendor,
+        artifactsS3,
+      });
+    }
+    const resolved = yield* resolveStoreSecret(env.TRANSLOADIT_API_KEY);
+    const vendor =
+      resolved.state === "ok"
+        ? {
+            binding: "ok" as const,
+            check: yield* checkTransloaditKey(resolved.value),
+          }
+        : {
+            binding: resolved.state,
+            ...(resolved.state === "unreadable"
+              ? { error: resolved.error }
+              : {}),
+            check: null,
+          };
+    return json({
+      ok: true,
+      stage,
+      mode: normalizeMode(env),
+      vendor,
+      artifactsS3,
+    });
+  });
+
 /** The transcribe stage's notebook (last report), same gate. */
 const serveTranscribeStatus = (
   env: Env,
@@ -1132,6 +1387,12 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   }
   if (request.method === "GET" && url.pathname === "/transcribe/status") {
     return serveTranscribeStatus(env, request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/transcribe/verify") {
+    return serveMediaVerify(env, request, url, "transcribe");
+  }
+  if (request.method === "GET" && url.pathname === "/normalize/verify") {
+    return serveMediaVerify(env, request, url, "normalize");
   }
   if (request.method === "POST" && url.pathname === "/transcribe/run") {
     return serveTranscribeRun(env, request, url);

@@ -12,10 +12,10 @@
  * Worker does not have.
  *
  * The Worker instead carries its own bucket-scoped S3 keypair,
- * minted by the stack (Cloudflare.R2.S3Credentials in
- * alchemy.run.ts: Alchemy creates an account API token whose policy
- * covers only sco-lifelog object read/write, and injects the
- * derived S3 credentials as a secret binding). On top of that
+ * delivered as the ARTIFACTS_S3 secret binding (see alchemy.run.ts
+ * for how the keypair gets supplied — the stack-minted
+ * S3Credentials form is blocked on the deploy credential's
+ * API-token permissions). On top of that
  * keypair this module reproduces medina-dev's credential shapes
  * locally, with WebCrypto only:
  *

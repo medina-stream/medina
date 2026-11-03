@@ -14,7 +14,8 @@
   "name": "medina-cloudflare",
   "private": true,
   "scripts": {
-    "deploy:dev": "alchemy deploy --stage dev --yes",
+    "deploy:dev": "alchemy deploy --stage dev --yes && bun run reattach:secrets",
+    "reattach:secrets": "bun run scripts/reattach-secrets.ts",
     "typecheck": "tsc --noEmit"
   },
   "type": "module",
