@@ -159,7 +159,7 @@ export const Api = Cloudflare.Worker("Api", {
     // re-enabling the stage on medina-dev.
     StarsShadow: Cloudflare.DurableObject("StarsShadow"),
     ArchiveShadow: Cloudflare.DurableObject("ArchiveShadow"),
-    STAR_DETECTOR_MODE: "shadow",
+    STAR_DETECTOR_MODE: "live",
     ARCHIVE_SWEEP_MODE: "shadow",
   },
 });
