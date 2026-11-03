@@ -566,8 +566,8 @@ or this plan). Needed, by stage:
 
 | Stage | Secrets Store entries to create | Endpoint change |
 | --- | --- | --- |
-| `media-transcribe` | `ASSEMBLYAI_API_KEY` — created by Scott Nov 2 ✓ | `ASSEMBLYAI_API_URL` → `https://api.assemblyai.com` |
-| `media-normalize` | `TRANSLOADIT_API_KEY` only — created by Scott Nov 2 (scoped key "cloudflare": assemblies read+write). `TRANSLOADIT_AUTH_SECRET` NOT needed: the workspace has Signature Authentication "Not required", verified Nov 2 by an unsigned create+status test from medina-dev (assembly completed). The Worker port authenticates key-only. | none (public API today) |
+| `media-transcribe` | `ASSEMBLYAI_API_KEY` — created by Scott Nov 2 ✓ (binding to the Worker still open — see the credential-gap note at §4.3 step 6: Alchemy declares a Secrets Store secret by reconciling its value from the deploy environment, and this key's stored value is not the deployer's to supply; medina-dev never held it — the proxy injects it) | `ASSEMBLYAI_API_URL` → `https://api.assemblyai.com` |
+| `media-normalize` | `TRANSLOADIT_API_KEY` only — created by Scott Nov 2 (scoped key "cloudflare": assemblies read+write). `TRANSLOADIT_AUTH_SECRET` NOT needed: the workspace has Signature Authentication "Not required", verified Nov 2 by an unsigned create+status test from medina-dev (assembly completed). The Worker port authenticates key-only. (Binding to the Worker still open — same credential-gap note at §4.3 step 6; the stage also needs an R2 S3 keypair for presigning/minting, whose Alchemy-minted form failed its first deploy because the deploy credential cannot create account API tokens.) | none (public API today) |
 | `notes` + `journal` (LLM) | the OpenAI provider key, stored in the **AI Gateway** config (Scott sets it once in the dashboard; Worker code never holds it). Decided Nov 2 (Scott): skip the custom Meta Model API integration; route the journal LLM through **Cloudflare AI Gateway** to the same model used today, `gpt-5.5` (Workers AI proper is Cloudflare-hosted open-weight models only — not a proxy — and does not carry it). `META_MODEL_API_KEY` stays hskping's, unused by Medina. | `JOURNAL_LLM_API_URL` → the AI Gateway's OpenAI-compatible endpoint for the account gateway |
 | Drive sources + `inventory` | DONE Nov 2 (Scott): new dedicated service account `medina-drive-reader@medina-492522.iam.gserviceaccount.com` (no project roles; access via folder sharing); `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` in the Secrets Store. One folder shared so far — at cutover, parity-check what the new account sees (listAll) against what the broker credential sees, and flag any gap. | `GOOGLE_TOKEN_URL` broker replaced by Worker-side token exchange |
 | capture-loop ingest (Worker writes) | `INDEX_API_TOKEN` (Medina-internal machine token) | none — `MEDINA_INDEX_URL` is already the public medina-index Worker |
@@ -608,8 +608,96 @@ HTTP API with the token above.
    receipt exists. The index-failure hardening (below) lands in the
    Worker version: per-capture list failures degrade that capture,
    never the whole pass.
+   **Status Nov 3, 2026: built, deployed in shadow
+   (`NORMALIZE_MODE`), rehearsed; the takeover itself is waiting
+   on the stage's two credentials (below).** The port
+   (`cloudflare/src/normalize.ts`) mirrors lib's
+   TransloaditNormalize: stored probe records stay authoritative;
+   captures medina-dev never probed get a Worker-side container
+   derivation (MP4/WAV/MP3/FLAC/Ogg-Opus headers by bounded range
+   reads, cached in the stage's own notebook — never written back
+   as ffprobe records). Probe agreement in rehearsal: the
+   Worker's derivations matched medina-dev's ffprobe records on
+   **791 of 791** captures checked across three census slices
+   (800 captures total; zero disagreements). Two apparent
+   disagreements early in the rehearsal were classification bugs
+   in the rehearsal itself, both the same lesson as step 4's:
+   stored artifacts from earlier pipeline generations (direct
+   manifests from before the direct path existed; chunk grids
+   from the 3,600 s segment era — the segment length is 14,400 s
+   today) — medina-dev keeps an existing manifest as-is, so the
+   shadow now judges stored manifests on the invariant the system
+   itself holds (chunks present, sequential, contiguous coverage),
+   while the strict grid stays enforced at creation. End-to-end
+   chain proof (Nov 3, driven from medina-dev with the shipped
+   builders because the Worker's own credential bindings are not
+   attached yet): one real Transloadit assembly for a 3,961.856 s
+   capture already normalized in production — presigned import →
+   split → `/s3/store` with minted prefix-scoped credentials →
+   the shipped manifest builder produced exactly the manifest
+   medina-dev's current code plans (one chunk, [0, 3961.856]);
+   the production manifest differs only by era (two chunks on the
+   old 3,600 s grid). Paid usage for the proof: one completed
+   assembly (a second may have been created by a rehearsal run
+   whose connection died during target selection; it stored
+   nothing). R2 access design note: the Worker presigns and mints
+   temporary credentials locally (Cloudflare's documented HS256
+   JWT mint) over a bucket-scoped S3 keypair — but see the
+   credential gap below. One deliberate improvement over lib: a
+   completed receipt whose manifest is missing gets its manifest
+   rebuilt from the chunk listing instead of looping forever.
 6. **`media-transcribe`** (AssemblyAI) — same handover shape, after
    normalize (its inputs are normalize's outputs).
+   **Status Nov 3, 2026: built, deployed in shadow
+   (`TRANSCRIBE_MODE`), rehearsed; the takeover itself is waiting
+   on the stage's credential (below).** The port
+   (`cloudflare/src/transcribe.ts`) calls `api.assemblyai.com`
+   directly (the exe.dev proxy retires with this stage), keeps
+   lib's durable jobs receipt (committed after every accepted
+   job, so a second submitter can never re-buy a job), and
+   produces byte-identical vendor/canonical/settled artifacts.
+   Rehearsal: **500 manifests diffed across two slices — zero
+   disagreements** (every manifest accounted for as done,
+   in-flight, or settled, with receipt contents matching the
+   manifest they belong to). End-to-end proof (Nov 3, driven from
+   medina-dev through the key-injecting proxy because the
+   Worker's own key binding is not attached yet): exactly **one**
+   paid submission — a 899.6 s already-transcribed capture,
+   presigned with the shipped code — and the resulting text
+   matched the canonical transcript **byte for byte**. Live-mode
+   pacing deliberately differs from the server's: 8 items per
+   cron tick (the server's own concurrency bound, spread over
+   minutes) instead of one warm hour-long pass.
+
+   **The credential gap blocking both takeovers (Nov 3).** Both
+   stages need their vendor key as a Secrets Store binding on the
+   Worker, and normalize additionally needs an S3 keypair for the
+   bucket (`ARTIFACTS_S3`). Three facts, all verified by attempting
+   the deploy: (1) Alchemy's Secrets Store Secret resource
+   reconciles the stored value FROM the deploy environment —
+   declaring either key with a value the deployer holds would
+   overwrite the value Scott placed in the store, and neither
+   stored value is the deployer's to supply (the Transloadit key
+   is Scott's new scoped "cloudflare" key; medina-dev never held
+   an AssemblyAI key at all — the exe.dev proxy injects it).
+   (2) Declaring `ARTIFACTS_S3` via
+   `Cloudflare.R2.S3Credentials` failed its first deploy: the
+   deploy credential is not authorized to create account API
+   tokens. (3) The hskping-style out-of-band attach was not used:
+   this stack's convention is declared bindings, and an
+   undeclared binding silently disappears on the next deploy.
+   Unblocks, any one per credential: Scott supplies the stored
+   values to a deploy (they are then declared in
+   `alchemy.run.ts` in the `IndexApiToken` shape); or, for the
+   R2 keypair only, the deploy credential gains API-token
+   administration and the `S3Credentials` declaration returns.
+   Until then both stages run their shadows (which need no
+   vendor keys), medina-dev keeps both stages (its
+   `MEDINA_SOURCES` already carries the `normalize`/`transcribe`
+   tokens, added Nov 3 ahead of the flips), and each stage
+   reports its vendor path as unconfigured if asked to perform.
+   The rollback positions are unchanged: mode variable back to
+   shadow + the server token removed, per stage.
 7. **`gps-compact` / `gps-stays`** — pure derivations, but the points
    store is Parquet partitions; a Worker-side Parquet writer is a
    design item of its own, so these sit late deliberately.

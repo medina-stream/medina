@@ -45,8 +45,18 @@ State is local (`.alchemy/`, committed), matching hskping.
   upload bucket; the stack declares them only to bind them to the
   Worker. Never run `alchemy destroy` on this stack without
   removing those resources first.
-- **No secrets in the stack.** Provider keys will be Secrets Store
-  bindings attached out-of-band (hskping Path B), never declared here.
+- **Secrets are declared, never attached out-of-band.** The index
+  token is a Secrets Store Secret resource in `alchemy.run.ts`,
+  its value supplied through the deploy environment
+  (`INDEX_API_TOKEN` must be set for any deploy). The media
+  stages' provider keys (`ASSEMBLYAI_API_KEY`,
+  `TRANSLOADIT_API_KEY`) are not declared yet — Alchemy
+  reconciles a declared secret's value from the deploy
+  environment, and the values Scott placed in the store are not
+  the deployer's to supply; see the credential-gap note at
+  `docs/cloudflare-migration.md` §4.3 step 6 before declaring
+  them with any other value (declaring would overwrite the
+  stored value).
 - The root repo `.gitignore` ignores `package.json`/`tsconfig.json`
   at every depth (a bun-server-era rule); the local `.gitignore` in
   this directory re-includes them for this package only.
