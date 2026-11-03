@@ -50,12 +50,27 @@
  * unreceipted items and then runs the same diff over the result, so
  * the notebook keeps verifying the pipeline that now runs here.
  *
+ * Milestone 4 steps 3–4 add two more passes to the same Cron
+ * Trigger. The star detector (src/stars.ts) re-reads the day-index
+ * snapshot's current and previous UTC days, plans the voice-star
+ * filings and the retention sweep exactly as medina-dev's detector
+ * does, and diffs the plan against the authored star records;
+ * STAR_DETECTOR_MODE flips it from shadow to performing. The
+ * archive sweep (src/archive.ts) reconciles a bounded slice of
+ * captures per tick against their archive receipts — receipt-less
+ * captures first when live, a rotating slice of the census when
+ * shadowing; ARCHIVE_SWEEP_MODE is its flip. `POST /stars/run`,
+ * `GET /stars/status`, `POST /archive/run`, and
+ * `GET /archive/status` (same device-token gate) expose both for
+ * parity checks.
+ *
  * The handler is an Effect program (the repo's HTTP precedent is
  * Effect HttpRouter on the server; the full router port arrives with
  * the read-cutover phase of the migration — for two routes and a
  * health check, the program below is the whole router).
  */
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import {
   capturePlatformLayer,
   runCaptureLivePass,
@@ -63,12 +78,26 @@ import {
   type CaptureEnv,
   type SecretsStoreSecretLike,
 } from "./capture.ts";
+import { artifactCatalogLayer } from "./catalog.ts";
+import {
+  runStarsLivePass,
+  runStarsShadowPass,
+  starsPlatformLayer,
+  type StarsEnv,
+} from "./stars.ts";
+import {
+  archivePlatformLayer,
+  runArchivePass,
+  type ArchiveEnv,
+} from "./archive.ts";
 import {
   handleJournal,
   refreshReadModelSnapshot,
 } from "./journal.ts";
 
 export { CaptureShadow } from "./capture.ts";
+export { StarsShadow } from "./stars.ts";
+export { ArchiveShadow } from "./archive.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -91,6 +120,7 @@ interface R2ListedObjectLike {
 
 interface R2ListPageLike {
   readonly objects: ReadonlyArray<R2ListedObjectLike>;
+  readonly delimitedPrefixes?: ReadonlyArray<string>;
   readonly truncated: boolean;
   readonly cursor?: string;
 }
@@ -118,6 +148,7 @@ interface R2BucketLike {
     readonly prefix?: string;
     readonly limit?: number;
     readonly cursor?: string;
+    readonly delimiter?: string;
   }): Promise<R2ListPageLike>;
 }
 
@@ -136,12 +167,18 @@ interface Env {
   readonly CAPTURE_IN: R2BucketLike;
   readonly ShadowDiscovery: DurableObjectNamespaceLike;
   readonly CaptureShadow: DurableObjectNamespaceLike;
+  readonly StarsShadow: DurableObjectNamespaceLike;
+  readonly ArchiveShadow: DurableObjectNamespaceLike;
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
   /** Plain deploy variable (declared in alchemy.run.ts): "live" makes
    * the capture loop perform; anything else keeps it a shadow. */
   readonly CAPTURE_LOOP_MODE?: string;
+  /** Step 3: "live" makes the star detector perform; else shadow. */
+  readonly STAR_DETECTOR_MODE?: string;
+  /** Step 4: "live" makes the archive sweep perform; else shadow. */
+  readonly ARCHIVE_SWEEP_MODE?: string;
 }
 
 const captureEnv = (env: Env): CaptureEnv => ({
@@ -151,6 +188,40 @@ const captureEnv = (env: Env): CaptureEnv => ({
   notebook: env.CaptureShadow,
   loopMode: env.CAPTURE_LOOP_MODE === "live" ? "live" : "shadow",
 });
+
+const starsEnv = (env: Env): StarsEnv => ({
+  artifacts: env.ARTIFACTS,
+  notebook: env.StarsShadow,
+});
+
+const archiveEnv = (env: Env): ArchiveEnv => ({
+  artifacts: env.ARTIFACTS,
+  notebook: env.ArchiveShadow,
+});
+
+const starsMode = (env: Env): "live" | "shadow" =>
+  env.STAR_DETECTOR_MODE === "live" ? "live" : "shadow";
+
+const archiveMode = (env: Env): "live" | "shadow" =>
+  env.ARCHIVE_SWEEP_MODE === "live" ? "live" : "shadow";
+
+/**
+ * The full stage platform: the capture loop's services and the
+ * artifact catalog as the base, with the step-3/4 stages' own
+ * services built on top of it. One composition for the cron and
+ * the manual endpoints, so both run the passes identically.
+ */
+const stagePlatform = (env: Env) => {
+  const base = Layer.mergeAll(
+    capturePlatformLayer(captureEnv(env)),
+    artifactCatalogLayer(env.ARTIFACTS),
+  );
+  return Layer.mergeAll(
+    base,
+    starsPlatformLayer(starsEnv(env)).pipe(Layer.provide(base)),
+    archivePlatformLayer(archiveEnv(env)).pipe(Layer.provide(base)),
+  );
+};
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
@@ -595,6 +666,183 @@ const serveCaptureStatus = (
     });
   });
 
+/** The device-token gate value from a request (Bearer or ?token=). */
+const gateToken = (request: Request, url: URL): string => {
+  const bearer = request.headers.get("authorization");
+  return bearer !== null && bearer.startsWith("Bearer ")
+    ? bearer.slice("Bearer ".length)
+    : (url.searchParams.get("token") ?? "");
+};
+
+/**
+ * Manual trigger for one star-detector pass (§4.3 step 3), same
+ * device-token gate — parity tooling: it runs exactly what the Cron
+ * Trigger runs (in live mode: perform, then diff), synchronously,
+ * with the report in the response. `?staleMinutes=N` (default 15)
+ * is how old a divergence must be before it counts as a mismatch
+ * rather than pending.
+ */
+const serveStarsRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const now = new Date();
+    const staleMinutes = Number(url.searchParams.get("staleMinutes") ?? "15");
+    const staleAfterMs =
+      (Number.isFinite(staleMinutes) && staleMinutes > 0
+        ? staleMinutes
+        : 15) * 60_000;
+    const platform = stagePlatform(env);
+    const live =
+      starsMode(env) === "live"
+        ? yield* runStarsLivePass({ now }).pipe(
+            Effect.provide(platform),
+            Effect.map((summary) => ({ ok: true as const, summary })),
+            Effect.catch((cause) =>
+              Effect.succeed({
+                ok: false as const,
+                error: String(cause).slice(0, 500),
+              }),
+            ),
+          )
+        : null;
+    const outcome = yield* runStarsShadowPass({
+      mode: "manual",
+      now,
+      staleAfterMs,
+      ...(live !== null && live.ok
+        ? {
+            performed: {
+              filed: live.summary.filed,
+              swept: live.summary.swept,
+            },
+          }
+        : {}),
+    }).pipe(
+      Effect.provide(platform),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(
+      live === null ? outcome : { ...outcome, live },
+      outcome.ok ? 200 : 500,
+    );
+  });
+
+/** The star detector's notebook (last report), same gate. */
+const serveStarsStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.StarsShadow.get(
+      env.StarsShadow.idFromName("stars-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://stars-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "stars status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+/**
+ * Manual trigger for one archive-sweep pass (§4.3 step 4), same
+ * device-token gate — parity tooling: in shadow mode it diffs the
+ * census slice named by `?offset=`/`?limit=` (defaults 0/500);
+ * in live mode it performs one pass (frontier first, then the
+ * round-robin slice) with `?limit=` as the work bound.
+ * `?staleMinutes=N` (default 60) is the pending grace for young
+ * captures.
+ */
+const serveArchiveRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const now = new Date();
+    const limitRaw = Number(url.searchParams.get("limit") ?? "500");
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0
+        ? Math.floor(limitRaw)
+        : 500;
+    const offsetRaw = Number(url.searchParams.get("offset") ?? "0");
+    const offset =
+      Number.isFinite(offsetRaw) && offsetRaw >= 0
+        ? Math.floor(offsetRaw)
+        : 0;
+    const staleMinutes = Number(url.searchParams.get("staleMinutes") ?? "60");
+    const staleAfterMs =
+      (Number.isFinite(staleMinutes) && staleMinutes > 0
+        ? staleMinutes
+        : 60) * 60_000;
+    const outcome = yield* runArchivePass({
+      mode: "manual",
+      now,
+      limit,
+      offset,
+      staleAfterMs,
+      perform: archiveMode(env) === "live",
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The archive sweep's notebook (last report), same gate. */
+const serveArchiveStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.ArchiveShadow.get(
+      env.ArchiveShadow.idFromName("archive-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://archive-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "archive status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
 const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
@@ -611,6 +859,18 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   }
   if (request.method === "POST" && url.pathname === "/capture/run") {
     return serveCaptureRun(env, request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/stars/status") {
+    return serveStarsStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/stars/run") {
+    return serveStarsRun(env, request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/archive/status") {
+    return serveArchiveStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/archive/run") {
+    return serveArchiveRun(env, request, url);
   }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
@@ -770,6 +1030,88 @@ export default {
           Effect.provide(platform),
           Effect.catch((cause) =>
             Effect.logError("capture loop pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // The star detector (§4.3 step 3): rides the same Cron Trigger
+    // — the server's 90-second cadence becomes the cron's minute,
+    // which the plan accepts. In live mode each tick first performs
+    // the plan (filings, then the retention sweep) and then diffs
+    // the result into the notebook; in shadow mode only the diff
+    // runs. Failures are logged and swallowed, as with every pass
+    // here — the next tick self-heals.
+    const starsNow = new Date(controller.scheduledTime);
+    ctx.waitUntil(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          let performed: { filed: number; swept: number } | undefined;
+          if (starsMode(env) === "live") {
+            const summary = yield* runStarsLivePass({
+              now: starsNow,
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logError("star detector live pass failed", cause).pipe(
+                  Effect.as(null),
+                ),
+              ),
+            );
+            if (summary !== null) {
+              performed = { filed: summary.filed, swept: summary.swept };
+              yield* Effect.logInfo(
+                `star detector live pass: filed ${summary.filed}, swept ${summary.swept}, born-expired ${summary.bornExpired}` +
+                  (summary.failure !== null
+                    ? `, stopped early: ${summary.failure}`
+                    : ""),
+              );
+            }
+          }
+          const report = yield* runStarsShadowPass({
+            mode: "cron",
+            now: starsNow,
+            staleAfterMs: 15 * 60 * 1000,
+            ...(performed === undefined ? {} : { performed }),
+          });
+          yield* Effect.logInfo(
+            `star detector shadow pass: ${report.commands} commands, filings matched ${report.filingsMatched}/${report.filings} ` +
+              `(pending ${report.filingsPending}, mismatched ${report.filingsMismatched}), server-only ${report.serverOnly}, ` +
+              `sweeps planned ${report.sweepPlanned} (pending ${report.sweepPending}, missed ${report.sweepMismatched}), ` +
+              `index built ${report.indexBuiltAt ?? "none"}`,
+          );
+        }).pipe(
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("star detector pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // The archive sweep (§4.3 step 4): a bounded slice per tick.
+    // Live mode performs (receipt-less captures first, then the
+    // round-robin re-verification slice); shadow mode diffs the
+    // rotating slice, so full-census coverage accumulates in the
+    // notebook. Same failure posture: log and swallow.
+    const archiveNow = new Date(controller.scheduledTime);
+    ctx.waitUntil(
+      Effect.runPromise(
+        runArchivePass({
+          mode: "cron",
+          now: archiveNow,
+          limit: 200,
+          staleAfterMs: 60 * 60 * 1000,
+          perform: archiveMode(env) === "live",
+        }).pipe(
+          Effect.tap((report) =>
+            Effect.logInfo(
+              `archive sweep pass (${archiveMode(env)}): checked ${report.checked}/${report.totalCaptures} captures, ` +
+                `matched ${report.matched}, ghosts ${report.ghosts}, pending ${report.pending}, mismatched ${report.mismatched}, ` +
+                `would-upload ${report.wouldUpload}, performed ${report.performedReceipts} receipts / ${report.performedCopies} copies, ` +
+                `errors ${report.errors.length}`,
+            ),
+          ),
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("archive sweep pass failed", cause),
           ),
         ),
       ),

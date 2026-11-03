@@ -792,7 +792,7 @@ type LifelogEnv = Drive.Drive | Bucket.Bucket | Bucket.SourceBucket | R2TempCred
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const enabled = new Set(
-      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture")
+      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive")
         .split(",")
         .map((name) => name.trim())
         .filter(Boolean)
@@ -969,7 +969,14 @@ const Ingest = Layer.effectDiscard(
         // to R2; remote Drive allowlist imports arrive pre-normalized. The
         // transcription stage submits signed R2 URLs and only polls durable
         // job receipts on later passes, then GPS derivations run.
-        [archiveSweepSource, mediaNormalizeSource, mediaTranscribeSource, gpsCompactSource, staysSource],
+        [
+          // The archive sweep is excludable like a source: at its
+          // migration cutover (docs/cloudflare-migration.md §4.3
+          // step 4) the Worker performs it and this stage stands
+          // down (MEDINA_SOURCES without "archive").
+          ...(enabled.has("archive") ? [archiveSweepSource] : []),
+          mediaNormalizeSource, mediaTranscribeSource, gpsCompactSource, staysSource
+        ],
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement
         // changes), movement enriches journals, and the journal reads both.
@@ -1026,13 +1033,18 @@ const Ingest = Layer.effectDiscard(
     // commands and file them as voice stars, then run the retention
     // sweep. Idempotent by deterministic command ids; off the request
     // path entirely; failures are caught and logged here so a bad pass
-    // can never take the ingest loops down with it.
-    yield* detectAndFileStars(new Date()).pipe(
-      Effect.provide(StarsLive),
-      Effect.catchCause((cause) => Effect.logError("star detector sweep failed", cause)),
-      Effect.repeat(Schedule.spaced(`${STAR_DETECTOR_PERIOD_SECONDS} seconds`)),
-      Effect.forkScoped
-    )
+    // can never take the ingest loops down with it. Excludable like a
+    // source: at its migration cutover (docs/cloudflare-migration.md
+    // §4.3 step 3) the Worker performs it and this loop stands down
+    // (MEDINA_SOURCES without "stars").
+    if (enabled.has("stars")) {
+      yield* detectAndFileStars(new Date()).pipe(
+        Effect.provide(StarsLive),
+        Effect.catchCause((cause) => Effect.logError("star detector sweep failed", cause)),
+        Effect.repeat(Schedule.spaced(`${STAR_DETECTOR_PERIOD_SECONDS} seconds`)),
+        Effect.forkScoped
+      )
+    }
   })
 )
 

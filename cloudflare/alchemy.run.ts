@@ -150,6 +150,17 @@ export const Api = Cloudflare.Worker("Api", {
     // flipping this back to "shadow", redeploying, and re-enabling
     // medina-dev's capture loop in the same batch.
     CAPTURE_LOOP_MODE: "live",
+    // Milestone 4 steps 3–4: the star detector's and archive
+    // sweep's notebooks and modes, same pattern as step 2 — "shadow"
+    // plans and diffs only; "live" performs, with medina-dev's
+    // corresponding stage standing down in the same batch
+    // (MEDINA_SOURCES without "stars" / "archive"). Rolling a stage
+    // back is flipping its mode to "shadow", redeploying, and
+    // re-enabling the stage on medina-dev.
+    StarsShadow: Cloudflare.DurableObject("StarsShadow"),
+    ArchiveShadow: Cloudflare.DurableObject("ArchiveShadow"),
+    STAR_DETECTOR_MODE: "shadow",
+    ARCHIVE_SWEEP_MODE: "shadow",
   },
 });
 
