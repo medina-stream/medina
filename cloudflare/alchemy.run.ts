@@ -143,6 +143,13 @@ export const Api = Cloudflare.Worker("Api", {
     // index credential its diff reads through.
     CaptureShadow: Cloudflare.DurableObject("CaptureShadow"),
     INDEX_API_TOKEN: IndexApiToken,
+    // Milestone 4 step 2 cutover: the capture loop's mode. "shadow"
+    // (the step-2 build) plans and diffs only; "live" performs the
+    // plans on this Worker and medina-dev's capture loop stands down
+    // (MEDINA_SOURCES without "capture"). Rolling back the stage is
+    // flipping this back to "shadow", redeploying, and re-enabling
+    // medina-dev's capture loop in the same batch.
+    CAPTURE_LOOP_MODE: "shadow",
   },
 });
 

@@ -7,9 +7,18 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  appendProvenanceRecord,
+  canonicalTranscriptKey,
   captureBlobKey,
   classifySourceKey,
+  contentTypeForKey,
+  fixWins,
+  gpsInboxFile,
+  gpsInboxPoint,
+  gpsInboxText,
   identityVersion,
+  ingestIdFor,
+  latestLocationJson,
   latestLocationKey,
   liveTranscriptKey,
   localTranscriptKey,
@@ -17,9 +26,13 @@ import {
   parseDeviceEvent,
   parseLivePhoneTranscript,
   parseLocationFix,
+  parsePhoneTranscript,
   parseReceipt,
+  phoneTranscriptJson,
   provenanceKey,
+  receiptJson,
   receiptKeyFor,
+  sha256Hex,
   SourceObject,
 } from "./capture.ts";
 
@@ -188,5 +201,172 @@ describe("payload validation", () => {
     ).toBe("x");
     expect(parseReceipt({ nope: 1 })).toBeNull();
     expect(parseReceipt("str")).toBeNull();
+  });
+  test("final first-look transcripts require a content-hash capture id", () => {
+    const captureId = "a".repeat(64);
+    const parsed = parsePhoneTranscript({
+      schemaVersion: 1,
+      captureId,
+      audioKey: AUDIO_KEY,
+      text: "hello world",
+      segments: [{ start: 0, end: 2, text: "hello world" }],
+    });
+    expect(parsed?.captureId).toBe(captureId);
+    expect(parsed?.engine).toBe("whisper.cpp");
+    expect(parsed?.capturedAt).toBeNull();
+    expect(
+      parsePhoneTranscript({ schemaVersion: 1, captureId: "short", text: "", segments: [] }),
+    ).toBeNull();
+    expect(
+      parsePhoneTranscript({ schemaVersion: 1, captureId, text: "", segments: [{ start: "0" }] }),
+    ).toBeNull();
+  });
+});
+
+describe("performed writes", () => {
+  const captureId = "b".repeat(64);
+  test("receipt and identity derivations match the server", () => {
+    expect(receiptJson("cap", "2026-11-02T18:00:00.000Z")).toEqual({
+      captureId: "cap",
+      ingestedAt: "2026-11-02T18:00:00.000Z",
+    });
+    expect(ingestIdFor("capture-bucket", "a/b c.m4a", "v1")).toBe(
+      "capture-bucket-abcm4a-v1",
+    );
+    expect(canonicalTranscriptKey(captureId)).toBe(
+      `transcript/assemblyai-u35p-v1/${captureId}.json`,
+    );
+    expect(contentTypeForKey("x/y.json", "fb")).toBe("application/json");
+    expect(contentTypeForKey("x/y.m4a", "fb")).toBe("audio/mp4");
+    expect(contentTypeForKey("x/y.ndjson", "fb")).toBe("application/x-ndjson");
+    expect(contentTypeForKey("x/y.bin", "fb")).toBe("fb");
+  });
+  test("provenance appends a sighting once, keyed by source+file+name", () => {
+    const record = {
+      source: "capture-bucket",
+      filename: "seg.m4a",
+      fileId: AUDIO_KEY,
+      mimeType: "audio/mp4",
+      modifiedTime: "2026-11-02T18:00:00.000Z",
+      md5Checksum: "etag-1",
+      fetchedAt: "2026-11-02T18:01:00.000Z",
+    };
+    const first = appendProvenanceRecord(null, captureId, record);
+    expect(first.changed).toBe(true);
+    expect(first.next.records).toHaveLength(1);
+    const again = appendProvenanceRecord(first.next, captureId, record);
+    expect(again.changed).toBe(false);
+    expect(again.next.records).toHaveLength(1);
+    const other = appendProvenanceRecord(first.next, captureId, {
+      ...record,
+      filename: "renamed.m4a",
+    });
+    expect(other.changed).toBe(true);
+    expect(other.next.records).toHaveLength(2);
+    // A corrupt existing document is treated as absent, as the
+    // server's failed schema decode is.
+    expect(appendProvenanceRecord("junk", captureId, record).changed).toBe(
+      true,
+    );
+  });
+  test("phone transcripts serialize in the Transcript schema's shape", () => {
+    const doc = phoneTranscriptJson(
+      {
+        capturedAt: null,
+        segments: [{ start: 0.0004, end: 1.5, text: "hi" }],
+        text: "hi",
+      },
+      "1",
+      captureId,
+      AUDIO_KEY,
+      "2026-11-02T18:01:00.000Z",
+    );
+    expect(doc["provider"]).toBe("ondevice");
+    expect("capturedAt" in doc).toBe(false);
+    expect(doc["transcriptId"]).toBeNull();
+    expect(doc["status"]).toBe("completed");
+    expect(doc["utterances"]).toEqual([
+      { speaker: null, startMs: 0, endMs: 1500, text: "hi", confidence: null },
+    ]);
+    const withStamp = phoneTranscriptJson(
+      { capturedAt: "2026-11-02T18:00:00.000Z", segments: [], text: "" },
+      "live-3",
+      `live/${INSTALL}/${SEGMENT}`,
+      AUDIO_KEY,
+      "2026-11-02T18:01:00.000Z",
+    );
+    expect(withStamp["capturedAt"]).toBe("2026-11-02T18:00:00.000Z");
+    expect(withStamp["version"]).toBe("live-3");
+  });
+  test("the latest-location reduction is newest-wins, ties by sequence", () => {
+    const believed = {
+      at: "2026-11-02T18:00:00.000Z",
+      eventSeq: 7,
+    };
+    expect(fixWins({ at: "2026-11-02T18:01:00.000Z", eventSeq: 1 }, believed)).toBe(true);
+    expect(fixWins({ at: "2026-11-02T17:59:00.000Z", eventSeq: 99 }, believed)).toBe(false);
+    expect(fixWins({ at: believed.at, eventSeq: 8 }, believed)).toBe(true);
+    expect(fixWins({ at: believed.at, eventSeq: 7 }, believed)).toBe(false);
+    expect(fixWins({ at: believed.at, eventSeq: 1 }, null)).toBe(true);
+    expect(fixWins({ at: believed.at, eventSeq: 1 }, "junk")).toBe(true);
+  });
+  test("latest-location and gps inbox documents match the server's", async () => {
+    const event = parseDeviceEvent({
+      schemaVersion: 1,
+      id: "evt-9",
+      device: INSTALL,
+      seq: 11,
+      at: "2026-11-02T18:05:00.000Z",
+      type: "location.fix",
+      payload: {
+        lat: 37.7968,
+        lon: -122.4373,
+        accuracyM: 9,
+        speedMps: 1.5,
+        bearingDeg: null,
+        mock: false,
+        activity: { type: "walking", confidence: 80 },
+      },
+    });
+    if (event === null) throw new Error("event should parse");
+    const fix = parseLocationFix(event.payload);
+    if (fix === null) throw new Error("fix should parse");
+    expect(
+      latestLocationJson(event, fix, "2026-11-02T18:05:30.000Z"),
+    ).toEqual({
+      installId: INSTALL,
+      lat: 37.7968,
+      lon: -122.4373,
+      accuracyM: 9,
+      speedMps: 1.5,
+      bearingDeg: null,
+      activityType: "walking",
+      activityConfidence: 80,
+      at: "2026-11-02T18:05:00.000Z",
+      eventId: "evt-9",
+      eventSeq: 11,
+      updatedAt: "2026-11-02T18:05:30.000Z",
+    });
+    const point = gpsInboxPoint(event, fix);
+    expect(point.source).toBe(`capture/${INSTALL}`);
+    expect(point.ts).toBe("2026-11-02T18:05:00.000Z");
+    expect(point.acc).toBe(9);
+    expect(JSON.parse(point.raw)).toEqual({
+      id: "evt-9",
+      device: INSTALL,
+      seq: 11,
+      at: "2026-11-02T18:05:00.000Z",
+      type: "location.fix",
+      payload: event.payload,
+    });
+    const text = gpsInboxText([point]);
+    expect(text.endsWith("\n")).toBe(true);
+    expect(text.trim().split("\n")).toHaveLength(1);
+    const hash = await sha256Hex(text);
+    const file = gpsInboxFile([point], "2026-11-02T18:05:30.123Z", hash);
+    expect(file.key).toBe(
+      `gps/inbox/2026-11-02T180530123Z-${hash.slice(0, 8)}.ndjson`,
+    );
+    expect(file.text).toBe(text);
   });
 });

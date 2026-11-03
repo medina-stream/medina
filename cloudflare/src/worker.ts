@@ -36,14 +36,19 @@
  * reports the shadow's notebook for parity checks against
  * medina-dev's ingest receipts.
  *
- * Milestone 4 step 2 adds the capture-loop shadow (src/capture.ts):
- * the same Cron Trigger also plans the trailing window of the three
+ * Milestone 4 step 2 adds the capture loop (src/capture.ts): the
+ * same Cron Trigger also plans the trailing window of the three
  * capture sources (capture-bucket, device-events, local-transcripts)
  * and diffs each item's plan — receipt, artifact keys, index
- * registrations, and the coalesced latest-location reduction — against
- * what medina-dev actually produced. `POST /capture/run` and `GET
- * /capture/status` (same device-token gate) expose it for parity
- * checks. Shadow only: medina-dev remains the sole live pipeline.
+ * registrations, and the coalesced latest-location reduction —
+ * against what the live pipeline produced. `POST /capture/run` and
+ * `GET /capture/status` (same device-token gate) expose it for
+ * parity checks. The loop's mode is the CAPTURE_LOOP_MODE deploy
+ * variable: as a shadow (the step-2 build) it performed nothing and
+ * medina-dev remained the sole live pipeline; the step-2 cutover
+ * flipped it to "live", where each tick first performs the window's
+ * unreceipted items and then runs the same diff over the result, so
+ * the notebook keeps verifying the pipeline that now runs here.
  *
  * The handler is an Effect program (the repo's HTTP precedent is
  * Effect HttpRouter on the server; the full router port arrives with
@@ -53,6 +58,7 @@
 import * as Effect from "effect/Effect";
 import {
   capturePlatformLayer,
+  runCaptureLivePass,
   runCaptureShadowPass,
   type CaptureEnv,
   type SecretsStoreSecretLike,
@@ -68,11 +74,12 @@ export { CaptureShadow } from "./capture.ts";
 // uses, so the file stands alone without @cloudflare/workers-types —
 // the same approach as workers/medina-index/src/index.ts.
 
-/** The slice of the R2 bucket binding this worker uses: reads only. */
+/** The slice of the R2 bucket binding this worker uses. */
 interface R2ObjectLike {
   readonly body: ReadableStream;
   readonly size: number;
   readonly httpEtag: string;
+  arrayBuffer(): Promise<ArrayBuffer>;
 }
 
 interface R2ListedObjectLike {
@@ -100,12 +107,13 @@ interface R2BucketLike {
   head(key: string): Promise<R2ObjectHeadLike | null>;
   put(
     key: string,
-    value: string,
+    value: string | Uint8Array,
     options?: {
       readonly httpMetadata?: { readonly contentType?: string };
       readonly customMetadata?: Record<string, string>;
     },
   ): Promise<unknown>;
+  delete(key: string): Promise<void>;
   list(options: {
     readonly prefix?: string;
     readonly limit?: number;
@@ -131,6 +139,9 @@ interface Env {
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
+  /** Plain deploy variable (declared in alchemy.run.ts): "live" makes
+   * the capture loop perform; anything else keeps it a shadow. */
+  readonly CAPTURE_LOOP_MODE?: string;
 }
 
 const captureEnv = (env: Env): CaptureEnv => ({
@@ -138,6 +149,7 @@ const captureEnv = (env: Env): CaptureEnv => ({
   artifacts: env.ARTIFACTS,
   indexToken: env.INDEX_API_TOKEN,
   notebook: env.CaptureShadow,
+  loopMode: env.CAPTURE_LOOP_MODE === "live" ? "live" : "shadow",
 });
 
 const json = (body: unknown, status = 200): Response =>
@@ -462,13 +474,14 @@ const serveJournalRefresh = (
   });
 
 /**
- * Manual trigger for one capture-loop shadow pass (§4.3 step 2), same
+ * Manual trigger for one capture-loop pass (§4.3 step 2), same
  * device-token gate — parity tooling: it runs exactly what the Cron
- * Trigger runs, synchronously, with the report in the response, so a
- * checker can diff any window on demand. Window: `?from=<ISO>&to=<ISO>`
- * or `?hours=N` (default 1) ending now; `?staleMinutes=N` (default 15)
- * is how old an unreceipted item must be before it counts as missing
- * rather than pending.
+ * Trigger runs (in live mode: perform, then diff), synchronously,
+ * with the report in the response, so a checker can work any window
+ * on demand. Window: `?from=<ISO>&to=<ISO>` or `?hours=N` (default 1)
+ * ending now; `?staleMinutes=N` (default 15) is how old an
+ * unreceipted item must be before it counts as missing rather than
+ * pending.
  */
 const serveCaptureRun = (
   env: Env,
@@ -502,16 +515,42 @@ const serveCaptureRun = (
     const staleMinutes = Number(
       url.searchParams.get("staleMinutes") ?? "15",
     );
+    const staleAfterMs =
+      (Number.isFinite(staleMinutes) && staleMinutes > 0
+        ? staleMinutes
+        : 15) * 60_000;
+    const platform = capturePlatformLayer(captureEnv(env));
+    // In live mode a manual run performs first — over the requested
+    // window, with the per-source cap lifted so a checker can drain
+    // a backlog on demand — and then diffs, exactly the cron's two
+    // halves. In shadow mode it only diffs, as it always has.
+    const live =
+      captureEnv(env).loopMode === "live"
+        ? yield* runCaptureLivePass({
+            windowFrom,
+            windowTo,
+            perSourceLimit: 1000,
+          }).pipe(
+            Effect.provide(platform),
+            Effect.map((summary) => ({ ok: true as const, summary })),
+            Effect.catch((cause) =>
+              Effect.succeed({
+                ok: false as const,
+                error: String(cause).slice(0, 500),
+              }),
+            ),
+          )
+        : null;
     const outcome = yield* runCaptureShadowPass({
       mode: "manual",
       windowFrom,
       windowTo,
-      staleAfterMs:
-        (Number.isFinite(staleMinutes) && staleMinutes > 0
-          ? staleMinutes
-          : 15) * 60_000,
+      staleAfterMs,
+      ...(live !== null && live.ok
+        ? { performed: live.summary.performed }
+        : {}),
     }).pipe(
-      Effect.provide(capturePlatformLayer(captureEnv(env))),
+      Effect.provide(platform),
       Effect.map((report) => ({ ok: true as const, report })),
       Effect.catch((cause) =>
         Effect.succeed({
@@ -520,7 +559,10 @@ const serveCaptureRun = (
         }),
       ),
     );
-    return json(outcome, outcome.ok ? 200 : 500);
+    return json(
+      live === null ? outcome : { ...outcome, live },
+      outcome.ok ? 200 : 500,
+    );
   });
 
 /** The capture shadow's notebook (last report), same gate. */
@@ -647,37 +689,87 @@ export default {
         ),
       ),
     );
-    // Capture-loop shadow (§4.3 step 2): plan the trailing 75 minutes
-    // of the capture sources and diff the plan against medina-dev's
-    // receipts, artifacts, and index registrations. Shadow only — the
-    // pass writes nothing but its own notebook. Same failure posture:
-    // log and swallow, the next minute's pass self-heals.
+    // The capture loop (§4.3 step 2). In live mode (the step-2
+    // cutover) each tick first PERFORMS the trailing 24 hours'
+    // unreceipted items — receipt, artifacts, index registrations,
+    // the coalesced latest-location write — at the server's per-pass
+    // pacing, and then DIFFS the trailing 75 minutes against reality
+    // into the notebook, exactly as the shadow always did: the diff
+    // is now the flipped pipeline's own verification, and medina-dev
+    // registering again would show up in it as foreign receipts. In
+    // shadow mode only the diff runs. A failed live half never blocks
+    // the diff, and either half's failure is logged and swallowed —
+    // the next minute's pass self-heals.
     const windowTo = new Date(controller.scheduledTime);
     const windowFrom = new Date(
       controller.scheduledTime - 75 * 60 * 1000,
     );
+    const platform = capturePlatformLayer(captureEnv(env));
     ctx.waitUntil(
       Effect.runPromise(
-        runCaptureShadowPass({
-          mode: "cron",
-          windowFrom,
-          windowTo,
-          staleAfterMs: 15 * 60 * 1000,
+        Effect.gen(function* () {
+          let performed:
+            | Readonly<Record<string, number>>
+            | undefined;
+          if (captureEnv(env).loopMode === "live") {
+            const summary = yield* runCaptureLivePass({
+              windowFrom: new Date(
+                controller.scheduledTime - 24 * 60 * 60 * 1000,
+              ),
+              windowTo,
+              perSourceLimit: 25,
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logError("capture live pass failed", cause).pipe(
+                  Effect.as(null),
+                ),
+              ),
+            );
+            if (summary !== null) {
+              performed = summary.performed;
+              yield* Effect.logInfo(
+                `capture live pass: performed ` +
+                  Object.entries(summary.performed)
+                    .map(([name, n]) => `${name} ${n}`)
+                    .join(", ") +
+                  ` (${summary.alreadyReceipted} already receipted, ${summary.errors.length} errors)`,
+              );
+              for (const error of summary.errors) {
+                yield* Effect.logError(
+                  `capture live item failed: ${error.source} ${error.key}: ${error.detail}`,
+                );
+              }
+            }
+          }
+          const report = yield* runCaptureShadowPass({
+            mode: "cron",
+            windowFrom,
+            windowTo,
+            staleAfterMs: 15 * 60 * 1000,
+            ...(performed === undefined
+              ? {}
+              : {
+                  performed: performed as Readonly<
+                    Record<
+                      "capture-bucket" | "device-events" | "local-transcripts",
+                      number
+                    >
+                  >,
+                }),
+          });
+          yield* Effect.logInfo(
+            `capture shadow pass: checked ${report.checked}/${report.inWindow} in window, ` +
+              Object.entries(report.sources)
+                .map(
+                  ([name, c]) =>
+                    `${name} matched ${c.matched}/${c.classified} (pending ${c.pending}, mismatched ${c.mismatched})`,
+                )
+                .join("; "),
+          );
         }).pipe(
-          Effect.provide(capturePlatformLayer(captureEnv(env))),
-          Effect.tap((report) =>
-            Effect.logInfo(
-              `capture shadow pass: checked ${report.checked}/${report.inWindow} in window, ` +
-                Object.entries(report.sources)
-                  .map(
-                    ([name, c]) =>
-                      `${name} matched ${c.matched}/${c.classified} (pending ${c.pending}, mismatched ${c.mismatched})`,
-                  )
-                  .join("; "),
-            ),
-          ),
+          Effect.provide(platform),
           Effect.catch((cause) =>
-            Effect.logError("capture shadow pass failed", cause),
+            Effect.logError("capture loop pass failed", cause),
           ),
         ),
       ),

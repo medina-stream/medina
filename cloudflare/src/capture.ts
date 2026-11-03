@@ -14,13 +14,26 @@
  * it registers — and then either performs the plan or, in shadow mode,
  * diffs the plan against what medina-dev actually did.
  *
- * SHADOW MODE (this step): the pass performs nothing. It never writes
- * to a bucket, never registers with the index, and submits nothing
- * anywhere; its only writes are its own notebook (the CaptureShadow
- * Durable Object). medina-dev remains the sole live pipeline. The plan
- * is computed exactly as the live pass will perform it, so the diff is
- * the cutover evidence: for every object in the window, did medina-dev
- * produce precisely the artifacts the plan says it should have?
+ * SHADOW MODE (the step-2 build): the pass performs nothing. It never
+ * writes to a bucket, never registers with the index, and submits
+ * nothing anywhere; its only writes are its own notebook (the
+ * CaptureShadow Durable Object). The plan is computed exactly as the
+ * live pass performs it, so the diff is the cutover evidence: for
+ * every object in the window, did the live pipeline produce precisely
+ * the artifacts the plan says it should have?
+ *
+ * LIVE MODE (the step-2 cutover, Nov 2): the loop runs in two halves
+ * on the same plan. The live pass performs every unreceipted item in
+ * its scan window — the receipt write, the artifact writes, the index
+ * registrations, each exactly as medina-dev's ingest performed them
+ * (lib/capture/Audio.ts, DeviceEvents.ts, LocalTranscripts.ts through
+ * the ArtifactStore seam: a write lands in the bucket, then registers
+ * itself; a failed registration fails the write). The shadow pass
+ * then diffs the trailing window against reality as before — whoever
+ * wrote the receipts — so the notebook keeps verifying the pipeline
+ * after the flip, and medina-dev's silence is itself observable.
+ * Which mode runs is the CAPTURE_LOOP_MODE deploy variable; shadow is
+ * the default and the rollback position.
  *
  * The device-events hardening (§4.3 step 2) is built in by
  * construction: the plan reduces a batch's location fixes to ONE
@@ -180,6 +193,27 @@ export interface LivePhoneTranscript {
   readonly installId: string;
   readonly capturedAt: string | null;
   readonly updateSeq: number;
+  readonly segments: ReadonlyArray<{
+    readonly start: number;
+    readonly end: number;
+    readonly text: string;
+  }>;
+  readonly text: string;
+}
+
+/** A sealed segment's final first-look transcript (parsePhoneTranscript). */
+export interface PhoneTranscript {
+  readonly captureId: string;
+  readonly audioKey: string;
+  readonly capturedAt: string | null;
+  readonly engine: string;
+  readonly model: string;
+  readonly language: string;
+  readonly segments: ReadonlyArray<{
+    readonly start: number;
+    readonly end: number;
+    readonly text: string;
+  }>;
   readonly text: string;
 }
 
@@ -291,6 +325,48 @@ export const parseLivePhoneTranscript = (
     capturedAt:
       typeof raw["capturedAt"] === "string" ? raw["capturedAt"] : null,
     updateSeq: typeof raw["updateSeq"] === "number" ? raw["updateSeq"] : 0,
+    segments: segments as LivePhoneTranscript["segments"],
+    text,
+  };
+};
+
+/**
+ * A sealed segment's final first-look — exact port of
+ * `parsePhoneTranscript` (lib/capture/LocalTranscripts.ts): the phone
+ * computed the capture id itself (sha256 of the audio bytes), so the
+ * payload carries the identity the transcript files under.
+ */
+export const parsePhoneTranscript = (
+  raw: unknown,
+): PhoneTranscript | null => {
+  if (!isRecord(raw)) return null;
+  if (raw["schemaVersion"] !== 1) return null;
+  const captureId = raw["captureId"];
+  const text = raw["text"];
+  const segments = raw["segments"];
+  if (typeof captureId !== "string" || !/^[0-9a-f]{64}$/.test(captureId)) {
+    return null;
+  }
+  if (typeof text !== "string" || !Array.isArray(segments)) return null;
+  for (const s of segments) {
+    if (!isRecord(s)) return null;
+    if (
+      typeof s["start"] !== "number" ||
+      typeof s["end"] !== "number" ||
+      typeof s["text"] !== "string"
+    ) {
+      return null;
+    }
+  }
+  return {
+    captureId,
+    audioKey: typeof raw["audioKey"] === "string" ? raw["audioKey"] : "",
+    capturedAt:
+      typeof raw["capturedAt"] === "string" ? raw["capturedAt"] : null,
+    engine: typeof raw["engine"] === "string" ? raw["engine"] : "whisper.cpp",
+    model: typeof raw["model"] === "string" ? raw["model"] : "",
+    language: typeof raw["language"] === "string" ? raw["language"] : "en",
+    segments: segments as PhoneTranscript["segments"],
     text,
   };
 };
@@ -309,6 +385,261 @@ export const parseReceipt = (raw: unknown): IngestReceiptShape | null => {
     ingestedAt:
       typeof raw["ingestedAt"] === "string" ? raw["ingestedAt"] : "",
   };
+};
+
+// ---------------------------------------------------------------------------
+// Domain: the performed writes — the JSON the live pass stores, in the
+// exact shapes medina-dev's schemas serialize (lib/lifelog/Resources.ts,
+// lib/capture/DeviceEvents.ts, lib/lifelog/Gps.ts). Consumers decode by
+// schema, so field presence is the contract: optional fields the server
+// omits (a transcript's capturedAt) are omitted here too.
+// ---------------------------------------------------------------------------
+
+/** The pre-content-hash ingest id (Resources.ts `ingestId`). */
+export const ingestIdFor = (
+  source: CaptureSourceName,
+  fileId: string,
+  version: string,
+): string =>
+  `${source}-${fileId}-${version}`.replace(/[^a-zA-Z0-9_-]/g, "");
+
+/** The canonical (vendor) transcript key — the grandfather probe. */
+export const canonicalTranscriptKey = (captureId: string): string =>
+  `transcript/${TRANSCRIPT_VERSION}/${captureId}.json`;
+
+/** The receipt body (IngestReceipt): capture id + ingest instant. */
+export const receiptJson = (
+  captureId: string,
+  ingestedAt: string,
+): IngestReceiptShape => ({ captureId, ingestedAt });
+
+export interface ProvenanceRecordShape {
+  readonly source: string;
+  readonly filename: string;
+  readonly fileId: string;
+  readonly mimeType: string;
+  readonly modifiedTime: string;
+  readonly md5Checksum: string | null;
+  readonly fetchedAt: string;
+}
+
+export interface ProvenanceShape {
+  readonly captureId: string;
+  readonly records: ReadonlyArray<ProvenanceRecordShape>;
+}
+
+/**
+ * Append one sighting to a capture's provenance, unless the same
+ * (source, fileId, filename) sighting is already recorded — the
+ * server's rule (Audio.ts): the same content can arrive twice and
+ * each sighting's metadata is evidence, but a re-performed ingest of
+ * the same sighting adds nothing. Returns the next document and
+ * whether it changed. An existing document that fails to parse is
+ * treated as absent, as the server's schema decode failure is.
+ */
+export const appendProvenanceRecord = (
+  existing: unknown,
+  captureId: string,
+  record: ProvenanceRecordShape,
+): { readonly next: ProvenanceShape; readonly changed: boolean } => {
+  let records: ReadonlyArray<ProvenanceRecordShape> = [];
+  if (isRecord(existing) && Array.isArray(existing["records"])) {
+    records = existing["records"].filter(
+      (r): r is ProvenanceRecordShape =>
+        isRecord(r) &&
+        typeof r["source"] === "string" &&
+        typeof r["filename"] === "string" &&
+        typeof r["fileId"] === "string",
+    );
+  }
+  const seen = records.some(
+    (r) =>
+      r.source === record.source &&
+      r.fileId === record.fileId &&
+      r.filename === record.filename,
+  );
+  return seen
+    ? { next: { captureId, records }, changed: false }
+    : { next: { captureId, records: [...records, record] }, changed: true };
+};
+
+/**
+ * The Transcript document a phone transcript files as
+ * (LocalTranscripts.ts `transcriptFromPhone`): on-device provider,
+ * segment seconds rounded to utterance milliseconds, `capturedAt`
+ * omitted when the payload carried none.
+ */
+export const phoneTranscriptJson = (
+  parsed: {
+    readonly capturedAt: string | null;
+    readonly segments: ReadonlyArray<{
+      readonly start: number;
+      readonly end: number;
+      readonly text: string;
+    }>;
+    readonly text: string;
+  },
+  version: string,
+  ingestId: string,
+  inputKey: string,
+  completedAt: string,
+): Record<string, unknown> => ({
+  provider: "ondevice",
+  version,
+  ingestId,
+  inputKey,
+  ...(parsed.capturedAt === null
+    ? {}
+    : { capturedAt: parsed.capturedAt }),
+  transcriptId: null,
+  vendorKey: null,
+  status: "completed",
+  completedAt,
+  text: parsed.text,
+  utterances: parsed.segments.map((s) => ({
+    speaker: null,
+    startMs: Math.round(s.start * 1000),
+    endMs: Math.round(s.end * 1000),
+    text: s.text,
+    confidence: null,
+  })),
+  error: null,
+});
+
+/** The believed-position document (DeviceEvents.ts `LatestLocation`). */
+export interface LatestLocationShape {
+  readonly installId: string;
+  readonly lat: number;
+  readonly lon: number;
+  readonly accuracyM: number;
+  readonly speedMps: number | null;
+  readonly bearingDeg: number | null;
+  readonly activityType: string;
+  readonly activityConfidence: number;
+  readonly at: string;
+  readonly eventId: string;
+  readonly eventSeq: number;
+  readonly updatedAt: string;
+}
+
+export const latestLocationJson = (
+  event: DeviceEvent,
+  fix: LocationFix,
+  updatedAt: string,
+): LatestLocationShape => ({
+  installId: event.device,
+  lat: fix.lat,
+  lon: fix.lon,
+  accuracyM: fix.accuracyM,
+  speedMps: fix.speedMps,
+  bearingDeg: fix.bearingDeg,
+  activityType: fix.activityType,
+  activityConfidence: fix.activityConfidence,
+  at: event.at,
+  eventId: event.id,
+  eventSeq: event.seq,
+  updatedAt,
+});
+
+/**
+ * Does the candidate fix displace the believed position? The reduction
+ * the hardened pass writes by: newest by the event's own timestamp,
+ * ties by sequence. An absent or unreadable believed position loses.
+ */
+export const fixWins = (
+  candidate: { readonly at: string; readonly eventSeq: number },
+  believed: unknown,
+): boolean => {
+  if (!isRecord(believed)) return true;
+  const at = believed["at"];
+  const seq = believed["eventSeq"];
+  if (typeof at !== "string" || typeof seq !== "number") return true;
+  if (candidate.at !== at) return candidate.at > at;
+  return candidate.eventSeq > seq;
+};
+
+/**
+ * One GPS inbox point for a routed location.fix, and the inbox file it
+ * lands in — ports of DeviceEvents.ts's gpsInboxWrite call and
+ * Gps.ts's file naming: one NDJSON file per post, named by the post
+ * instant and the first 8 hex of the content's sha256. The envelope in
+ * `raw` is re-serialized in the server's key order.
+ */
+export interface GpsInboxPoint {
+  readonly source: string;
+  readonly ts: string;
+  readonly lat: number;
+  readonly lon: number;
+  readonly speed: number | null;
+  readonly alt: null;
+  readonly acc: number;
+  readonly batt: null;
+  readonly raw: string;
+}
+
+export const gpsInboxPoint = (
+  event: DeviceEvent,
+  fix: LocationFix,
+): GpsInboxPoint => ({
+  source: `capture/${event.device}`,
+  ts: event.at,
+  lat: fix.lat,
+  lon: fix.lon,
+  speed: fix.speedMps,
+  alt: null,
+  acc: fix.accuracyM,
+  batt: null,
+  raw: JSON.stringify({
+    id: event.id,
+    device: event.device,
+    seq: event.seq,
+    at: event.at,
+    type: event.type,
+    payload: event.payload,
+  }),
+});
+
+export const GPS_INBOX_PREFIX = "gps/inbox";
+
+/** The NDJSON body of one inbox post (one line per point, terminated). */
+export const gpsInboxText = (
+  points: ReadonlyArray<GpsInboxPoint>,
+): string => points.map((point) => JSON.stringify(point)).join("\n") + "\n";
+
+export const gpsInboxFile = (
+  points: ReadonlyArray<GpsInboxPoint>,
+  postedAtIso: string,
+  linesSha256Hex: string,
+): { readonly key: string; readonly text: string } => {
+  const name = `${postedAtIso.replace(/[:.]/g, "")}-${linesSha256Hex.slice(0, 8)}.ndjson`;
+  return { key: `${GPS_INBOX_PREFIX}/${name}`, text: gpsInboxText(points) };
+};
+
+/** SHA-256 hex of bytes or text — the index's per-write hash. */
+export const sha256Hex = async (
+  data: Uint8Array | string,
+): Promise<string> => {
+  const bytes =
+    typeof data === "string" ? new TextEncoder().encode(data) : data;
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+};
+
+/**
+ * The content type the server's artifact store stamps per key
+ * (ArtifactStore.ts `contentTypeFor`): the performed writes match it
+ * so a key's metadata does not depend on who wrote it.
+ */
+export const contentTypeForKey = (key: string, fallback: string): string => {
+  if (key.endsWith(".json")) return "application/json";
+  if (key.endsWith(".m4a")) return "audio/mp4";
+  if (key.endsWith(".ogg")) return "audio/ogg";
+  if (key.endsWith(".sqlite")) return "application/vnd.sqlite3";
+  if (key.endsWith(".ndjson")) return "application/x-ndjson";
+  if (key.endsWith(".md") || key.endsWith(".txt")) return "text/plain";
+  return fallback;
 };
 
 // ---------------------------------------------------------------------------
@@ -371,6 +702,8 @@ export class SourceCounts extends Schema.Class<SourceCounts>("SourceCounts")({
   legacy: Schema.Number,
   pending: Schema.Number,
   mismatched: Schema.Number,
+  /** Items the live pass performed this run (0 in pure shadow runs). */
+  performed: Schema.Number,
 }) {}
 
 export class CaptureShadowReport extends Schema.Class<CaptureShadowReport>(
@@ -415,6 +748,31 @@ export interface CaptureShadowOptions {
   readonly windowTo: Date;
   /** An unreceipted item younger than this is pending, not missing. */
   readonly staleAfterMs: number;
+  /** Per-source counts from a live pass that ran just before this
+   * diff (live mode); folded into the report so the notebook records
+   * performing and verifying in one entry. */
+  readonly performed?: Readonly<Record<CaptureSourceName, number>>;
+}
+
+export interface CaptureLiveOptions {
+  readonly windowFrom: Date;
+  readonly windowTo: Date;
+  /** Per-source cap on items performed in one pass — the server's
+   * discovery bound (SOURCE_BUCKET_LIMIT, 25), so a backlog drains at
+   * the pacing the pipeline was proven at. */
+  readonly perSourceLimit: number;
+}
+
+export interface CaptureLiveSummary {
+  readonly listedTotal: number;
+  readonly scanned: number;
+  readonly performed: Record<CaptureSourceName, number>;
+  readonly alreadyReceipted: number;
+  readonly errors: ReadonlyArray<{
+    readonly source: CaptureSourceName;
+    readonly key: string;
+    readonly detail: string;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +815,7 @@ export interface R2ObjectBodyLike {
   readonly body: ReadableStream;
   readonly size: number;
   readonly httpEtag: string;
+  arrayBuffer(): Promise<ArrayBuffer>;
 }
 
 export interface R2ListedObjectLike {
@@ -469,6 +828,14 @@ export interface R2ListedObjectLike {
 export interface R2BucketLike {
   get(key: string): Promise<R2ObjectBodyLike | null>;
   head(key: string): Promise<{ readonly size: number } | null>;
+  put(
+    key: string,
+    value: string | Uint8Array,
+    options?: {
+      readonly httpMetadata?: { readonly contentType?: string };
+    },
+  ): Promise<unknown>;
+  delete(key: string): Promise<void>;
   list(options: {
     readonly prefix?: string;
     readonly limit?: number;
@@ -498,6 +865,9 @@ export interface CaptureEnv {
   readonly artifacts: R2BucketLike;
   readonly indexToken: SecretsStoreSecretLike;
   readonly notebook: DurableObjectNamespaceLike;
+  /** The loop's mode, from the CAPTURE_LOOP_MODE deploy variable:
+   * "live" performs; anything else is shadow (the safe default). */
+  readonly loopMode: "shadow" | "live";
 }
 
 /** The medina-index Worker — the artifact index's public home (§1.4). */
@@ -523,10 +893,23 @@ export class CaptureSource extends Context.Service<
     readonly downloadText: (
       key: string,
     ) => Effect.Effect<string, ArtifactReadError>;
+    /** Download one object as bytes (audio segments, for hashing). */
+    readonly downloadBytes: (
+      key: string,
+    ) => Effect.Effect<Uint8Array, ArtifactReadError>;
   }
 >()("medina-cloudflare/CaptureSource") {}
 
-/** The canonical artifact bucket (sco-lifelog), existence + small JSON. */
+/**
+ * The canonical artifact bucket (sco-lifelog). Reads for the diff;
+ * writes for the live pass, with the server's ArtifactStore seam
+ * semantics: a write lands in the bucket and then registers itself in
+ * the index, and a failed registration fails the write — the index is
+ * the listing source of truth, so a write it cannot see must not
+ * pretend to have succeeded. Byte/text writes register (size, sha256);
+ * the blob write mirrors the server's putFile (size only — the bytes
+ * arrived by stream there, so no hash was ever computed for it).
+ */
 export class ArtifactLedger extends Context.Service<
   ArtifactLedger,
   {
@@ -536,6 +919,22 @@ export class ArtifactLedger extends Context.Service<
     readonly readJson: (
       key: string,
     ) => Effect.Effect<Option.Option<unknown>, ArtifactReadError>;
+    /** Raw text, un-parsed (provenance merges, provisional copies). */
+    readonly readText: (
+      key: string,
+    ) => Effect.Effect<Option.Option<string>, ArtifactReadError>;
+    readonly writeText: (
+      key: string,
+      text: string,
+    ) => Effect.Effect<void, ArtifactReadError | IndexRequestError>;
+    readonly writeBlob: (
+      key: string,
+      bytes: Uint8Array,
+    ) => Effect.Effect<void, ArtifactReadError | IndexRequestError>;
+    /** Delete + unregister (the promoted provisional's removal). */
+    readonly remove: (
+      key: string,
+    ) => Effect.Effect<void, ArtifactReadError | IndexRequestError>;
   }
 >()("medina-cloudflare/ArtifactLedger") {}
 
@@ -550,11 +949,15 @@ export class ArtifactIndex extends Context.Service<
     readonly listKeys: (
       prefix: string,
     ) => Effect.Effect<ReadonlyArray<string>, IndexRequestError>;
-    /** Register one artifact key (the write the flip will perform). */
+    /** Register one artifact key (an idempotent upsert in the index). */
     readonly register: (
       key: string,
       size: number | null,
       hash: string | null,
+    ) => Effect.Effect<void, IndexRequestError>;
+    /** Unregister one artifact key (idempotent in the index). */
+    readonly unregister: (
+      key: string,
     ) => Effect.Effect<void, IndexRequestError>;
   }
 >()("medina-cloudflare/ArtifactIndex") {}
@@ -579,8 +982,52 @@ export const capturePlatformLayer = (
   env: CaptureEnv,
 ): Layer.Layer<
   CaptureSource | ArtifactLedger | ArtifactIndex | CaptureNotebook
-> =>
-  Layer.mergeAll(
+> => {
+  /**
+   * One authenticated index write (register/unregister), shared by the
+   * ArtifactIndex service and the ledger's self-registering writes.
+   */
+  const indexWrite = (
+    path: "/register" | "/unregister",
+    body: Record<string, unknown>,
+    key: string,
+  ): Effect.Effect<void, IndexRequestError> =>
+    Effect.gen(function* () {
+      const token = yield* Effect.tryPromise({
+        try: () => env.indexToken.get(),
+        catch: (cause) =>
+          new IndexRequestError({
+            message: "reading the INDEX_API_TOKEN binding failed",
+            cause,
+          }),
+      });
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          fetch(`${MEDINA_INDEX_URL}${path}`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify(body),
+          }),
+        catch: (cause) =>
+          new IndexRequestError({
+            message: `index ${path} for ${key} failed to send`,
+            cause,
+          }),
+      });
+      if (!response.ok) {
+        return yield* Effect.fail(
+          new IndexRequestError({
+            message: `index ${path} for ${key} answered ${response.status}`,
+            cause: response.status,
+          }),
+        );
+      }
+    });
+
+  return Layer.mergeAll(
     Layer.succeed(CaptureSource, {
       listAll: Effect.tryPromise({
         try: async () => {
@@ -631,6 +1078,22 @@ export const capturePlatformLayer = (
               cause,
             }),
         }),
+      downloadBytes: (key) =>
+        Effect.tryPromise({
+          try: async () => {
+            const object = await env.sourceBucket.get(key);
+            if (object === null) {
+              throw new Error(`source object ${key} vanished`);
+            }
+            return new Uint8Array(await object.arrayBuffer());
+          },
+          catch: (cause) =>
+            new ArtifactReadError({
+              key,
+              message: `downloading ${key} from the source bucket failed`,
+              cause,
+            }),
+        }),
     }),
     Layer.succeed(ArtifactLedger, {
       exists: (key) =>
@@ -661,6 +1124,83 @@ export const capturePlatformLayer = (
               message: `reading artifact ${key} failed`,
               cause,
             }),
+        }),
+      readText: (key) =>
+        Effect.tryPromise({
+          try: async () => {
+            const object = await env.artifacts.get(key);
+            if (object === null) return Option.none<string>();
+            return Option.some(await readBodyText(object));
+          },
+          catch: (cause) =>
+            new ArtifactReadError({
+              key,
+              message: `reading artifact ${key} failed`,
+              cause,
+            }),
+        }),
+      writeText: (key, text) =>
+        Effect.gen(function* () {
+          const hash = yield* Effect.promise(() => sha256Hex(text));
+          yield* Effect.tryPromise({
+            try: () =>
+              env.artifacts.put(key, text, {
+                httpMetadata: {
+                  contentType: contentTypeForKey(key, "text/plain"),
+                },
+              }),
+            catch: (cause) =>
+              new ArtifactReadError({
+                key,
+                message: `writing artifact ${key} failed`,
+                cause,
+              }),
+          });
+          yield* indexWrite(
+            "/register",
+            { key, size: new TextEncoder().encode(text).length, hash },
+            key,
+          );
+        }),
+      writeBlob: (key, bytes) =>
+        Effect.gen(function* () {
+          yield* Effect.tryPromise({
+            try: () =>
+              env.artifacts.put(key, bytes, {
+                httpMetadata: {
+                  contentType: contentTypeForKey(
+                    key,
+                    "application/octet-stream",
+                  ),
+                },
+              }),
+            catch: (cause) =>
+              new ArtifactReadError({
+                key,
+                message: `writing artifact ${key} failed`,
+                cause,
+              }),
+          });
+          // The server's putFile registers size only — it streamed the
+          // bytes to disk and never computed a content hash for them.
+          yield* indexWrite(
+            "/register",
+            { key, size: bytes.length, hash: null },
+            key,
+          );
+        }),
+      remove: (key) =>
+        Effect.gen(function* () {
+          yield* Effect.tryPromise({
+            try: () => env.artifacts.delete(key),
+            catch: (cause) =>
+              new ArtifactReadError({
+                key,
+                message: `deleting artifact ${key} failed`,
+                cause,
+              }),
+          });
+          yield* indexWrite("/unregister", { key }, key);
         }),
     }),
     Layer.succeed(ArtifactIndex, {
@@ -709,40 +1249,8 @@ export const capturePlatformLayer = (
             : [];
         }),
       register: (key, size, hash) =>
-        Effect.gen(function* () {
-          const token = yield* Effect.tryPromise({
-            try: () => env.indexToken.get(),
-            catch: (cause) =>
-              new IndexRequestError({
-                message: "reading the INDEX_API_TOKEN binding failed",
-                cause,
-              }),
-          });
-          const response = yield* Effect.tryPromise({
-            try: () =>
-              fetch(`${MEDINA_INDEX_URL}/register`, {
-                method: "POST",
-                headers: {
-                  authorization: `Bearer ${token}`,
-                  "content-type": "application/json",
-                },
-                body: JSON.stringify({ key, size, hash }),
-              }),
-            catch: (cause) =>
-              new IndexRequestError({
-                message: `index register for ${key} failed to send`,
-                cause,
-              }),
-          });
-          if (!response.ok) {
-            return yield* Effect.fail(
-              new IndexRequestError({
-                message: `index register for ${key} answered ${response.status}`,
-                cause: response.status,
-              }),
-            );
-          }
-        }),
+        indexWrite("/register", { key, size, hash }, key),
+      unregister: (key) => indexWrite("/unregister", { key }, key),
     }),
     Layer.succeed(CaptureNotebook, {
       record: (report) =>
@@ -796,6 +1304,7 @@ export const capturePlatformLayer = (
       }),
     }),
   );
+};
 
 // ---------------------------------------------------------------------------
 // The shadow pass: plan every item in the window, diff against reality.
@@ -804,6 +1313,13 @@ export const capturePlatformLayer = (
 const MAX_ITEMS_PER_PASS = 1000;
 const MAX_STORED_MISMATCHES = 100;
 const LIVE_PROVISIONAL_GRACE_MS = 6 * 60 * 60 * 1000;
+/**
+ * The largest source object the live pass will buffer to hash. Capture
+ * segments are 15-minute AAC at 32 kbps (~4 MB by policy); the cap is
+ * a guard rail, not an expectation — an object past it fails its item
+ * (no receipt, retried, reported) instead of exhausting the isolate.
+ */
+const MAX_BUFFERED_BYTES = 128 * 1024 * 1024;
 
 const emptyCounts = (): {
   classified: number;
@@ -811,7 +1327,77 @@ const emptyCounts = (): {
   legacy: number;
   pending: number;
   mismatched: number;
-} => ({ classified: 0, matched: 0, legacy: 0, pending: 0, mismatched: 0 });
+  performed: number;
+} => ({
+  classified: 0,
+  matched: 0,
+  legacy: 0,
+  pending: 0,
+  mismatched: 0,
+  performed: 0,
+});
+
+/**
+ * Resolve an item's receipt, trying the etag version derivation
+ * first and the lastModified derivation second — the server's
+ * version comes from its S3 listing, the Worker's from the R2
+ * binding, and the shadow proved the two agree (117/117 etag).
+ * Shared by the shadow diff and the live pass: one definition of
+ * "already ingested" for both halves of the loop.
+ */
+/** The slice of the ledger receipt resolution needs. */
+export interface ReceiptReader {
+  readonly readJson: (
+    key: string,
+  ) => Effect.Effect<Option.Option<unknown>, ArtifactReadError>;
+}
+
+export const findReceipt = (
+  ledger: ReceiptReader,
+  itemSource: CaptureSourceName,
+  object: SourceObject,
+): Effect.Effect<
+  {
+    receipt: Option.Option<IngestReceiptShape>;
+    receiptKey: string;
+    derivation: "etag" | "lastModified" | null;
+  },
+  ArtifactReadError
+> =>
+  Effect.gen(function* () {
+    const etagVersion = object.etag ?? object.lastModified;
+    const etagKey = receiptKeyFor(itemSource, object.key, etagVersion);
+    const first = yield* ledger.readJson(etagKey);
+    if (Option.isSome(first)) {
+      const parsed = parseReceipt(first.value);
+      if (parsed !== null) {
+        return {
+          receipt: Option.some(parsed),
+          receiptKey: etagKey,
+          derivation: "etag" as const,
+        };
+      }
+    }
+    if (object.etag !== null && object.etag !== object.lastModified) {
+      const lmKey = receiptKeyFor(itemSource, object.key, object.lastModified);
+      const second = yield* ledger.readJson(lmKey);
+      if (Option.isSome(second)) {
+        const parsed = parseReceipt(second.value);
+        if (parsed !== null) {
+          return {
+            receipt: Option.some(parsed),
+            receiptKey: lmKey,
+            derivation: "lastModified" as const,
+          };
+        }
+      }
+    }
+    return {
+      receipt: Option.none<IngestReceiptShape>(),
+      receiptKey: etagKey,
+      derivation: null,
+    };
+  });
 
 export const runCaptureShadowPass = (
   options: CaptureShadowOptions,
@@ -851,6 +1437,11 @@ export const runCaptureShadowPass = (
         "device-events": emptyCounts(),
         "local-transcripts": emptyCounts(),
       };
+    if (options.performed !== undefined) {
+      for (const name of Object.keys(counts) as Array<CaptureSourceName>) {
+        counts[name].performed = options.performed[name] ?? 0;
+      }
+    }
     const mismatches: Array<{
       source: CaptureSourceName;
       key: string;
@@ -872,62 +1463,6 @@ export const runCaptureShadowPass = (
       }
     };
 
-    /**
-     * Resolve an item's receipt, trying the etag version derivation
-     * first and the lastModified derivation second — the server's
-     * version comes from its S3 listing, the shadow's from the R2
-     * binding, and the report records which derivation reality uses.
-     */
-    const findReceipt = (
-      itemSource: CaptureSourceName,
-      object: SourceObject,
-    ): Effect.Effect<
-      {
-        receipt: Option.Option<IngestReceiptShape>;
-        receiptKey: string;
-        derivation: "etag" | "lastModified" | null;
-      },
-      ArtifactReadError
-    > =>
-      Effect.gen(function* () {
-        const etagVersion = object.etag ?? object.lastModified;
-        const etagKey = receiptKeyFor(itemSource, object.key, etagVersion);
-        const first = yield* ledger.readJson(etagKey);
-        if (Option.isSome(first)) {
-          const parsed = parseReceipt(first.value);
-          if (parsed !== null) {
-            return {
-              receipt: Option.some(parsed),
-              receiptKey: etagKey,
-              derivation: "etag" as const,
-            };
-          }
-        }
-        if (object.etag !== null && object.etag !== object.lastModified) {
-          const lmKey = receiptKeyFor(
-            itemSource,
-            object.key,
-            object.lastModified,
-          );
-          const second = yield* ledger.readJson(lmKey);
-          if (Option.isSome(second)) {
-            const parsed = parseReceipt(second.value);
-            if (parsed !== null) {
-              return {
-                receipt: Option.some(parsed),
-                receiptKey: lmKey,
-                derivation: "lastModified" as const,
-              };
-            }
-          }
-        }
-        return {
-          receipt: Option.none<IngestReceiptShape>(),
-          receiptKey: etagKey,
-          derivation: null,
-        };
-      });
-
     const ageMs = (object: SourceObject): number =>
       options.windowTo.getTime() - Date.parse(object.lastModified);
 
@@ -936,6 +1471,7 @@ export const runCaptureShadowPass = (
     ): Effect.Effect<ItemOutcome, ArtifactReadError | IndexRequestError> =>
       Effect.gen(function* () {
         const { receipt, derivation } = yield* findReceipt(
+          ledger,
           "capture-bucket",
           object,
         );
@@ -1006,6 +1542,7 @@ export const runCaptureShadowPass = (
       Effect.gen(function* () {
         const live = object.key.endsWith(".live.json");
         const { receipt, derivation } = yield* findReceipt(
+          ledger,
           "local-transcripts",
           object,
         );
@@ -1126,6 +1663,7 @@ export const runCaptureShadowPass = (
     ): Effect.Effect<EventCheck, ArtifactReadError> =>
       Effect.gen(function* () {
         const { receipt, derivation } = yield* findReceipt(
+          ledger,
           "device-events",
           object,
         );
@@ -1379,6 +1917,373 @@ export const runCaptureShadowPass = (
     });
     yield* notebook.record(report);
     return report;
+  });
+
+// ---------------------------------------------------------------------------
+// The live pass: perform every unreceipted item in the scan window,
+// exactly as medina-dev's ingest performs it. Per-item order mirrors
+// the server: artifacts first, the receipt last (the receipt is the
+// guard; a crash before it means the next pass re-performs, and every
+// write is idempotent — content-addressed blobs, append-guarded
+// provenance, upsert registrations — so re-performing converges).
+// One item's failure is recorded and the pass moves on; an unreceipted
+// item is retried by the next pass while it is inside the window.
+// ---------------------------------------------------------------------------
+
+export const runCaptureLivePass = (
+  options: CaptureLiveOptions,
+): Effect.Effect<
+  CaptureLiveSummary,
+  CaptureListError,
+  CaptureSource | ArtifactLedger
+> =>
+  Effect.gen(function* () {
+    const source = yield* CaptureSource;
+    const ledger = yield* ArtifactLedger;
+
+    const listed = yield* source.listAll;
+    const inWindow = listed.filter((object) => {
+      const t = Date.parse(object.lastModified);
+      return (
+        t >= options.windowFrom.getTime() && t < options.windowTo.getTime()
+      );
+    });
+    const classified = inWindow
+      .map((object) => ({ object, source: classifySourceKey(object.key) }))
+      .filter(
+        (
+          entry,
+        ): entry is {
+          object: SourceObject;
+          source: CaptureSourceName;
+        } => entry.source !== "skipped",
+      );
+
+    const performed: Record<CaptureSourceName, number> = {
+      "capture-bucket": 0,
+      "device-events": 0,
+      "local-transcripts": 0,
+    };
+    const errors: Array<{
+      source: CaptureSourceName;
+      key: string;
+      detail: string;
+    }> = [];
+    let alreadyReceipted = 0;
+    let scanned = 0;
+
+    // The batch's location fixes, reduced per install as they are
+    // performed; the believed position is written once, after the
+    // items, from the reduction — the §4.3 step-2 hardening.
+    const pendingFixes = new Map<
+      string,
+      { event: DeviceEvent; fix: LocationFix }
+    >();
+    const noteFix = (event: DeviceEvent, fix: LocationFix): void => {
+      const current = pendingFixes.get(event.device);
+      if (
+        current === undefined ||
+        fixWins(
+          { at: event.at, eventSeq: event.seq },
+          { at: current.event.at, eventSeq: current.event.seq },
+        )
+      ) {
+        pendingFixes.set(event.device, { event, fix });
+      }
+    };
+
+    const writeReceipt = (
+      itemSource: CaptureSourceName,
+      object: SourceObject,
+      captureId: string,
+    ): Effect.Effect<void, ArtifactReadError | IndexRequestError> =>
+      ledger.writeText(
+        receiptKeyFor(
+          itemSource,
+          object.key,
+          identityVersion(itemSource, object),
+        ),
+        JSON.stringify(receiptJson(captureId, new Date().toISOString())),
+      );
+
+    const performAudio = (
+      object: SourceObject,
+    ): Effect.Effect<void, ArtifactReadError | IndexRequestError | Error> =>
+      Effect.gen(function* () {
+        if (object.size > MAX_BUFFERED_BYTES) {
+          return yield* Effect.fail(
+            new Error(
+              `source object is ${object.size} bytes, past the ${MAX_BUFFERED_BYTES}-byte buffer cap`,
+            ),
+          );
+        }
+        const bytes = yield* source.downloadBytes(object.key);
+        const captureId = yield* Effect.promise(() => sha256Hex(bytes));
+        // Grandfather: a transcript already exists under the
+        // pre-content-hash id — adopt that id, retain no audio.
+        const legacyId = ingestIdFor(
+          "capture-bucket",
+          object.key,
+          identityVersion("capture-bucket", object),
+        );
+        if (yield* ledger.exists(canonicalTranscriptKey(legacyId))) {
+          yield* writeReceipt("capture-bucket", object, legacyId);
+          return;
+        }
+        const filename = object.key.split("/").pop() ?? object.key;
+        const blobKey = captureBlobKey(captureId, filename);
+        if (!(yield* ledger.exists(blobKey))) {
+          yield* ledger.writeBlob(blobKey, bytes);
+        }
+        const provKey = provenanceKey(captureId);
+        const existingProv = yield* ledger.readJson(provKey);
+        const { next, changed } = appendProvenanceRecord(
+          Option.getOrNull(existingProv),
+          captureId,
+          {
+            source: "capture-bucket",
+            filename,
+            fileId: object.key,
+            mimeType: "audio/mp4",
+            modifiedTime: object.lastModified,
+            md5Checksum: object.etag,
+            fetchedAt: new Date().toISOString(),
+          },
+        );
+        if (changed) {
+          yield* ledger.writeText(provKey, JSON.stringify(next));
+        }
+        yield* writeReceipt("capture-bucket", object, captureId);
+        // Promote a live provisional for this segment now that the
+        // content-hash capture id is known (LocalTranscripts.ts).
+        const parsedKey = parseCaptureAudioKey(object.key);
+        if (parsedKey !== null) {
+          const liveKey = liveTranscriptKey(
+            parsedKey.installId,
+            parsedKey.segmentUuid,
+          );
+          const provisional = yield* ledger.readText(liveKey);
+          if (Option.isSome(provisional)) {
+            let valid = false;
+            try {
+              valid = isRecord(JSON.parse(provisional.value));
+            } catch {
+              valid = false;
+            }
+            const target = localTranscriptKey(captureId);
+            if (valid && !(yield* ledger.exists(target))) {
+              yield* ledger.writeText(target, provisional.value);
+            }
+            yield* ledger.remove(liveKey);
+            yield* ledger.writeText(
+              liveTranscriptPromotedKey(
+                parsedKey.installId,
+                parsedKey.segmentUuid,
+              ),
+              JSON.stringify(
+                receiptJson(captureId, new Date().toISOString()),
+              ),
+            );
+          }
+        }
+      });
+
+    // A payload that does not parse fails the item, as the server's
+    // ingest fails it: no receipt, retried next pass. (Effect.try, not
+    // a bare throw — a throw inside the generator would be a defect
+    // and escape the item-level failure handling.)
+    const parseJson = (text: string): Effect.Effect<unknown, Error> =>
+      Effect.try({
+        try: () => JSON.parse(text) as unknown,
+        catch: (cause) =>
+          new Error(`payload is not valid JSON: ${String(cause).slice(0, 120)}`),
+      });
+
+    const performEvent = (
+      object: SourceObject,
+    ): Effect.Effect<void, ArtifactReadError | IndexRequestError | Error> =>
+      Effect.gen(function* () {
+        const text = yield* source.downloadText(object.key);
+        const raw = yield* parseJson(text);
+        const event = parseDeviceEvent(raw);
+        if (event === null) {
+          // Failed validation: a skip receipt, so it is never retried.
+          yield* writeReceipt("device-events", object, "");
+          return;
+        }
+        if (event.type === "location.fix") {
+          const fix = parseLocationFix(event.payload);
+          if (fix !== null && !fix.mock) {
+            const point = gpsInboxPoint(event, fix);
+            const body = gpsInboxText([point]);
+            const hash = yield* Effect.promise(() => sha256Hex(body));
+            const file = gpsInboxFile(
+              [point],
+              new Date().toISOString(),
+              hash,
+            );
+            yield* ledger.writeText(file.key, file.text);
+            noteFix(event, fix);
+          }
+        }
+        yield* writeReceipt("device-events", object, event.id);
+      });
+
+    const performTranscript = (
+      object: SourceObject,
+    ): Effect.Effect<void, ArtifactReadError | IndexRequestError | Error> =>
+      Effect.gen(function* () {
+        const text = yield* source.downloadText(object.key);
+        const raw = yield* parseJson(text);
+        const now = new Date().toISOString();
+        if (object.key.endsWith(".live.json")) {
+          const parsed = parseLivePhoneTranscript(raw);
+          if (parsed === null) {
+            yield* writeReceipt("local-transcripts", object, "");
+            return;
+          }
+          // A partial that raced the seal must not resurrect a
+          // promoted provisional.
+          const promoted = yield* ledger.exists(
+            liveTranscriptPromotedKey(parsed.installId, parsed.segmentUuid),
+          );
+          if (!promoted) {
+            yield* ledger.writeText(
+              liveTranscriptKey(parsed.installId, parsed.segmentUuid),
+              JSON.stringify(
+                phoneTranscriptJson(
+                  parsed,
+                  `live-${parsed.updateSeq}`,
+                  `live/${parsed.installId}/${parsed.segmentUuid}`,
+                  object.key,
+                  now,
+                ),
+              ),
+            );
+          }
+          yield* writeReceipt("local-transcripts", object, "");
+          return;
+        }
+        const parsed = parsePhoneTranscript(raw);
+        if (parsed === null) {
+          yield* writeReceipt("local-transcripts", object, "");
+          return;
+        }
+        // Always write: the batch final transcribes the whole sealed
+        // file, so it is the authoritative first-look and wins over a
+        // promoted provisional regardless of ingest order.
+        yield* ledger.writeText(
+          localTranscriptKey(parsed.captureId),
+          JSON.stringify(
+            phoneTranscriptJson(parsed, "1", parsed.captureId, parsed.audioKey, now),
+          ),
+        );
+        yield* writeReceipt("local-transcripts", object, parsed.captureId);
+      });
+
+    // Scan: resolve every in-window item's receipt (bounded
+    // concurrency — the fan-out the shadow diff uses). A failed
+    // receipt read marks the item unreceipted; its perform then
+    // surfaces the underlying failure as the item's error.
+    const checks = yield* Effect.forEach(
+      classified,
+      (entry) =>
+        Effect.gen(function* () {
+          const { receipt } = yield* findReceipt(
+            ledger,
+            entry.source,
+            entry.object,
+          );
+          return { entry, receipted: Option.isSome(receipt) };
+        }).pipe(
+          Effect.catch(() =>
+            Effect.succeed({ entry, receipted: false }),
+          ),
+        ),
+      { concurrency: 16 },
+    );
+    scanned = checks.length;
+    alreadyReceipted = checks.filter((check) => check.receipted).length;
+
+    // Perform: sequential, newest-first per source (the listing's
+    // order), capped per source — the order the reduction and the
+    // receipt guard are reasoned about in.
+    for (const { entry, receipted } of checks) {
+      if (receipted) continue;
+      if (performed[entry.source] >= options.perSourceLimit) continue;
+      const outcome = yield* Effect.gen(function* () {
+        if (entry.source === "capture-bucket") {
+          yield* performAudio(entry.object);
+        } else if (entry.source === "device-events") {
+          yield* performEvent(entry.object);
+        } else {
+          yield* performTranscript(entry.object);
+        }
+        return "performed" as const;
+      }).pipe(
+        Effect.match({
+          onFailure: (cause) => ({
+            kind: "error" as const,
+            detail: String(cause).slice(0, 300),
+          }),
+          onSuccess: (kind) => ({ kind, detail: "" }),
+        }),
+      );
+      if (outcome.kind === "performed") performed[entry.source]++;
+      else {
+        errors.push({
+          source: entry.source,
+          key: entry.object.key,
+          detail: outcome.detail,
+        });
+      }
+    }
+
+    // The reduction lands once per install: the batch's newest fix,
+    // and only when it displaces the believed position.
+    for (const [installId, pending] of pendingFixes) {
+      const key = latestLocationKey(installId);
+      const believed = yield* ledger.readJson(key).pipe(
+        Effect.catch(() => Effect.succeed(Option.none<unknown>())),
+      );
+      if (
+        fixWins(
+          { at: pending.event.at, eventSeq: pending.event.seq },
+          Option.getOrNull(believed),
+        )
+      ) {
+        yield* ledger
+          .writeText(
+            key,
+            JSON.stringify(
+              latestLocationJson(
+                pending.event,
+                pending.fix,
+                new Date().toISOString(),
+              ),
+            ),
+          )
+          .pipe(
+            Effect.catch((cause) =>
+              Effect.sync(() => {
+                errors.push({
+                  source: "device-events",
+                  key,
+                  detail: `latest-location write failed: ${String(cause).slice(0, 240)}`,
+                });
+              }),
+            ),
+          );
+      }
+    }
+
+    return {
+      listedTotal: listed.length,
+      scanned,
+      performed,
+      alreadyReceipted,
+      errors,
+    };
   });
 
 // ---------------------------------------------------------------------------
