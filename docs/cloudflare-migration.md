@@ -946,6 +946,61 @@ before the receipt simply re-performs on the next pass.
   unreceipted real item will be performed by the same code path
   inside its 24 h live scan window.
 
+### Step 3 (Nov 2) — star detector: shadow parity, then flipped
+
+Built and flipped Nov 2, 2026 (evening PT) under Scott's standing
+cutover authorization. The port is `cloudflare/src/stars.ts`: the
+detector's grammar, rescan window (current and previous UTC days),
+deterministic command ids, born-expired guard, and the retention
+sweep with its content-free forget receipts are carried over check
+for check from `lib/lifelog/StarDetector.ts` — no grammar change
+(that stays Scott's separate open decision). The one platform
+substitution: the server rebuilds the day index fresh from the
+corpus every 90 s, while the Worker reads the newest persisted
+day-index snapshot (`index/days-v1/`, the journal serving pass's
+selection), riding the capture cron's minute. Server stand-down
+needed a mechanism the detector didn't have — it was an
+unconditional loop, not a `MEDINA_SOURCES` source — so the server
+gained two excludable stage tokens, `stars` and `archive`, both in
+the default source set (an unset deployment is unchanged; commit
+86aac2c, deployed to medina-dev ahead of either flip with both
+stages still server-run).
+
+- **Shadow evidence.** The Worker's passes read the same window
+  medina-dev's detector files from: 32 transcripts across the two
+  UTC days, and found **no commands** — no voice-star traffic
+  exists (the live census is 9 authored records, all
+  `createdVia: "api"` voiceprint clips with effectively infinite
+  retention, none near expiry), so filings, sweeps, and mismatches
+  were all zero across manual and cron passes, with the parser
+  itself covered by the server's own test vectors carried into
+  `src/stars.test.ts`. The first live pass did catch a real bug in
+  the port: the catalog lists by raw string prefix, so listing
+  `star` also pulled in `stars/stars-v1/` day-view artifacts and
+  failed decoding one as a record — the authored records live flat
+  in `star/`; fixed by applying the directory boundary (commit
+  a29ef7e) before any parity claim was made.
+- **Switch order, as in step 2**: medina-dev stands down first
+  (`MEDINA_SOURCES` without `stars`, backup
+  `.env.bak-2026-11-03-step3`, restart 03:48Z, clean boot), then
+  the Worker goes live (`STAR_DETECTOR_MODE: "live"`, commit
+  05bce4f, deployed 03:49Z). Post-flip: a manual live pass ran the
+  perform path and the diff together — filed 0, swept 0, no
+  failure, no mismatches; cron passes since are clean and
+  `https://sco.medina.stream/health` stays 200.
+- **Rollback position**: `STAR_DETECTOR_MODE` back to `"shadow"`
+  and redeploy; restore `stars` in medina-dev's `MEDINA_SOURCES`
+  (or the `.env` backup) and restart. Filing ids are
+  deterministic, so even an overlap could not double-file.
+- **Residual risk**: the snapshot the Worker reads is refreshed
+  by medina-dev's ingest passes until the day-index resource
+  itself moves (step 8); voice stars live one hour from utterance
+  end, so snapshot lag eats filing life — every report carries
+  the snapshot's `builtAt`, making the lag visible rather than
+  silent. The perform path's live proof on a real "star …"
+  command lands with the first one Scott speaks; until then the
+  plan diff plus the carried-over test vectors are the evidence.
+
 ### Access + domain (staged, one open decision)
 
 Everything not needing the domain is prepared by the serving pass
