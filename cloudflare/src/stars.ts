@@ -571,7 +571,11 @@ export const starsPlatformLayer = (
         loadIndex: Effect.gen(function* () {
           const listed = yield* catalog.listAll("index/days-v1");
           const candidates = listed
-            .filter((object) => object.key.endsWith(".json"))
+            .filter(
+              (object) =>
+                object.key.startsWith("index/days-v1/") &&
+                object.key.endsWith(".json"),
+            )
             .sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime())
             .slice(0, 3);
           let best: {
@@ -603,9 +607,16 @@ export const starsPlatformLayer = (
             Schema.decodeUnknownEffect(Transcript)(json),
           ),
         listStars: Effect.gen(function* () {
+          // The authored records live flat in the `star/` directory
+          // (Resources.ts `starKey`); the catalog lists by raw
+          // string prefix, so the directory boundary is applied
+          // here — `stars/stars-v1/…` (the per-day view artifacts)
+          // is a different prefix family and never a record.
           const listed = yield* catalog.listAll("star");
           const stars: Array<Star> = [];
           for (const object of listed) {
+            if (!object.key.startsWith("star/")) continue;
+            if (object.key.slice("star/".length).includes("/")) continue;
             if (!object.key.endsWith(".json")) continue;
             const star = yield* readDecoded(
               object.key,
