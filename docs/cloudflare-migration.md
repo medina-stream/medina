@@ -814,7 +814,7 @@ within a cron tick plus one background rebuild, the same order
 as the server's own 10-minute previews cycle.
 
 What remains of milestone 4, in the recorded order: capture loop
-(shadow built and at parity, next section — the flip remains),
+(flipped to the Worker Nov 2, next sections),
 star detector, archive, media-normalize and media-transcribe
 (their provider secrets landed in the Secrets Store Nov 2),
 gps stages, the resource-layer redesign, notes +
@@ -884,6 +884,67 @@ demand.
   (canonical transcripts, star records, a retention sweep) and
   the archive sweep performs bucket-to-bucket moves — neither is
   a small extension of this shadow; both stay sequenced steps.
+
+### Step 2 cutover (Nov 2) — capture loop flipped to the Worker
+
+Flipped Nov 2, 2026 (evening PT) under Scott's standing cutover
+authorization. The performing pass is a mode of the same loop
+(commit e69dad2): `CAPTURE_LOOP_MODE` in `alchemy.run.ts` —
+`"live"` performs, anything else is shadow (the rollback
+position). Per item the Worker writes artifacts first and the
+receipt last, through the ArtifactStore seam semantics (bucket
+write, then index registration; a failed registration fails the
+write); every write is idempotent (content-addressed blobs,
+append-guarded provenance, upsert registrations), so a crash
+before the receipt simply re-performs on the next pass.
+
+- **Switch order: medina-dev stands down first, then the Worker
+  goes live.** `/register` is an upsert keyed by key (verified in
+  the medina-index implementation), so an overlap would have
+  been harmless — but the plan's rule is one submitter at every
+  moment, and the minutes between the two halves are a pure gap
+  of unreceipted uploads, which the receipt-driven loop drains
+  on its first live pass. Server half: `MEDINA_SOURCES` set to
+  `audio,notes,bucket,inventory,allow` in medina-dev's `.env`
+  (backup `.env.bak-2026-11-02-step2`), restart at 02:57:55Z —
+  clean boot, listening 02:58:00Z, non-capture sources
+  unaffected. Worker half: `CAPTURE_LOOP_MODE: "live"` (commit
+  598e981), deployed 03:01Z.
+- **Post-flip verification.** First manual live pass over 24 h:
+  60 items in window, all already receipted, 0 errors — the gap
+  drained trivially because the phone was in a capture lull
+  (last real upload 01:02Z, before either half of the flip).
+  Because no natural traffic was arriving, performing was proven
+  with a synthetic device-event probe uploaded to
+  `sco-lifelog-in`: the Worker's live pass performed it
+  (device-events performed 1, errors none), the same run's shadow
+  diff verified it matched (classified 2, matched 2, 0
+  mismatches), its receipt was confirmed in the index (newest
+  device-events receipt, version = the probe's etag) and read
+  back from the bucket with the probe's event id; the following
+  cron tick (03:06:23Z) independently reported it matched.
+  Probe, receipt, and index row were then removed. medina-dev
+  logged zero capture-source activity and zero errors after the
+  restart; `GET /status` on the Worker answered ready and
+  `https://sco.medina.stream/health` 200. Cron passes since the
+  flip: no mismatches, no errors. Check token minted for the
+  cutover was revoked after (gate re-verified 404).
+- **Rollback position**: set `CAPTURE_LOOP_MODE` back to
+  `"shadow"` and redeploy; remove the `MEDINA_SOURCES` line (or
+  restore the `.env` backup) and restart medina-dev. The
+  server's discovery indexes go stale during the flip but stay
+  valid — receipt state is rechecked against the actual receipt
+  listing each pass.
+- **Residual risk**: two overlapping Worker cron passes could
+  interleave the latest-location read→write so an older fix
+  lands last; the phone emits fixes continually, so the next
+  fix's pass corrects it (the server's per-event writes were
+  strictly worse). The shadow diff's `stale` verdict is the
+  detection net. Natural-traffic proof (a real segment performed
+  end-to-end by the Worker) lands with the phone's next active
+  window; the probe proved the perform path, and every
+  unreceipted real item will be performed by the same code path
+  inside its 24 h live scan window.
 
 ### Access + domain (staged, one open decision)
 
