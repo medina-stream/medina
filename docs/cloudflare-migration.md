@@ -1001,6 +1001,51 @@ stages still server-run).
   command lands with the first one Scott speaks; until then the
   plan diff plus the carried-over test vectors are the evidence.
 
+### Step 4 (Nov 2) — archive sweep: shadow parity, then flipped
+
+Built and flipped Nov 2, 2026 (evening PT), same authorization.
+The port is `cloudflare/src/archive.ts`: `archiveCapture`'s
+decisions carried over one for one — carry a receipt entry whose
+size still matches the listing, head-verify a file whose size
+moved or that has no entry, upload only what the archive bucket
+cannot confirm, rewrite the receipt exactly when the server's
+would rewrite (never for ghost entries alone — entries for
+vanished files drop only on a rewrite, the server's quirk,
+ported). The gate is the step-3 server change: the sweep was an
+unconditional pipeline stage and is now excludable via the
+`archive` token.
+
+- **Shadow evidence**: a full-census diff over **all 2,923
+  captures** — 2,922 settled matches plus one capture still
+  settling inside the grace window, which matched on recheck;
+  zero mismatches, zero ghost entries, zero uploads needed, zero
+  errors. The zero-upload result is structural: medina-dev's
+  archive bucket *is* the Worker's artifacts bucket
+  (`BUCKET_NAME=sco-lifelog`, `ARTIFACT_STORE=bucket`), so every
+  file settles by head check — the same reason the server's sweep
+  copies nothing today.
+- **Switch order**: medina-dev stands down first
+  (`MEDINA_SOURCES` without `archive`, backup
+  `.env.bak-2026-11-03-step4`, restart 03:50Z, clean boot), then
+  the Worker goes live (`ARCHIVE_SWEEP_MODE: "live"`, commit
+  10e2382, deployed 03:51Z). Performing was proven on natural
+  traffic within minutes: 11 new captures arrived after the
+  census (the phone active again), and the Worker's first live
+  pass wrote **6 archive receipts itself** (0 copies — head-settled,
+  as designed); the next cron pass reported the census fully
+  settled, **2,934 captures / 2,934 receipts**, its verification
+  slice matched, no errors. Live ordering is the server's safety
+  order: copies first (each verified by the put's returned etag),
+  the receipt last — an interrupted pass leaves at worst a
+  receipt the next pass re-derives.
+- **Rollback position**: `ARCHIVE_SWEEP_MODE` back to `"shadow"`
+  and redeploy; restore `archive` in medina-dev's
+  `MEDINA_SOURCES` (or the `.env` backup) and restart.
+- **Residual risk**: the byte-copy path stays unexercised while
+  the buckets stay aligned — a file larger than 128 MB that ever
+  diverged would fail its item and retry rather than buffer in
+  the Worker, which is the deliberate guard, not a silent skip.
+
 ### Access + domain (staged, one open decision)
 
 Everything not needing the domain is prepared by the serving pass
