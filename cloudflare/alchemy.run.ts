@@ -160,7 +160,7 @@ export const Api = Cloudflare.Worker("Api", {
     StarsShadow: Cloudflare.DurableObject("StarsShadow"),
     ArchiveShadow: Cloudflare.DurableObject("ArchiveShadow"),
     STAR_DETECTOR_MODE: "live",
-    ARCHIVE_SWEEP_MODE: "shadow",
+    ARCHIVE_SWEEP_MODE: "live",
   },
 });
 
