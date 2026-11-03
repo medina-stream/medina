@@ -2361,23 +2361,34 @@ const diffCapture = (options: {
       );
       if (direct !== null) {
         const only = manifest.chunks[0];
+        // The direct-plan comparison applies only to a manifest
+        // that IS the direct manifest (one chunk = the blob
+        // itself). A transcoded manifest outranks today's direct
+        // plan: captures normalized before the direct path
+        // existed carry Transloadit chunks, and medina-dev keeps
+        // an existing manifest exactly as the Worker would — the
+        // receipt checks below judge that manifest on its own
+        // terms.
         if (
-          manifest.chunks.length !== 1 ||
-          only === undefined ||
-          only.key !== blobKey ||
-          Math.abs(only.durationSeconds - direct.durationSeconds) >
-            DURATION_TOLERANCE ||
-          manifest.sourceDurationSeconds === null ||
-          Math.abs(manifest.sourceDurationSeconds - direct.durationSeconds) >
-            DURATION_TOLERANCE
+          manifest.chunks.length === 1 &&
+          only !== undefined &&
+          only.key === blobKey
         ) {
-          return {
-            kind: "mismatch" as const,
-            mismatchKind: "direct-manifest-differs",
-            detail: `direct plan (${direct.durationSeconds.toFixed(2)}s) vs stored manifest (${manifest.chunks.length} chunk(s), source ${manifest.sourceDurationSeconds ?? "null"}s)`,
-          };
+          if (
+            Math.abs(only.durationSeconds - direct.durationSeconds) >
+              DURATION_TOLERANCE ||
+            manifest.sourceDurationSeconds === null ||
+            Math.abs(manifest.sourceDurationSeconds - direct.durationSeconds) >
+              DURATION_TOLERANCE
+          ) {
+            return {
+              kind: "mismatch" as const,
+              mismatchKind: "direct-manifest-differs",
+              detail: `direct plan (key ${blobKey}, ${direct.durationSeconds.toFixed(2)}s) vs stored manifest (${manifest.chunks.length} chunk(s), key ${only?.key ?? "none"}, chunk ${only?.durationSeconds ?? "null"}s, source ${manifest.sourceDurationSeconds ?? "null"}s)`,
+            };
+          }
+          return { kind: "matched" as const, detail: "direct manifest agrees" };
         }
-        return { kind: "matched" as const, detail: "direct manifest agrees" };
       }
       const legacyLocal =
         receipt === null &&
@@ -2395,7 +2406,7 @@ const diffCapture = (options: {
         return {
           kind: "mismatch" as const,
           mismatchKind: "manifest-without-receipt",
-          detail: "manifest exists but no Transloadit receipt, and the capture is not direct-eligible",
+          detail: "manifest exists but no Transloadit receipt, and it is not the direct manifest either",
         };
       }
       if (receipt.originalKey !== undefined && receipt.originalKey !== blobKey) {
@@ -2430,26 +2441,63 @@ const diffCapture = (options: {
             };
       }
       if (receipt.phase === "completed") {
-        const expected = segmentsFor(receipt.sourceDurationSeconds ?? 0);
-        const gridOk =
-          manifest.chunks.length === expected.length &&
-          manifest.chunks.every((chunk, index) => {
-            const segment = expected[index]!;
-            return (
-              chunk.index === index &&
-              Math.abs(chunk.startSeconds - segment.from) < 0.01 &&
-              Math.abs(chunk.durationSeconds - (segment.to - segment.from)) <
-                0.01
-            );
-          });
-        if (!gridOk) {
+        // The agreement medina-dev itself enforces on an existing
+        // manifest is coverage, not today's grid: chunks present
+        // (checked above), indexes sequential, and contiguous
+        // coverage of [0, sourceDuration]. Manifests written by
+        // earlier pipeline generations chunk on older boundaries
+        // (the rehearsal found 1–5-segment sources stored on
+        // grids the current 4h plan would not choose); medina-dev
+        // keeps those manifests as-is, and so would the Worker.
+        // The strict grid is enforced where it belongs — at
+        // creation, in manifestFromChunkListing.
+        const total =
+          receipt.sourceDurationSeconds ??
+          manifest.sourceDurationSeconds ??
+          0;
+        let cursor = 0;
+        let contiguous = manifest.chunks.length > 0;
+        const sorted = [...manifest.chunks].sort(
+          (a, b) => a.index - b.index,
+        );
+        for (const [position, chunk] of sorted.entries()) {
+          if (
+            chunk.index !== position ||
+            Math.abs(chunk.startSeconds - cursor) > DURATION_TOLERANCE
+          ) {
+            contiguous = false;
+            break;
+          }
+          cursor = chunk.startSeconds + chunk.durationSeconds;
+        }
+        if (
+          !contiguous ||
+          Math.abs(cursor - total) > DURATION_TOLERANCE
+        ) {
           return {
             kind: "mismatch" as const,
             mismatchKind: "manifest-grid-differs",
-            detail: `manifest chunk grid vs the ${expected.length}-segment plan for ${receipt.sourceDurationSeconds ?? 0}s`,
+            detail: `manifest chunks do not contiguously cover the ${total}s source (sequential coverage ends at ${cursor.toFixed(2)}s)`,
           };
         }
-        return { kind: "matched" as const, detail: "Transloadit manifest agrees (chunks, grid, duration)" };
+        const expected = segmentsFor(total);
+        const onCurrentGrid =
+          sorted.length === expected.length &&
+          sorted.every((chunk, index) => {
+            const segment = expected[index]!;
+            return (
+              Math.abs(chunk.startSeconds - segment.from) < 0.01 &&
+              Math.abs(
+                chunk.durationSeconds - (segment.to - segment.from),
+              ) < 0.01
+            );
+          });
+        return {
+          kind: "matched" as const,
+          detail: onCurrentGrid
+            ? "Transloadit manifest agrees (chunks, grid, duration)"
+            : "Transloadit manifest agrees (chunks present, contiguous coverage; chunk grid predates the current segment plan)",
+        };
       }
       return {
         kind: "matched" as const,
