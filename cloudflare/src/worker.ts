@@ -36,6 +36,15 @@
  * reports the shadow's notebook for parity checks against
  * medina-dev's ingest receipts.
  *
+ * Milestone 4 step 2 adds the capture-loop shadow (src/capture.ts):
+ * the same Cron Trigger also plans the trailing window of the three
+ * capture sources (capture-bucket, device-events, local-transcripts)
+ * and diffs each item's plan — receipt, artifact keys, index
+ * registrations, and the coalesced latest-location reduction — against
+ * what medina-dev actually produced. `POST /capture/run` and `GET
+ * /capture/status` (same device-token gate) expose it for parity
+ * checks. Shadow only: medina-dev remains the sole live pipeline.
+ *
  * The handler is an Effect program (the repo's HTTP precedent is
  * Effect HttpRouter on the server; the full router port arrives with
  * the read-cutover phase of the migration — for two routes and a
@@ -43,9 +52,17 @@
  */
 import * as Effect from "effect/Effect";
 import {
+  capturePlatformLayer,
+  runCaptureShadowPass,
+  type CaptureEnv,
+  type SecretsStoreSecretLike,
+} from "./capture.ts";
+import {
   handleJournal,
   refreshReadModelSnapshot,
 } from "./journal.ts";
+
+export { CaptureShadow } from "./capture.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -110,7 +127,18 @@ interface Env {
   readonly ARTIFACTS: R2BucketLike;
   readonly CAPTURE_IN: R2BucketLike;
   readonly ShadowDiscovery: DurableObjectNamespaceLike;
+  readonly CaptureShadow: DurableObjectNamespaceLike;
+  /** Secrets Store binding (declared in alchemy.run.ts): the
+   * medina-index Bearer token, read via .get() at call time. */
+  readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
 }
+
+const captureEnv = (env: Env): CaptureEnv => ({
+  sourceBucket: env.CAPTURE_IN,
+  artifacts: env.ARTIFACTS,
+  indexToken: env.INDEX_API_TOKEN,
+  notebook: env.CaptureShadow,
+});
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
@@ -433,6 +461,98 @@ const serveJournalRefresh = (
     return json(outcome, outcome.ok ? 200 : 500);
   });
 
+/**
+ * Manual trigger for one capture-loop shadow pass (§4.3 step 2), same
+ * device-token gate — parity tooling: it runs exactly what the Cron
+ * Trigger runs, synchronously, with the report in the response, so a
+ * checker can diff any window on demand. Window: `?from=<ISO>&to=<ISO>`
+ * or `?hours=N` (default 1) ending now; `?staleMinutes=N` (default 15)
+ * is how old an unreceipted item must be before it counts as missing
+ * rather than pending.
+ */
+const serveCaptureRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    const bearer = request.headers.get("authorization");
+    const token =
+      bearer !== null && bearer.startsWith("Bearer ")
+        ? bearer.slice("Bearer ".length)
+        : (url.searchParams.get("token") ?? "");
+    if (!(yield* isValidToken(env, token))) {
+      return fail(404, "not found");
+    }
+    const now = new Date();
+    const fromParam = url.searchParams.get("from");
+    const toParam = url.searchParams.get("to");
+    const hours = Number(url.searchParams.get("hours") ?? "1");
+    const windowTo =
+      toParam !== null && !Number.isNaN(Date.parse(toParam))
+        ? new Date(toParam)
+        : now;
+    const windowFrom =
+      fromParam !== null && !Number.isNaN(Date.parse(fromParam))
+        ? new Date(fromParam)
+        : new Date(
+            windowTo.getTime() -
+              (Number.isFinite(hours) && hours > 0 ? hours : 1) * 3_600_000,
+          );
+    const staleMinutes = Number(
+      url.searchParams.get("staleMinutes") ?? "15",
+    );
+    const outcome = yield* runCaptureShadowPass({
+      mode: "manual",
+      windowFrom,
+      windowTo,
+      staleAfterMs:
+        (Number.isFinite(staleMinutes) && staleMinutes > 0
+          ? staleMinutes
+          : 15) * 60_000,
+    }).pipe(
+      Effect.provide(capturePlatformLayer(captureEnv(env))),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The capture shadow's notebook (last report), same gate. */
+const serveCaptureStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    const bearer = request.headers.get("authorization");
+    const token =
+      bearer !== null && bearer.startsWith("Bearer ")
+        ? bearer.slice("Bearer ".length)
+        : (url.searchParams.get("token") ?? "");
+    if (!(yield* isValidToken(env, token))) {
+      return fail(404, "not found");
+    }
+    const stub = env.CaptureShadow.get(
+      env.CaptureShadow.idFromName("capture-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://capture-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "capture status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
 const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
@@ -443,6 +563,12 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   }
   if (request.method === "POST" && url.pathname === "/shadow/run") {
     return serveShadowRun(env, request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/capture/status") {
+    return serveCaptureStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/capture/run") {
+    return serveCaptureRun(env, request, url);
   }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
@@ -517,6 +643,41 @@ export default {
         refreshReadModelSnapshot(env.ARTIFACTS).pipe(
           Effect.catch((cause) =>
             Effect.logError("read-model snapshot refresh failed", cause),
+          ),
+        ),
+      ),
+    );
+    // Capture-loop shadow (§4.3 step 2): plan the trailing 75 minutes
+    // of the capture sources and diff the plan against medina-dev's
+    // receipts, artifacts, and index registrations. Shadow only — the
+    // pass writes nothing but its own notebook. Same failure posture:
+    // log and swallow, the next minute's pass self-heals.
+    const windowTo = new Date(controller.scheduledTime);
+    const windowFrom = new Date(
+      controller.scheduledTime - 75 * 60 * 1000,
+    );
+    ctx.waitUntil(
+      Effect.runPromise(
+        runCaptureShadowPass({
+          mode: "cron",
+          windowFrom,
+          windowTo,
+          staleAfterMs: 15 * 60 * 1000,
+        }).pipe(
+          Effect.provide(capturePlatformLayer(captureEnv(env))),
+          Effect.tap((report) =>
+            Effect.logInfo(
+              `capture shadow pass: checked ${report.checked}/${report.inWindow} in window, ` +
+                Object.entries(report.sources)
+                  .map(
+                    ([name, c]) =>
+                      `${name} matched ${c.matched}/${c.classified} (pending ${c.pending}, mismatched ${c.mismatched})`,
+                  )
+                  .join("; "),
+            ),
+          ),
+          Effect.catch((cause) =>
+            Effect.logError("capture shadow pass failed", cause),
           ),
         ),
       ),

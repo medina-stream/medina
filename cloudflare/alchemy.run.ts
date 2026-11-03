@@ -3,6 +3,7 @@ import { adopt } from "alchemy/AdoptPolicy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import { localState } from "alchemy/State";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,10 +35,13 @@ import { fileURLToPath } from "node:url";
 // `alchemy destroy` against a stage of this stack without first
 // removing these resources — destroy would try to delete them.
 //
-// The Worker's secrets (provider keys, when the pipeline lands here)
-// are NOT declared in this stack, per the hskping Path B precedent:
-// they will be Secrets Store bindings attached out-of-band, read via
-// .get(), so values never enter Alchemy state.
+// Secrets are declared in this stack as Secrets Store resources
+// (Scott's direction, Nov 2: everything Alchemy-declared, nothing
+// out-of-band). A secret's value is supplied to the deploy through the
+// environment as a Redacted — never a literal in this repo — and the
+// binding is read in the Worker via .get(). A deploy that lacks a
+// required value fails loudly below rather than reconciling a secret
+// to an empty value.
 //
 // State is local (`.alchemy/` in this directory, committed with the
 // code), matching hskping: the remote state store needs Secrets Store
@@ -52,6 +56,37 @@ export const Artifacts = Cloudflare.R2.Bucket("Artifacts", {
 export const CaptureIn = Cloudflare.R2.Bucket("CaptureIn", {
   name: "sco-lifelog-in",
 }).pipe(adopt(true));
+
+// INDEX_API_TOKEN: the Bearer credential for the medina-index index
+// API — the same token medina-dev presents when it registers
+// artifacts and medina-index checks on every call (§4.3). The Worker
+// needs it to read the index for the capture shadow's diff (and, at
+// the step-2 cutover, to register what it ingests). The value is the
+// existing shared token, supplied via the deploy environment; it is
+// never written in this repo. The store is the account's one Secrets
+// Store (default_secrets_store, the same store hskping uses),
+// referenced by id: the Secret resource takes plain store ids.
+const indexApiToken = process.env.INDEX_API_TOKEN;
+if (indexApiToken === undefined || indexApiToken === "") {
+  throw new Error(
+    "INDEX_API_TOKEN is not set in the deploy environment: the " +
+      "medina-index token (the one medina-dev and medina-index " +
+      "already share) must be supplied to declare its Secrets Store " +
+      "binding — see docs/cloudflare-migration.md §4.3 step 2.",
+  );
+}
+export const IndexApiToken = Cloudflare.SecretsStore.Secret(
+  "IndexApiToken",
+  {
+    store: {
+      storeId: "8c3b7231cb714944a163e017ceecfac4",
+      accountId: "22e64798cbb760891764f349b53f573a",
+    },
+    name: "INDEX_API_TOKEN",
+    value: Redacted.make(indexApiToken),
+    scopes: ["workers"],
+  },
+);
 
 // Milestone 4: the Worker bundle imports the repo's own schema
 // modules (lib/lifelog/JournalApi.ts and friends), which resolve
@@ -104,6 +139,10 @@ export const Api = Cloudflare.Worker("Api", {
     ARTIFACTS: Artifacts,
     CAPTURE_IN: CaptureIn,
     ShadowDiscovery: Cloudflare.DurableObject("ShadowDiscovery"),
+    // Milestone 4 step 2: the capture-loop shadow's notebook and the
+    // index credential its diff reads through.
+    CaptureShadow: Cloudflare.DurableObject("CaptureShadow"),
+    INDEX_API_TOKEN: IndexApiToken,
   },
 });
 
