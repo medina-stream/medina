@@ -64,6 +64,21 @@
  * `GET /archive/status` (same device-token gate) expose both for
  * parity checks.
  *
+ * Milestone 4 steps 5–6 add the two media stages to the same Cron
+ * Trigger. Media-normalize (src/normalize.ts) probes captures,
+ * writes direct manifests for canonical-form audio, and runs the
+ * Transloadit chunk flow (presigned import → split → store with
+ * minted credentials) for the rest; NORMALIZE_MODE flips it from
+ * shadow to performing. Media-transcribe (src/transcribe.ts)
+ * submits manifest chunks to AssemblyAI — receipt-guarded, one
+ * submitter, never re-buying a job — and merges the results into
+ * the canonical transcript; TRANSCRIBE_MODE is its flip.
+ * `POST /normalize/run`, `GET /normalize/status`,
+ * `POST /transcribe/run`, and `GET /transcribe/status` (same
+ * device-token gate) expose both, including the one-capture
+ * `?proof=1` rehearsal modes that run the full live flow against
+ * a proof namespace.
+ *
  * The handler is an Effect program (the repo's HTTP precedent is
  * Effect HttpRouter on the server; the full router port arrives with
  * the read-cutover phase of the migration — for two routes and a
@@ -91,6 +106,16 @@ import {
   type ArchiveEnv,
 } from "./archive.ts";
 import {
+  normalizePlatformLayer,
+  runNormalizePass,
+  type NormalizeEnv,
+} from "./normalize.ts";
+import {
+  runTranscribePass,
+  transcribePlatformLayer,
+  type TranscribeEnv,
+} from "./transcribe.ts";
+import {
   handleJournal,
   refreshReadModelSnapshot,
 } from "./journal.ts";
@@ -98,6 +123,8 @@ import {
 export { CaptureShadow } from "./capture.ts";
 export { StarsShadow } from "./stars.ts";
 export { ArchiveShadow } from "./archive.ts";
+export { NormalizeShadow } from "./normalize.ts";
+export { TranscribeShadow } from "./transcribe.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -133,7 +160,12 @@ interface R2ObjectHeadLike {
 }
 
 interface R2BucketLike {
-  get(key: string): Promise<R2ObjectLike | null>;
+  get(
+    key: string,
+    options?: {
+      readonly range?: { readonly offset: number; readonly length: number };
+    },
+  ): Promise<R2ObjectLike | null>;
   head(key: string): Promise<R2ObjectHeadLike | null>;
   put(
     key: string,
@@ -169,9 +201,22 @@ interface Env {
   readonly CaptureShadow: DurableObjectNamespaceLike;
   readonly StarsShadow: DurableObjectNamespaceLike;
   readonly ArchiveShadow: DurableObjectNamespaceLike;
+  readonly NormalizeShadow: DurableObjectNamespaceLike;
+  readonly TranscribeShadow: DurableObjectNamespaceLike;
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
+  /** Secrets Store bindings for the media stages' vendor keys
+   * (steps 5–6). Optional in the type because their stack
+   * declarations land with the stored values' deploy supply —
+   * see alchemy.run.ts for the full explanation; both stages
+   * report their vendor paths unconfigured until then. */
+  readonly ASSEMBLYAI_API_KEY?: SecretsStoreSecretLike;
+  readonly TRANSLOADIT_API_KEY?: SecretsStoreSecretLike;
+  /** secret_text binding (declared in alchemy.run.ts via
+   * Cloudflare.R2.S3Credentials): the JSON-encoded S3 keypair for
+   * sco-lifelog the media stages presign and mint with. */
+  readonly ARTIFACTS_S3?: string;
   /** Plain deploy variable (declared in alchemy.run.ts): "live" makes
    * the capture loop perform; anything else keeps it a shadow. */
   readonly CAPTURE_LOOP_MODE?: string;
@@ -179,6 +224,14 @@ interface Env {
   readonly STAR_DETECTOR_MODE?: string;
   /** Step 4: "live" makes the archive sweep perform; else shadow. */
   readonly ARCHIVE_SWEEP_MODE?: string;
+  /** Step 5: "live" makes media-normalize perform; else shadow. */
+  readonly NORMALIZE_MODE?: string;
+  /** Step 6: "live" makes media-transcribe perform; else shadow. */
+  readonly TRANSCRIBE_MODE?: string;
+  /** Optional AssemblyAI client parity with medina-dev's config
+   * (ASSEMBLYAI_PROMPT / ASSEMBLYAI_SPEAKER_NAMES); unset today. */
+  readonly ASSEMBLYAI_PROMPT?: string;
+  readonly ASSEMBLYAI_SPEAKER_NAMES?: string;
 }
 
 const captureEnv = (env: Env): CaptureEnv => ({
@@ -205,9 +258,42 @@ const starsMode = (env: Env): "live" | "shadow" =>
 const archiveMode = (env: Env): "live" | "shadow" =>
   env.ARCHIVE_SWEEP_MODE === "live" ? "live" : "shadow";
 
+const normalizeEnv = (env: Env): NormalizeEnv => ({
+  rangeGet: async (key, offset, length) => {
+    const object = await env.ARTIFACTS.get(key, {
+      range: { offset, length },
+    });
+    if (object === null) return null;
+    return new Uint8Array(await object.arrayBuffer());
+  },
+  notebook: env.NormalizeShadow,
+  transloaditApiKey: env.TRANSLOADIT_API_KEY ?? null,
+  s3Credentials: env.ARTIFACTS_S3,
+});
+
+const transcribeEnv = (env: Env): TranscribeEnv => ({
+  notebook: env.TranscribeShadow,
+  assemblyAiApiKey: env.ASSEMBLYAI_API_KEY ?? null,
+  s3Credentials: env.ARTIFACTS_S3,
+  ...(env.ASSEMBLYAI_PROMPT ? { prompt: env.ASSEMBLYAI_PROMPT } : {}),
+  ...(env.ASSEMBLYAI_SPEAKER_NAMES
+    ? {
+        speakerNames: env.ASSEMBLYAI_SPEAKER_NAMES.split(",")
+          .map((name) => name.trim())
+          .filter(Boolean),
+      }
+    : {}),
+});
+
+const normalizeMode = (env: Env): "live" | "shadow" =>
+  env.NORMALIZE_MODE === "live" ? "live" : "shadow";
+
+const transcribeMode = (env: Env): "live" | "shadow" =>
+  env.TRANSCRIBE_MODE === "live" ? "live" : "shadow";
+
 /**
  * The full stage platform: the capture loop's services and the
- * artifact catalog as the base, with the step-3/4 stages' own
+ * artifact catalog as the base, with the later stages' own
  * services built on top of it. One composition for the cron and
  * the manual endpoints, so both run the passes identically.
  */
@@ -220,6 +306,8 @@ const stagePlatform = (env: Env) => {
     base,
     starsPlatformLayer(starsEnv(env)).pipe(Layer.provide(base)),
     archivePlatformLayer(archiveEnv(env)).pipe(Layer.provide(base)),
+    normalizePlatformLayer(normalizeEnv(env)).pipe(Layer.provide(base)),
+    transcribePlatformLayer(transcribeEnv(env)).pipe(Layer.provide(base)),
   );
 };
 
@@ -843,6 +931,170 @@ const serveArchiveStatus = (
     });
   });
 
+/**
+ * Manual trigger for one media-normalize pass (§4.3 step 5), same
+ * device-token gate — parity tooling: in shadow mode it diffs the
+ * census slice named by `?offset=`/`?limit=` (defaults 0/500), or
+ * one capture with `?capture=`; in live mode it performs (frontier
+ * first). `?proof=1&capture=<id>` runs that capture's full live
+ * flow against the normalize-proof/ namespace (at most one
+ * Transloadit assembly per capture). `?staleMinutes=N` (default
+ * 120) is the pending grace for work medina-dev has not done yet.
+ */
+const serveNormalizeRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const now = new Date();
+    const limitRaw = Number(url.searchParams.get("limit") ?? "500");
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 500;
+    const offsetRaw = Number(url.searchParams.get("offset") ?? "0");
+    const offset =
+      Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0;
+    const staleMinutes = Number(url.searchParams.get("staleMinutes") ?? "120");
+    const staleAfterMs =
+      (Number.isFinite(staleMinutes) && staleMinutes > 0 ? staleMinutes : 120) *
+      60_000;
+    const captureParam = url.searchParams.get("capture");
+    const proof = url.searchParams.get("proof") === "1";
+    const outcome = yield* runNormalizePass({
+      mode: "manual",
+      now,
+      limit,
+      offset,
+      staleAfterMs,
+      perform: normalizeMode(env) === "live",
+      ...(captureParam !== null ? { captureId: captureParam } : {}),
+      ...(proof ? { proof: true } : {}),
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The normalize stage's notebook (last report), same gate. */
+const serveNormalizeStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.NormalizeShadow.get(
+      env.NormalizeShadow.idFromName("normalize-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://normalize-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "normalize status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+/**
+ * Manual trigger for one media-transcribe pass (§4.3 step 6), same
+ * device-token gate — parity tooling: in shadow mode it diffs the
+ * manifest slice named by `?offset=`/`?limit=` (defaults 0/500),
+ * or one capture with `?capture=`; in live mode it performs a
+ * bounded frontier slice (`?limit=`, default 8 — submissions
+ * spend real money, so the bound is deliberate). `?proof=1&capture=<id>`
+ * runs that capture's full live flow against the transcript-proof/
+ * namespace and compares the resulting text with the canonical
+ * transcript — repeat the call until the proof completes (the
+ * first call submits, later calls poll). `?staleMinutes=N`
+ * (default 120) is the pending grace for unsubmitted manifests.
+ */
+const serveTranscribeRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const now = new Date();
+    const proof = url.searchParams.get("proof") === "1";
+    const limitRaw = Number(
+      url.searchParams.get("limit") ??
+        (transcribeMode(env) === "live" || proof ? "8" : "500"),
+    );
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 8;
+    const offsetRaw = Number(url.searchParams.get("offset") ?? "0");
+    const offset =
+      Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0;
+    const staleMinutes = Number(url.searchParams.get("staleMinutes") ?? "120");
+    const staleAfterMs =
+      (Number.isFinite(staleMinutes) && staleMinutes > 0 ? staleMinutes : 120) *
+      60_000;
+    const captureParam = url.searchParams.get("capture");
+    const outcome = yield* runTranscribePass({
+      mode: "manual",
+      now,
+      limit,
+      offset,
+      staleAfterMs,
+      perform: transcribeMode(env) === "live",
+      ...(captureParam !== null ? { captureId: captureParam } : {}),
+      ...(proof ? { proof: true } : {}),
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The transcribe stage's notebook (last report), same gate. */
+const serveTranscribeStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.TranscribeShadow.get(
+      env.TranscribeShadow.idFromName("transcribe-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://transcribe-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "transcribe status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
 const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
@@ -871,6 +1123,18 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   }
   if (request.method === "POST" && url.pathname === "/archive/run") {
     return serveArchiveRun(env, request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/normalize/status") {
+    return serveNormalizeStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/normalize/run") {
+    return serveNormalizeRun(env, request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/transcribe/status") {
+    return serveTranscribeStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/transcribe/run") {
+    return serveTranscribeRun(env, request, url);
   }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
@@ -1112,6 +1376,69 @@ export default {
           Effect.provide(stagePlatform(env)),
           Effect.catch((cause) =>
             Effect.logError("archive sweep pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // Media-normalize (§4.3 step 5): a bounded slice per tick.
+    // Live mode performs (in-flight receipts first, then the
+    // unprocessed frontier, then the rotating chunk-ensure slice);
+    // shadow mode diffs the rotating census slice, comparing both
+    // the plan and the Worker's own probe derivations against
+    // medina-dev's stored records. Same failure posture.
+    const normalizeNow = new Date(controller.scheduledTime);
+    ctx.waitUntil(
+      Effect.runPromise(
+        runNormalizePass({
+          mode: "cron",
+          now: normalizeNow,
+          limit: 200,
+          staleAfterMs: 2 * 60 * 60 * 1000,
+          perform: normalizeMode(env) === "live",
+        }).pipe(
+          Effect.tap((report) =>
+            Effect.logInfo(
+              `media-normalize pass (${normalizeMode(env)}): checked ${report.checked}/${report.totalCaptures} captures, ` +
+                `matched ${report.matched}, pending ${report.pending}, mismatched ${report.mismatched}, settled ${report.settled}, ` +
+                `derivations ${report.derivationsAgreeing}/${report.derivationsChecked} agreeing, ` +
+                `performed direct ${report.performedDirect}, fired ${report.performedFired}, completed ${report.performedCompleted}, ` +
+                `unconfigured ${report.unconfigured}, errors ${report.errors.length}`,
+            ),
+          ),
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("media-normalize pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // Media-transcribe (§4.3 step 6): live mode works a bounded
+    // frontier slice per tick — the server's own pacing bound
+    // (8 concurrent items) becomes 8 items per minute here, and
+    // submissions are receipt-guarded so nothing is ever bought
+    // twice. Shadow mode diffs the rotating manifest slice. Same
+    // failure posture: log and swallow.
+    const transcribeNow = new Date(controller.scheduledTime);
+    ctx.waitUntil(
+      Effect.runPromise(
+        runTranscribePass({
+          mode: "cron",
+          now: transcribeNow,
+          limit: transcribeMode(env) === "live" ? 8 : 200,
+          staleAfterMs: 2 * 60 * 60 * 1000,
+          perform: transcribeMode(env) === "live",
+        }).pipe(
+          Effect.tap((report) =>
+            Effect.logInfo(
+              `media-transcribe pass (${transcribeMode(env)}): checked ${report.checked}/${report.totalManifests} manifests, ` +
+                `matched ${report.matched}, done ${report.done}, in-flight ${report.inFlight}, pending ${report.pending}, ` +
+                `mismatched ${report.mismatched}, settled ${report.settled}, submitted ${report.performedSubmitted}, ` +
+                `completed ${report.performedCompleted}, errors ${report.errors.length}`,
+            ),
+          ),
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("media-transcribe pass failed", cause),
           ),
         ),
       ),

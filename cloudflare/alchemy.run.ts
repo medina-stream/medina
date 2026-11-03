@@ -88,6 +88,37 @@ export const IndexApiToken = Cloudflare.SecretsStore.Secret(
   },
 );
 
+// The media stages' vendor credentials — ASSEMBLYAI_API_KEY
+// (§4.3 step 6) and TRANSLOADIT_API_KEY (§4.3 step 5) — are
+// deliberately NOT declared as Secret resources yet: a known,
+// named gap with a precise unblock, not an oversight.
+//
+// A Secrets Store Secret resource reconciles its value FROM the
+// deploy environment: Alchemy patches the stored value to match
+// whatever the deploy supplies. That is safe for the index token
+// above because the deployer holds its value. It is NOT safe for
+// these two:
+//
+//   - TRANSLOADIT_API_KEY: Scott created a NEW scoped key
+//     ("cloudflare": assemblies read+write only) on Nov 2 and
+//     placed its value in the Secrets Store. That value exists
+//     only in the store and Scott's own records; declaring the
+//     resource with medina-dev's legacy key would silently
+//     overwrite the scoped key in the store.
+//   - ASSEMBLYAI_API_KEY: medina-dev never held this key at all —
+//     its calls go through the exe.dev proxy
+//     (assemblyai.int.exe.xyz), which injects it. The only copies
+//     are the Secrets Store entry Scott created Nov 2 and his own
+//     records.
+//
+// Both declarations land, in the IndexApiToken shape above, the
+// moment the stored values are supplied to a deploy environment
+// (or Scott confirms which values to reconcile to). Until then
+// both stages run their shadows in full — plans, probe
+// derivations, and diffs need no vendor key — and report their
+// vendor paths as unconfigured when asked to perform. The Worker
+// code reads both bindings optionally for exactly this reason.
+
 // Milestone 4: the Worker bundle imports the repo's own schema
 // modules (lib/lifelog/JournalApi.ts and friends), which resolve
 // `effect` to the repo-root install (4.0.0) while this package pins
@@ -161,6 +192,23 @@ export const Api = Cloudflare.Worker("Api", {
     ArchiveShadow: Cloudflare.DurableObject("ArchiveShadow"),
     STAR_DETECTOR_MODE: "live",
     ARCHIVE_SWEEP_MODE: "live",
+    // Milestone 4 steps 5–6: the media stages' notebooks, modes,
+    // and credentials, same pattern as steps 2–4 — "shadow" plans
+    // and diffs only; "live" performs, with medina-dev's
+    // corresponding stage standing down in the same batch
+    // (MEDINA_SOURCES without "normalize" / "transcribe").
+    NormalizeShadow: Cloudflare.DurableObject("NormalizeShadow"),
+    TranscribeShadow: Cloudflare.DurableObject("TranscribeShadow"),
+    // The media stages presign R2 URLs and mint temporary R2
+    // credentials — impossible with the native R2 binding — so
+    // the stack mints this Worker a bucket-scoped S3 keypair for
+    // sco-lifelog (object read/write on that bucket only) and
+    // injects it as a secret binding (see src/r2creds.ts).
+    ARTIFACTS_S3: Cloudflare.R2.S3Credentials(Artifacts, {
+      access: "read-write",
+    }),
+    NORMALIZE_MODE: "shadow",
+    TRANSCRIBE_MODE: "shadow",
   },
 });
 
