@@ -149,7 +149,7 @@ export const Api = Cloudflare.Worker("Api", {
     // (MEDINA_SOURCES without "capture"). Rolling back the stage is
     // flipping this back to "shadow", redeploying, and re-enabling
     // medina-dev's capture loop in the same batch.
-    CAPTURE_LOOP_MODE: "shadow",
+    CAPTURE_LOOP_MODE: "live",
   },
 });
 
