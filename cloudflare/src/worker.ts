@@ -118,7 +118,11 @@ import {
   transcribePlatformLayer,
   type TranscribeEnv,
 } from "./transcribe.ts";
-import { parseS3Credentials } from "./r2creds.ts";
+import {
+  parseS3Credentials,
+  presignGetUrl,
+  type S3CredentialsValue,
+} from "./r2creds.ts";
 import {
   handleJournal,
   refreshReadModelSnapshot,
@@ -223,6 +227,15 @@ interface Env {
    * keypair for sco-lifelog the media stages presign and mint
    * with. Absent until then — see alchemy.run.ts. */
   readonly ARTIFACTS_S3?: string;
+  /** The same keypair in two-secret form — the form it actually
+   * landed in (Nov 6): Scott created a bucket-scoped R2 API token
+   * for sco-lifelog (Account API, Object Read & Write) and placed
+   * the pair in the Secrets Store under these names; attached
+   * out-of-band like the vendor keys (scripts/reattach-secrets.ts).
+   * resolveArtifactsS3 composes them into the ARTIFACTS_S3 JSON
+   * value the stages parse, so no value ever transits a deploy. */
+  readonly ARTIFACTS_S3_ACCESS_KEY_ID?: SecretsStoreSecretLike;
+  readonly ARTIFACTS_S3_SECRET_ACCESS_KEY?: SecretsStoreSecretLike;
   /** Plain deploy variable (declared in alchemy.run.ts): "live" makes
    * the capture loop perform; anything else keeps it a shadow. */
   readonly CAPTURE_LOOP_MODE?: string;
@@ -264,7 +277,7 @@ const starsMode = (env: Env): "live" | "shadow" =>
 const archiveMode = (env: Env): "live" | "shadow" =>
   env.ARCHIVE_SWEEP_MODE === "live" ? "live" : "shadow";
 
-const normalizeEnv = (env: Env): NormalizeEnv => ({
+const normalizeEnv = (env: Env, artifactsS3?: string): NormalizeEnv => ({
   rangeGet: async (key, offset, length) => {
     const object = await env.ARTIFACTS.get(key, {
       range: { offset, length },
@@ -274,13 +287,13 @@ const normalizeEnv = (env: Env): NormalizeEnv => ({
   },
   notebook: env.NormalizeShadow,
   transloaditApiKey: env.TRANSLOADIT_API_KEY ?? null,
-  s3Credentials: env.ARTIFACTS_S3,
+  s3Credentials: artifactsS3 ?? env.ARTIFACTS_S3,
 });
 
-const transcribeEnv = (env: Env): TranscribeEnv => ({
+const transcribeEnv = (env: Env, artifactsS3?: string): TranscribeEnv => ({
   notebook: env.TranscribeShadow,
   assemblyAiApiKey: env.ASSEMBLYAI_API_KEY ?? null,
-  s3Credentials: env.ARTIFACTS_S3,
+  s3Credentials: artifactsS3 ?? env.ARTIFACTS_S3,
   ...(env.ASSEMBLYAI_PROMPT ? { prompt: env.ASSEMBLYAI_PROMPT } : {}),
   ...(env.ASSEMBLYAI_SPEAKER_NAMES
     ? {
@@ -297,25 +310,77 @@ const normalizeMode = (env: Env): "live" | "shadow" =>
 const transcribeMode = (env: Env): "live" | "shadow" =>
   env.TRANSCRIBE_MODE === "live" ? "live" : "shadow";
 
+/** The S3 endpoint and bucket the composed ARTIFACTS_S3 value
+ * names: the account's R2 S3 endpoint (path-style, as r2creds
+ * signs) and the one bucket the keypair is scoped to. */
+const ARTIFACTS_S3_ENDPOINT =
+  "https://22e64798cbb760891764f349b53f573a.r2.cloudflarestorage.com";
+const ARTIFACTS_S3_BUCKET = "sco-lifelog";
+
+/**
+ * The media stages' S3 keypair as the JSON value the stages
+ * parse (see r2creds.ts): the declared ARTIFACTS_S3 binding when
+ * present, else composed from the two Secrets Store secrets
+ * Scott placed (ARTIFACTS_S3_ACCESS_KEY_ID /
+ * ARTIFACTS_S3_SECRET_ACCESS_KEY — a bucket-scoped R2 API token
+ * for sco-lifelog). Undefined when neither form is available, in
+ * which case the stages report themselves unconfigured, exactly
+ * as they did while the binding was absent. The composed value
+ * exists only in memory; the store values are never logged,
+ * persisted, or returned.
+ */
+const resolveArtifactsS3 = (
+  env: Env,
+): Effect.Effect<string | undefined> =>
+  Effect.gen(function* () {
+    if (typeof env.ARTIFACTS_S3 === "string" && env.ARTIFACTS_S3.length > 0) {
+      return env.ARTIFACTS_S3;
+    }
+    const keyId = yield* resolveStoreSecret(env.ARTIFACTS_S3_ACCESS_KEY_ID);
+    const secret = yield* resolveStoreSecret(
+      env.ARTIFACTS_S3_SECRET_ACCESS_KEY,
+    );
+    if (keyId.state !== "ok" || secret.state !== "ok") return undefined;
+    return JSON.stringify({
+      endpoint: ARTIFACTS_S3_ENDPOINT,
+      bucketName: ARTIFACTS_S3_BUCKET,
+      region: "auto",
+      accessKeyId: keyId.value,
+      secretAccessKey: secret.value,
+    });
+  });
+
 /**
  * The full stage platform: the capture loop's services and the
  * artifact catalog as the base, with the later stages' own
  * services built on top of it. One composition for the cron and
- * the manual endpoints, so both run the passes identically.
+ * the manual endpoints, so both run the passes identically. The
+ * layer build first resolves the media stages' S3 keypair
+ * (resolveArtifactsS3) — a pair of Secrets Store reads — so the
+ * sync env builders receive the composed value.
  */
-const stagePlatform = (env: Env) => {
-  const base = Layer.mergeAll(
-    capturePlatformLayer(captureEnv(env)),
-    artifactCatalogLayer(env.ARTIFACTS),
+const stagePlatform = (env: Env) =>
+  Layer.unwrap(
+    resolveArtifactsS3(env).pipe(
+      Effect.map((artifactsS3) => {
+        const base = Layer.mergeAll(
+          capturePlatformLayer(captureEnv(env)),
+          artifactCatalogLayer(env.ARTIFACTS),
+        );
+        return Layer.mergeAll(
+          base,
+          starsPlatformLayer(starsEnv(env)).pipe(Layer.provide(base)),
+          archivePlatformLayer(archiveEnv(env)).pipe(Layer.provide(base)),
+          normalizePlatformLayer(normalizeEnv(env, artifactsS3)).pipe(
+            Layer.provide(base),
+          ),
+          transcribePlatformLayer(transcribeEnv(env, artifactsS3)).pipe(
+            Layer.provide(base),
+          ),
+        );
+      }),
+    ),
   );
-  return Layer.mergeAll(
-    base,
-    starsPlatformLayer(starsEnv(env)).pipe(Layer.provide(base)),
-    archivePlatformLayer(archiveEnv(env)).pipe(Layer.provide(base)),
-    normalizePlatformLayer(normalizeEnv(env)).pipe(Layer.provide(base)),
-    transcribePlatformLayer(transcribeEnv(env)).pipe(Layer.provide(base)),
-  );
-};
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
@@ -1259,6 +1324,49 @@ const checkTransloaditKey = (apiKey: string) =>
     }
   });
 
+/**
+ * Live proof that a parsed ARTIFACTS_S3 keypair actually
+ * authenticates against the bucket: presign a GET for a known
+ * artifact and fetch its first byte. Reports only the HTTP
+ * status — never the URL (it carries the key id in the signed
+ * credential scope) and never any content.
+ */
+const checkArtifactsS3 = (
+  s3: S3CredentialsValue,
+): Effect.Effect<
+  | { readonly status: number }
+  | { readonly status: null; readonly error: string }
+> =>
+  Effect.gen(function* () {
+    const url = yield* presignGetUrl({
+      endpoint: s3.endpoint,
+      bucket: s3.bucketName,
+      key: "views/days-v6.json",
+      credentials: {
+        accessKeyId: s3.accessKeyId,
+        secretAccessKey: s3.secretAccessKey,
+      },
+      ttlSeconds: 300,
+    }).pipe(Effect.catch(() => Effect.succeed(null)));
+    if (url === null) {
+      return { status: null, error: "presign failed" } as const;
+    }
+    const status = yield* Effect.promise(async () => {
+      try {
+        const res = await fetch(url, { headers: { Range: "bytes=0-0" } });
+        if (res.body !== null) {
+          await res.body.cancel().catch(() => undefined);
+        }
+        return res.status;
+      } catch {
+        return null;
+      }
+    });
+    return status === null
+      ? ({ status: null, error: "fetch failed" } as const)
+      : ({ status } as const);
+  });
+
 const serveMediaVerify = (
   env: Env,
   request: Request,
@@ -1269,15 +1377,18 @@ const serveMediaVerify = (
     if (!(yield* isValidToken(env, gateToken(request, url)))) {
       return fail(404, "not found");
     }
-    const s3 = parseS3Credentials(env.ARTIFACTS_S3);
+    const artifactsS3Json = yield* resolveArtifactsS3(env);
+    const s3 = parseS3Credentials(artifactsS3Json);
+    const liveCheck = s3 === null ? null : yield* checkArtifactsS3(s3);
     const artifactsS3 =
       s3 !== null
-        ? { state: "ok" as const, bucket: s3.bucketName }
+        ? { state: "ok" as const, bucket: s3.bucketName, liveCheck }
         : {
             state:
-              env.ARTIFACTS_S3 === undefined
+              artifactsS3Json === undefined
                 ? ("missing" as const)
                 : ("unparseable" as const),
+            liveCheck: null,
           };
     if (stage === "transcribe") {
       const resolved = yield* resolveStoreSecret(env.ASSEMBLYAI_API_KEY);

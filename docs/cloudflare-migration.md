@@ -731,6 +731,37 @@ HTTP API with the token above.
    stage token removed from `MEDINA_SOURCES` + restart → watch
    real traffic. Rollback per stage is unchanged: mode back to
    shadow + the server token restored + restart.
+
+   **Steps 5–6 FLIPPED LIVE Nov 6, 2026.** Scott took unblock
+   (a): a bucket-scoped R2 API token for sco-lifelog (Account
+   API, Object Read & Write), its keypair placed in the Secrets
+   Store as `ARTIFACTS_S3_ACCESS_KEY_ID` /
+   `ARTIFACTS_S3_SECRET_ACCESS_KEY`. The pair is attached
+   out-of-band by `scripts/reattach-secrets.ts` like the vendor
+   keys (a declared Secret resource would reconcile the stored
+   value from the deploy environment), and `resolveArtifactsS3`
+   in `src/worker.ts` composes the two store values into the
+   `ARTIFACTS_S3` JSON the stages parse — no value transits a
+   deploy or a log. Proofs before the flip, all from the Worker
+   with its own bindings: both `/verify` endpoints green (vendor
+   keys authenticate; a presigned GET against sco-lifelog
+   returned HTTP 206); a normalize proof on a Nov 4 capture
+   wrote its direct manifest under `normalize-proof/` with
+   derivations agreeing; a transcribe proof submitted one paid
+   AssemblyAI job and completed — its text differed from the
+   canonical transcript in two spots (one word heard
+   differently, one short phrase dropped), the vendor's own
+   run-to-run variance on identical audio, not a pipeline
+   difference. Flip batch, same day: modes to `live` + deploy;
+   medina-dev's `MEDINA_SOURCES` dropped `normalize,transcribe`
+   (backup `.env.bak-2026-11-06-steps56`) + restart. First live
+   cron reports: transcribe checked 8 / completed 8, no errors;
+   normalize checked 200 with 193/193 derivations agreeing and
+   exactly one error — a legacy 2022-02-17 capture whose
+   Transloadit chunks failed validation under medina-dev in
+   September (receipt dated 2026-09-16, two prior assemblies);
+   the stage declines to re-fire it, by design. Rollback
+   unchanged.
 7. **`gps-compact` / `gps-stays`** — pure derivations, but the points
    store is Parquet partitions; a Worker-side Parquet writer is a
    design item of its own, so these sit late deliberately.

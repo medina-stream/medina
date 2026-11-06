@@ -222,22 +222,21 @@ export const Api = Cloudflare.Worker("Api", {
     // environment at all), and the one raw S3 keypair on the box
     // (SOURCE_BUCKET_*, for the capture source) is scoped to
     // sco-lifelog-in only — an in-place probe got AccessDenied on
-    // sco-lifelog list and write. The binding therefore waits on
-    // Scott, one of: (a) the deploy credential gaining API-token
-    // administration, after which the S3Credentials declaration
-    // returns as-is; or (b) a bucket-scoped R2 API token created
-    // for sco-lifelog, its keypair supplied through the Secrets
-    // Store / deploy environment and declared here like the index
-    // token above. Until then BOTH stages stay in shadow: the
-    // vendor keys are bound and verified (above), but each
-    // stage's perform path also needs ARTIFACTS_S3 — normalize to
-    // presign the import and mint the store credentials,
-    // transcribe to presign chunk URLs for AssemblyAI — and
-    // flipping either mode live without it would make the Worker
-    // the sole submitter while unable to submit. Their shadows
-    // need no R2 credential at all.
-    NORMALIZE_MODE: "shadow",
-    TRANSCRIBE_MODE: "shadow",
+    // sco-lifelog list and write. RESOLVED Nov 6 by path (b):
+    // Scott created a bucket-scoped R2 API token for sco-lifelog
+    // (Account API, Object Read & Write) and placed its keypair in
+    // the Secrets Store as ARTIFACTS_S3_ACCESS_KEY_ID and
+    // ARTIFACTS_S3_SECRET_ACCESS_KEY. Like the vendor keys, the
+    // pair is attached out-of-band by scripts/reattach-secrets.ts
+    // (never declared here — a Secret resource would reconcile
+    // the stored value from the deploy environment), and
+    // src/worker.ts composes the two into the ARTIFACTS_S3 JSON
+    // value the stages parse (resolveArtifactsS3). Each stage's
+    // perform path needs it — normalize to presign the import and
+    // mint the store credentials, transcribe to presign chunk
+    // URLs for AssemblyAI.
+    NORMALIZE_MODE: "live",
+    TRANSCRIBE_MODE: "live",
   },
 });
 

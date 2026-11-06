@@ -33,7 +33,18 @@
 const API = "https://api.cloudflare.com/client/v4";
 const SCRIPT_NAME = "medina-api-dev-jqvywelf7ukj6sms";
 const STORE_ID = "8c3b7231cb714944a163e017ceecfac4";
-const SECRET_NAMES = ["ASSEMBLYAI_API_KEY", "TRANSLOADIT_API_KEY"];
+const SECRET_NAMES = [
+  "ASSEMBLYAI_API_KEY",
+  "TRANSLOADIT_API_KEY",
+  // The media stages' R2 keypair (Nov 6): Scott created a
+  // bucket-scoped R2 API token for sco-lifelog and placed the pair
+  // in the store under these names; the Worker composes them into
+  // the ARTIFACTS_S3 value it presigns and mints with (see
+  // src/worker.ts resolveArtifactsS3). Same rule as the vendor
+  // keys: bind by name only, never reconcile values.
+  "ARTIFACTS_S3_ACCESS_KEY_ID",
+  "ARTIFACTS_S3_SECRET_ACCESS_KEY",
+];
 
 interface Binding {
   type?: string;
@@ -195,5 +206,5 @@ if (problems.length > 0) {
   fail(`read-back assertion failed — ${problems.join("; ")}`);
 }
 console.log(
-  `reattach-secrets: OK — ${afterBindings.length} bindings, both media-stage store secrets present`,
+  `reattach-secrets: OK — ${afterBindings.length} bindings, all media-stage store secrets present`,
 );
