@@ -1220,7 +1220,11 @@ full-corpus view recomputes) without ever converging. Proof: the
 local store's journal directories carry mtimes matching the
 execution log minute-for-minute, while the bucket holds no journal
 artifacts after Oct 28. Fix: `WorkflowsLive` now also provides
-`ArtifactStore.layerFromConfig` (commit pending below). The
+`ArtifactStore.layerFromConfig` (commit 958be21, deployed to
+medina-dev the same day; first post-restart execution derived its
+inputs from the bucket index — Oct 14 logged 17 transcripts,
+matching the bucket day-index exactly, where pre-fix executions
+always logged the smaller Archil-side counts). The
 general lesson for the remaining steps: any execution context that
 isn't the main server's (workflows, one-shot tools, the Worker
 port) must be checked for store provision — the fallback is silent
