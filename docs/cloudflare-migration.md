@@ -1198,6 +1198,35 @@ unconditional pipeline stage and is now excludable via the
   diverged would fail its item and retry rather than buffer in
   the Worker, which is the deliberate guard, not a silent skip.
 
+### Journal stall (Oct 28 – Nov 6) — root cause found and fixed Nov 6
+
+No journals were written after Oct 28, so the site's day list ended
+at Oct 28 while capture, normalize, transcribe, and the day-index
+all kept working. Diagnosis (Nov 6, from the server's own logs and
+both stores' contents): the journal/notes **workflow executions ran
+without the ArtifactStore service in context**. Files.* routes
+through the in-context store and silently falls back to the plain
+local filesystem when none is present; workflow executions run with
+the context captured by their own layer (`WorkflowsLive` in
+example-lifelog/main.ts), which provided only the LLM layer. So
+from the Oct 28 `ARTIFACT_STORE=bucket` flip onward, executions
+read the frozen local store on Archil (the pre-flip corpus) and
+wrote their journals there: days after Oct 28 do not exist in that
+store (every execution logged "0 transcripts" and finished in
+seconds), and re-journals of older days landed where the bucket-side
+pipeline never looks, so every affected day stayed stale forever
+and the pass ground through the backlog (~4–8 min per day plus
+full-corpus view recomputes) without ever converging. Proof: the
+local store's journal directories carry mtimes matching the
+execution log minute-for-minute, while the bucket holds no journal
+artifacts after Oct 28. Fix: `WorkflowsLive` now also provides
+`ArtifactStore.layerFromConfig` (commit pending below). The
+general lesson for the remaining steps: any execution context that
+isn't the main server's (workflows, one-shot tools, the Worker
+port) must be checked for store provision — the fallback is silent
+by design. Relatedly, the journal stage's move to the Worker
+(step 9) removes this server-side split entirely.
+
 ### Access + domain (staged, one open decision)
 
 Everything not needing the domain is prepared by the serving pass

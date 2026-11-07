@@ -1089,10 +1089,21 @@ const LlmLive = Layer.unwrap(
 // The journal workflow's LLM activities need the language model at
 // registration time. Layer memoization means LlmLive builds once even
 // though it also appears in Services.
+// The artifact store must be provided here too, not just in Services:
+// workflow executions run with the context captured by their own
+// layer, and Files.* falls back to the plain local filesystem when no
+// ArtifactStore is in context. Without this provision the Oct 28
+// bucket flip silently split the system — executions kept reading
+// and writing the frozen local (Archil) store while everything else
+// used the bucket, so journals for new days computed zero inputs and
+// journals for old days landed where the pipeline never looks
+// (diagnosed Nov 6, 2026; see docs/cloudflare-migration.md).
 const WorkflowsLive = Layer.mergeAll(
   JournalWorkflowLayer,
   NotesWorkflowLayer
-).pipe(Layer.provide(LlmLive))
+).pipe(
+  Layer.provide(Layer.mergeAll(LlmLive, ArtifactStore.layerFromConfig))
+)
 
 const Services = Layer.mergeAll(
   Drive.layer,
