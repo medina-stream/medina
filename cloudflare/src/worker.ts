@@ -2403,7 +2403,7 @@ export default {
             eagerWindowDays: eagerWindowDays(env),
           });
           yield* Effect.logInfo(
-            `movement pass: checked ${report.daysChecked} days (${report.daysMatched} matched, ${report.daysSkipped} memo-skipped), would write ${report.daysWouldWrite}, written ${report.daysWritten}, mismatches ${report.mismatches.length}, errors ${report.errors.length}`,
+            `movement pass: checked ${report.daysChecked} days (${report.daysMatched} matched, ${report.daysOrderDependent} order-dependent, ${report.daysSkipped} memo-skipped), would write ${report.daysWouldWrite}, written ${report.daysWritten}, mismatches ${report.mismatches.length}, errors ${report.errors.length}`,
           );
         }).pipe(
           Effect.provide(stagePlatform(env)),

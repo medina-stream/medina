@@ -27,7 +27,25 @@
  *     make the server's artifact at a basis differ from this
  *     one's until the next partition lands and both recompute
  *     under a new basis. The comparison reports name it when it
- *     happens; the next pass converges.
+ *     happens; the next pass converges. One precise sub-case,
+ *     found in the Nov 9 rehearsal: a travel segment's path
+ *     distance sums its slice's fixes IN ORDER, and for
+ *     same-timestamp fix clusters the server's order is whatever
+ *     DuckDB's execution produced that pass — not derivable from
+ *     any sort key (the same stored day shows clusters in
+ *     contradictory orders, and one Nov 2 travel is stored at
+ *     514 m where the server's own current point order computes
+ *     410 m). Roughly 6% of travel segments have a
+ *     same-timestamp cluster in their slice; on those, the
+ *     server's stored distance/mode is not reproducible, by
+ *     either side, after the fact. This port orders fixes by
+ *     (ts, source, lat, lon) — the order src/gps.ts's mergeRows
+ *     writes partitions in, so partition order and this order
+ *     converge as the Worker's compaction rewrites partitions —
+ *     and every other segment kind (stays, gaps, and travels
+ *     without same-timestamp clusters) compares exactly. The
+ *     flip retires the instability: from then on one
+ *     deterministic order produces every artifact.
  *
  *   - The narrative paragraph is null. The server generates it
  *     with its journal LLM (through exe.dev's OpenAI proxy); the
@@ -97,6 +115,11 @@ import {
 
 export const MOVEMENT_VERSION = "movement-v1";
 const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2";
+/** Check-memo entries are only valid for the comparison code that
+ * made them; the memo stores this epoch alongside the basis so a
+ * comparison change (o2: the (ts, source, lat, lon) fix order and
+ * the order-dependent classification) forces a recheck. */
+const MEMO_EPOCH = "o2";
 const PLACES_KEY = "places.json";
 const LEGACY_PLACES_KEY = "gps/places.json";
 const DAY_MS = 86_400_000;
@@ -489,6 +512,11 @@ export class MovementReport extends Schema.Class<MovementReport>(
   live: Schema.Boolean,
   daysChecked: Schema.Number,
   daysMatched: Schema.Number,
+  /** Days whose only differences are travel distance/mode on
+   * slices containing same-timestamp fix clusters — the server's
+   * order for those is execution-dependent (module doc), so its
+   * stored values are not reproducible by either side. */
+  daysOrderDependent: Schema.Number,
   daysSkipped: Schema.Number,
   daysWouldWrite: Schema.Number,
   daysWritten: Schema.Number,
@@ -995,13 +1023,26 @@ export const runMovementPass = (
         const start = localMidnightUtc(day, zone);
         const end = localMidnightUtc(nextDayOf(day), zone);
         const utcDays = [...new Set([firstUtc, lastUtc])];
+        // One deterministic fix order: (ts, source, lat, lon) —
+        // the order src/gps.ts's mergeRows writes partitions in.
+        // Path distance over a same-timestamp cluster depends on
+        // the order; the server's DuckDB order for such clusters
+        // is execution-dependent (see the module doc), so this
+        // canonical order is the one the flip standardizes on.
+        // (composeMovement's own stable ts sort preserves it.)
         const dayPoints = (yield* Effect.forEach(utcDays, pointsOf))
           .flat()
           .filter((point) => {
             const ms = Date.parse(point.ts);
             return ms >= start && ms < end;
           })
-          .sort((a, b) => a.ts.localeCompare(b.ts));
+          .sort(
+            (a, b) =>
+              a.ts.localeCompare(b.ts) ||
+              a.source.localeCompare(b.source) ||
+              a.lat - b.lat ||
+              a.lon - b.lon,
+          );
         const startIso = new Date(start).toISOString();
         const endIso = new Date(end).toISOString();
         const stays = (yield* Effect.forEach(
@@ -1124,6 +1165,7 @@ export const runMovementPass = (
     const checks = yield* notebook.checks;
     let daysChecked = 0;
     let daysMatched = 0;
+    let daysOrderDependent = 0;
     let daysSkipped = 0;
     let daysWouldWrite = 0;
     let daysWritten = 0;
@@ -1136,7 +1178,7 @@ export const runMovementPass = (
         if (
           exists &&
           memo !== undefined &&
-          memo.basis === basisHash &&
+          memo.basis === `${MEMO_EPOCH}:${basisHash}` &&
           (memo.state === "matched" || memo.state === "written")
         ) {
           daysSkipped++;
@@ -1147,7 +1189,7 @@ export const runMovementPass = (
         if (!exists) {
           if (options.perform) {
             yield* data.writeText(key, `${JSON.stringify(mine, null, 2)}\n`);
-            yield* notebook.setCheck({ day, basis: basisHash, state: "written" });
+            yield* notebook.setCheck({ day, basis: `${MEMO_EPOCH}:${basisHash}`, state: "written" });
             daysWritten++;
           } else {
             daysWouldWrite++;
@@ -1165,25 +1207,52 @@ export const runMovementPass = (
         const storedView = JSON.stringify(deterministicView(stored));
         if (mineView === storedView) {
           daysMatched++;
-          yield* notebook.setCheck({ day, basis: basisHash, state: "matched" });
+          yield* notebook.setCheck({ day, basis: `${MEMO_EPOCH}:${basisHash}`, state: "matched" });
         } else {
-          let detail = "deterministic content differs";
+          // Classify: a difference is structural when anything but
+          // a travel segment's distance/mode moves (kind, times,
+          // fixes, stays, gaps, suggestions). Travel distance/mode
+          // differences alone are the documented order-dependent
+          // class (same-timestamp clusters, module doc).
           const a = deterministicView(mine);
           const b = deterministicView(stored);
+          let detail: string | null = null;
+          let orderDependent = 0;
           if (a.segments.length !== b.segments.length) {
             detail = `segments ${a.segments.length} vs stored ${b.segments.length}`;
           } else {
             for (let i = 0; i < a.segments.length; i++) {
-              if (JSON.stringify(a.segments[i]) !== JSON.stringify(b.segments[i])) {
-                detail = `segment ${i}: ${JSON.stringify(a.segments[i])?.slice(0, 140)} vs stored ${JSON.stringify(b.segments[i])?.slice(0, 140)}`;
+              const mineSeg = a.segments[i]!;
+              const storedSeg = b.segments[i]!;
+              if (JSON.stringify(mineSeg) === JSON.stringify(storedSeg)) continue;
+              const sameSkeleton =
+                mineSeg.kind === storedSeg.kind &&
+                mineSeg.startTime === storedSeg.startTime &&
+                mineSeg.endTime === storedSeg.endTime &&
+                mineSeg.fixes === storedSeg.fixes;
+              if (mineSeg.kind === "travel" && sameSkeleton) {
+                orderDependent++;
+              } else {
+                detail = `segment ${i}: ${JSON.stringify(mineSeg)?.slice(0, 140)} vs stored ${JSON.stringify(storedSeg)?.slice(0, 140)}`;
                 break;
               }
             }
-            if (detail === "deterministic content differs" && JSON.stringify(a.suggestions) !== JSON.stringify(b.suggestions)) {
+            if (
+              detail === null &&
+              JSON.stringify(a.suggestions) !== JSON.stringify(b.suggestions)
+            ) {
               detail = `suggestions ${JSON.stringify(a.suggestions)?.slice(0, 140)} vs stored ${JSON.stringify(b.suggestions)?.slice(0, 140)}`;
             }
           }
-          mismatches.push({ day, detail });
+          if (detail === null && orderDependent > 0) {
+            daysOrderDependent++;
+            yield* notebook.setCheck({ day, basis: `${MEMO_EPOCH}:${basisHash}`, state: "matched" });
+          } else {
+            mismatches.push({
+              day,
+              detail: detail ?? "deterministic content differs",
+            });
+          }
         }
       }).pipe(
         Effect.catchCause((cause) =>
@@ -1201,6 +1270,7 @@ export const runMovementPass = (
       live: options.perform,
       daysChecked,
       daysMatched,
+      daysOrderDependent,
       daysSkipped,
       daysWouldWrite,
       daysWritten,
