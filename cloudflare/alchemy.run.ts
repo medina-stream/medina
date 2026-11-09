@@ -273,7 +273,20 @@ export const Api = Cloudflare.Worker("Api", {
     TranscriptSearchShadow: Cloudflare.DurableObject(
       "TranscriptSearchShadow",
     ),
-    SEARCH_MODE: "shadow",
+    // Flipped live Nov 9, 2026: the rehearsal built the index
+    // from the exact day-index snapshot medina-dev's published
+    // index was built from (0304f022…) and matched it on every
+    // count — same resulting basis (9dafe04b…), 2,129 captures,
+    // 85,419 passages — and a 40-query battery (common words,
+    // phrases, AND queries, names, edge cases) returned identical
+    // ordered results including excerpts, 40/40. The server half
+    // needed no .env change: medina-dev's MEDINA_SOURCES never
+    // carried "transcript-search", so its resource stood down as
+    // soon as the gated build deployed; its on-demand read keeps
+    // serving the last index it built. Rollback: back to "shadow"
+    // + redeploy, and add "transcript-search" to medina-dev's
+    // .env + restart if the server must resume building the index.
+    SEARCH_MODE: "live",
     HOME_TZ: "America/Los_Angeles",
     // The media stages presign R2 URLs and mint temporary R2
     // credentials — impossible with the native R2 binding — so

@@ -1002,7 +1002,15 @@ const Ingest = Layer.effectDiscard(
         [
           ...(enabled.has("attribution") ? [attributionResource] : []),
           ...(enabled.has("day-index") ? [dayIndexResource] : []),
-          transcriptSearchResource, movementResource, notesResource, journalResource, starsResource
+          // Transcript-search is excludable the same way: at its
+          // migration cutover (docs/cloudflare-migration.md §4.3
+          // step 8) the Worker maintains the search index and this
+          // resource stands down (MEDINA_SOURCES without
+          // "transcript-search"). The on-demand read
+          // (searchTranscripts) keeps working either way: it reads
+          // the last index this server built, frozen at that basis.
+          ...(enabled.has("transcript-search") ? [transcriptSearchResource] : []),
+          movementResource, notesResource, journalResource, starsResource
         ],
         dataPath,
         { name: "ingest", cadenceMs: 60_000 }
