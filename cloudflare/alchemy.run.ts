@@ -287,6 +287,19 @@ export const Api = Cloudflare.Worker("Api", {
     // + redeploy, and add "transcript-search" to medina-dev's
     // .env + restart if the server must resume building the index.
     SEARCH_MODE: "live",
+    // Milestone 4 step 8 (movement piece): the movement notebook
+    // (pass reports, the partition content-hash cache, and the
+    // per-day check memo) and mode, same pattern — "shadow"
+    // computes each eager day's basis and compares the stored
+    // artifact's deterministic content without writing; "live"
+    // also writes the artifacts whose basis has none, with
+    // medina-dev's movement resource standing down in the same
+    // batch (MEDINA_SOURCES without "movement"). EAGER_WINDOW_DAYS
+    // mirrors medina-dev's .env value: it bounds which days are
+    // materialized eagerly on both sides.
+    MovementShadow: Cloudflare.DurableObject("MovementShadow"),
+    MOVEMENT_MODE: "shadow",
+    EAGER_WINDOW_DAYS: "7",
     HOME_TZ: "America/Los_Angeles",
     // The media stages presign R2 URLs and mint temporary R2
     // credentials — impossible with the native R2 binding — so

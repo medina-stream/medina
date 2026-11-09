@@ -152,6 +152,11 @@ import {
   type SearchEnv,
 } from "./search.ts";
 import {
+  movementPlatformLayer,
+  runMovementPass,
+  type MovementEnv,
+} from "./movement.ts";
+import {
   parseS3Credentials,
   presignGetUrl,
   type S3CredentialsValue,
@@ -174,6 +179,7 @@ export { TranscribeShadow } from "./transcribe.ts";
 export { GpsShadow } from "./gps.ts";
 export { DayIndexShadow } from "./dayindex.ts";
 export { TranscriptSearchShadow } from "./search.ts";
+export { MovementShadow } from "./movement.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -255,6 +261,7 @@ interface Env {
   readonly GpsShadow: DurableObjectNamespaceLike;
   readonly DayIndexShadow: DurableObjectNamespaceLike;
   readonly TranscriptSearchShadow: DurableObjectNamespaceLike;
+  readonly MovementShadow: DurableObjectNamespaceLike;
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
@@ -299,6 +306,12 @@ interface Env {
    * SearchTranscripts from this Worker's index; else it answers
    * not-moved. The index build runs identically either way. */
   readonly SEARCH_MODE?: string;
+  /** Step 8 (movement): "live" makes the movement pass write the
+   * artifacts medina-dev would; else it only compares. */
+  readonly MOVEMENT_MODE?: string;
+  /** medina-dev's eager window for movement/journal enumeration
+   * (EAGER_WINDOW_DAYS there); unset = no window. */
+  readonly EAGER_WINDOW_DAYS?: string;
   /** The home zone (medina-dev's HOME_TZ); it participates in the
    * day-index and attribution bases, so it must match the server's. */
   readonly HOME_TZ?: string;
@@ -355,6 +368,23 @@ const searchEnv = (env: Env): SearchEnv => ({
 
 const searchMode = (env: Env): "live" | "shadow" =>
   env.SEARCH_MODE === "live" ? "live" : "shadow";
+
+const movementEnv = (env: Env): MovementEnv => ({
+  artifacts: env.ARTIFACTS,
+  notebook: env.MovementShadow,
+});
+
+const movementMode = (env: Env): "live" | "shadow" =>
+  env.MOVEMENT_MODE === "live" ? "live" : "shadow";
+
+const eagerWindowDays = (env: Env): number | null => {
+  const parsed = Number(env.EAGER_WINDOW_DAYS);
+  return env.EAGER_WINDOW_DAYS !== undefined &&
+    Number.isFinite(parsed) &&
+    parsed > 0
+    ? Math.floor(parsed)
+    : null;
+};
 
 /**
  * The journal serving's SearchTranscripts implementation, present
@@ -495,6 +525,7 @@ const stagePlatform = (env: Env) =>
             Layer.provide(base),
           ),
           searchPlatformLayer(searchEnv(env)).pipe(Layer.provide(base)),
+          movementPlatformLayer(movementEnv(env)).pipe(Layer.provide(base)),
         );
       }),
     ),
@@ -1348,6 +1379,71 @@ const serveSearchQuery = (
   });
 
 /**
+ * Manual trigger for one movement pass (§4.3 step 8), same
+ * device-token gate: it computes the eager days' basis hashes and
+ * compares — or, in live mode, writes — the movement artifacts.
+ * `?day=YYYY-MM-DD` checks one day regardless of the window;
+ * `?all=1` checks every movement day.
+ */
+const serveMovementRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const dayParam = url.searchParams.get("day");
+    const outcome = yield* runMovementPass({
+      mode: "manual",
+      now: new Date(),
+      zone: env.HOME_TZ ?? "UTC",
+      perform: movementMode(env) === "live",
+      eagerWindowDays: eagerWindowDays(env),
+      ...(dayParam !== null && /^\d{4}-\d{2}-\d{2}$/.test(dayParam)
+        ? { day: dayParam }
+        : {}),
+      ...(url.searchParams.get("all") === "1" ? { all: true } : {}),
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The movement notebook (last report), same gate. */
+const serveMovementStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.MovementShadow.get(
+      env.MovementShadow.idFromName("movement-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://movement-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "movement status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+/**
  * Manual trigger for one media-normalize pass (§4.3 step 5), same
  * device-token gate — parity tooling: in shadow mode it diffs the
  * census slice named by `?offset=`/`?limit=` (defaults 0/500), or
@@ -1874,6 +1970,12 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   if (request.method === "POST" && url.pathname === "/search/query") {
     return serveSearchQuery(env, request, url);
   }
+  if (request.method === "GET" && url.pathname === "/movement/status") {
+    return serveMovementStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/movement/run") {
+    return serveMovementRun(env, request, url);
+  }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
   }
@@ -2282,6 +2384,31 @@ export default {
           Effect.provide(stagePlatform(env)),
           Effect.catch((cause) =>
             Effect.logError("transcript-search pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // Movement (§4.3 step 8): compute the eager days' movement
+    // bases from the GPS partitions; compare the stored artifacts
+    // deterministically, and in live mode write the missing ones.
+    // Same failure posture.
+    ctx.waitUntil(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const report = yield* runMovementPass({
+            mode: "cron",
+            now: new Date(controller.scheduledTime),
+            zone: env.HOME_TZ ?? "UTC",
+            perform: movementMode(env) === "live",
+            eagerWindowDays: eagerWindowDays(env),
+          });
+          yield* Effect.logInfo(
+            `movement pass: checked ${report.daysChecked} days (${report.daysMatched} matched, ${report.daysSkipped} memo-skipped), would write ${report.daysWouldWrite}, written ${report.daysWritten}, mismatches ${report.mismatches.length}, errors ${report.errors.length}`,
+          );
+        }).pipe(
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("movement pass failed", cause),
           ),
         ),
       ),
