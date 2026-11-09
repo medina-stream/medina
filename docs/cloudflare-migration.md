@@ -929,8 +929,38 @@ HTTP API with the token above.
    transcript-search, movement) now runs on the Worker.
 9. **`notes` + `journal`** (LLM) — Cloudflare Workflows port of the
    cluster workflows; needs the LLM credential row above.
+   **Blocked on one Scott-side fact (Nov 9, 2026):** the AI
+   Gateway's id (and whether it is an authenticated gateway) is
+   not discoverable from the sandbox — listing gateways through
+   the Cloudflare API returns 403 (code 10000) with both the
+   deploy token and the connector credential, and the gateway's
+   OpenAI-compatible endpoint answers a uniform 401 for candidate
+   names. The port needs the gateway id from the dashboard (AI →
+   AI Gateway); if the gateway is authenticated, a gateway token
+   must also land in the Secrets Store for the Worker. Everything
+   else about the step is understood: the server's journal LLM
+   config today is `JOURNAL_LLM_API_URL=https://openai.int.exe.xyz/v1`
+   with `gpt-5.4-mini` (journal) / `gpt-5.4-nano` (notes); the
+   gateway route targets gpt-5.5 per the Nov 2 decision.
 10. **Drive sources + `inventory`** — needs the Google credential
-    row above.
+    row above. **Parity check done Nov 9, 2026 — a real gap,
+    Scott's action.** The Worker-side probe (`cloudflare/src/drive.ts`,
+    `GET /drive/probe`) exchanges the dedicated service account's
+    Secrets Store credentials for a token (the exchange works —
+    the account and key are valid) and runs the server's own
+    listAll query. The service account sees **nothing**: 0 files
+    under both the plain query and `sharedWithMe = true`. The
+    broker credential's live listAll, run the same day, sees 462
+    items — 460 files in 2 folders ("AudioRec Recordings",
+    "Easy Voice Recorder"), 126,489,758,473 bytes, id-set hash
+    fc65031e… — identical to the stored inventory's hash, so the
+    broker's view has not changed since Oct 28. Whatever folder
+    was shared on Nov 2 is not shared to
+    medina-drive-reader@medina-492522.iam.gserviceaccount.com
+    today. The Drive sources port does not proceed until the two
+    folders (at minimum the `GDRIVE_FOLDER_ID` audio folder) are
+    shared to that address; the probe re-runs in seconds to
+    confirm parity when they are.
 11. **`POST /in`** — moves with the Access milestone (service tokens
     replace the tailnet-identity trust, per the addendum).
 12. **Write surface** (`SavePlaces`, `/devices`, token admin) — stays
