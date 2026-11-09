@@ -231,7 +231,20 @@ export const Api = Cloudflare.Worker("Api", {
     // "day-index"). HOME_TZ must match medina-dev's: the zone
     // participates in both bases.
     DayIndexShadow: Cloudflare.DurableObject("DayIndexShadow"),
-    DAYINDEX_MODE: "shadow",
+    // Flipped live Nov 9, 2026: the rehearsal reproduced
+    // medina-dev's snapshot basis exactly (inputHash fe9590…,
+    // 87/87 days' entry sets equal, 2,089 attributions read from
+    // the server's own artifacts, none computed). medina-dev's
+    // .env never carried the "attribution" / "day-index"
+    // MEDINA_SOURCES tokens, so its passes stood the resources
+    // down as soon as the gated build deployed — the server half
+    // of this flip was already in place; on-demand reads still
+    // materialize there. Both sides write only-when-absent at
+    // the same content-addressed keys, so the handover has no
+    // double-write hazard. Rollback: back to "shadow" +
+    // redeploy (and add the two tokens to medina-dev's .env +
+    // restart if the server must resume writing snapshots).
+    DAYINDEX_MODE: "live",
     HOME_TZ: "America/Los_Angeles",
     // The media stages presign R2 URLs and mint temporary R2
     // credentials — impossible with the native R2 binding — so
