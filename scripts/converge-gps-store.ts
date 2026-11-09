@@ -59,32 +59,36 @@ const program = Effect.gen(function*() {
   const files = yield* Effect.promise(() => localKeys(dataDir))
   console.log(`converging ${files.length} GPS store files from ${dataDir}`)
   let uploaded = 0
+  let done = 0
   const failures: Array<string> = []
-  for (const { key, path } of files) {
-    const localBytes = yield* Effect.tryPromise(() => readFile(path)).pipe(
-      Effect.catchCause((cause) => Effect.sync(() => {
-        failures.push(`${key}: local read failed: ${String(cause).slice(0, 300)}`)
-        return null
-      }))
+  const convergeOne = ({ key, path }: { key: string; path: string }) =>
+    Effect.gen(function*() {
+      const localBytes = yield* Effect.tryPromise(() => readFile(path))
+      yield* bucket.putFile(key, path)
+      const stored = yield* bucket.getBytes(key)
+      if (Option.isNone(stored) || sha256(stored.value) !== sha256(localBytes)) {
+        return yield* Effect.fail(new Error(`${key}: hash mismatch after upload`))
+      }
+    }).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          uploaded++
+          if (++done % 500 === 0) console.log(`  ${done}/${files.length}`)
+        })
+      ),
+      Effect.catchCause((cause) =>
+        Effect.sync(() => {
+          failures.push(String(cause).slice(0, 300))
+          if (++done % 500 === 0) console.log(`  ${done}/${files.length}`)
+        })
+      )
     )
-    if (localBytes === null) continue
-    const stored = yield* Effect.flatMap(bucket.putFile(key, path), () => bucket.getBytes(key)).pipe(
-      Effect.catchCause((cause) => Effect.sync(() => {
-        failures.push(`${key}: ${String(cause).slice(0, 300)}`)
-        return Option.none<Uint8Array>()
-      }))
-    )
-    if (Option.isNone(stored)) {
-      if (!failures.some((failure) => failure.startsWith(key))) failures.push(`${key}: missing after upload`)
-      continue
-    }
-    if (sha256(stored.value) !== sha256(localBytes)) {
-      failures.push(`${key}: hash mismatch after upload`)
-      continue
-    }
-    uploaded++
-  }
-  console.log(JSON.stringify({ files: files.length, uploaded, failures }, null, 2))
+  // The store round trips (object PUT, index registration, read-back)
+  // run ~1.5 s per file from medina-dev; sequential, the 8k-file inbox
+  // would take hours, so converge with bounded concurrency. Uploads of
+  // identical bytes commute, and verification is per file.
+  yield* Effect.forEach(files, convergeOne, { concurrency: 16, discard: true })
+  console.log(JSON.stringify({ files: files.length, uploaded, failures: failures.slice(0, 20), failureCount: failures.length }, null, 2))
   if (failures.length > 0) process.exitCode = 1
 })
 
