@@ -792,7 +792,7 @@ type LifelogEnv = Drive.Drive | Bucket.Bucket | Bucket.SourceBucket | R2TempCred
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const enabled = new Set(
-      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive,normalize,transcribe,gps-compact,gps-stays,attribution,day-index")
+      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive,normalize,transcribe,gps-compact,gps-stays,attribution,day-index,transcript-search,movement")
         .split(",")
         .map((name) => name.trim())
         .filter(Boolean)
@@ -1010,7 +1010,16 @@ const Ingest = Layer.effectDiscard(
           // (searchTranscripts) keeps working either way: it reads
           // the last index this server built, frozen at that basis.
           ...(enabled.has("transcript-search") ? [transcriptSearchResource] : []),
-          movementResource, notesResource, journalResource, starsResource
+          // Movement is excludable the same way: at its migration
+          // cutover (docs/cloudflare-migration.md §4.3 step 8) the
+          // Worker derives the movement artifacts inside its GPS
+          // cadence and this resource stands down (MEDINA_SOURCES
+          // without "movement"). The read paths
+          // (movementCachedForDay, journals) keep working either
+          // way: existence at the content-addressed key is
+          // freshness, whoever wrote it.
+          ...(enabled.has("movement") ? [movementResource] : []),
+          notesResource, journalResource, starsResource
         ],
         dataPath,
         { name: "ingest", cadenceMs: 60_000 }

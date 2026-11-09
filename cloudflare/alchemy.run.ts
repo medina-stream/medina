@@ -297,8 +297,18 @@ export const Api = Cloudflare.Worker("Api", {
     // batch (MEDINA_SOURCES without "movement"). EAGER_WINDOW_DAYS
     // mirrors medina-dev's .env value: it bounds which days are
     // materialized eagerly on both sides.
+    // FLIPPED LIVE Nov 9, 2026: across 13 rehearsed days the
+    // deterministic content matched exactly on 6, differed only in
+    // the documented order-dependent travel class on 5 (the
+    // server's DuckDB fix order for same-timestamp clusters is
+    // execution-dependent; its stored values there are not
+    // reproducible by either side), and the server simply had no
+    // artifact yet at the current basis on 2 — zero structural
+    // mismatches, zero errors. Rollback: MOVEMENT_MODE back to
+    // "shadow" + redeploy, and add "movement" to medina-dev's
+    // .env MEDINA_SOURCES + restart.
     MovementShadow: Cloudflare.DurableObject("MovementShadow"),
-    MOVEMENT_MODE: "shadow",
+    MOVEMENT_MODE: "live",
     EAGER_WINDOW_DAYS: "7",
     HOME_TZ: "America/Los_Angeles",
     // The media stages presign R2 URLs and mint temporary R2
