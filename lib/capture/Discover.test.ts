@@ -31,13 +31,14 @@ const object = (key: string, etag: string): BucketObject => ({
 
 // The stub returns the whole listing regardless of limit, like the real
 // bucket layer (which pages the full prefix, sorts newest-first, then
-// slices): the newest objects come first.
+// slices): the newest objects come first. Its head answers from the same
+// object set, the way the real head answers from the bucket itself.
 const stubApi = (objects: ReadonlyArray<BucketObject>): SourceBucketApi =>
   ({
     configured: true,
     list: (_prefix: string, _limit: number) => Effect.succeed(objects),
     download: (_key: string) => Effect.fail(new Error("not needed")),
-    head: (_key: string) => Effect.succeed(null)
+    head: (key: string) => Effect.succeed(objects.find((o) => o.key === key) ?? null)
   }) as unknown as SourceBucketApi
 
 const live = BunFileSystem.layer
@@ -137,7 +138,7 @@ describe("discoverFresh discovery index", () => {
         return Effect.succeed(all.slice(0, limit))
       },
       download: (_key: string) => Effect.fail(new Error("not needed")),
-      head: (_key: string) => Effect.succeed(null)
+      head: (key: string) => Effect.succeed(all.find((o) => o.key === key) ?? null)
     } as unknown as SourceBucketApi
     const runDiscover = (limit: number) =>
       run(discoverFresh(honoringApi, source, "prefix/", limit, (list) => list,
@@ -160,5 +161,65 @@ describe("discoverFresh discovery index", () => {
     limits.length = 0
     expect((await runDiscover(3)).map((o) => o.key)).toEqual(["w3.m4a", "w4.m4a", "w5.m4a"])
     expect(limits).toEqual([3])
+  })
+
+  test("a registration whose object was deleted heals instead of wedging the window", async () => {
+    // The Nov 9, 2026 bucket-audio failure: gps/inbox files the GPS
+    // compaction consumed stayed in this source's discovery index, and
+    // every pass failed their downloads with NoSuchKey. The index merge
+    // cannot see the deletion (a truncated listing merges, it does not
+    // replace), so window selection head-checks: no object, no
+    // registration — and the window backfills in the same pass.
+    const source = "test-source-heal"
+    const stamped = (key: string, lastModified: string): BucketObject => ({
+      key,
+      size: 1024,
+      etag: `etag-${key}`,
+      lastModified
+    })
+    const bucket = new Map<string, BucketObject>([
+      ["phantom.ndjson", stamped("phantom.ndjson", "2026-11-01T05:00:00.000Z")],
+      ["live-a.ndjson", stamped("live-a.ndjson", "2026-11-01T04:00:00.000Z")],
+      ["live-b.ndjson", stamped("live-b.ndjson", "2026-11-01T03:00:00.000Z")],
+      ["live-c.ndjson", stamped("live-c.ndjson", "2026-11-01T02:00:00.000Z")],
+      ["live-d.ndjson", stamped("live-d.ndjson", "2026-11-01T01:00:00.000Z")]
+    ])
+    const headCalls = new Map<string, number>()
+    const api = {
+      configured: true,
+      // Contract-honoring: newest-first, sliced to the requested limit.
+      list: (_prefix: string, limit: number) =>
+        Effect.succeed(
+          [...bucket.values()]
+            .sort((x, y) => (y.lastModified ?? "").localeCompare(x.lastModified ?? ""))
+            .slice(0, limit)
+        ),
+      download: (_key: string) => Effect.fail(new Error("not needed")),
+      head: (key: string) => {
+        headCalls.set(key, (headCalls.get(key) ?? 0) + 1)
+        return Effect.succeed(bucket.get(key) ?? null)
+      }
+    } as unknown as SourceBucketApi
+    const runDiscover = (limit: number) =>
+      run(discoverFresh(api, source, "gps/inbox/", limit, (list) => list,
+        (item) => ({ key: item.key, version: item.etag ?? "" })))
+
+    // Cold pass learns the whole backlog and takes the newest window.
+    expect((await runDiscover(2)).map((o) => o.key)).toEqual(["phantom.ndjson", "live-a.ndjson"])
+
+    // Another consumer deletes the phantom's object. The next listing is
+    // truncated, so the merge keeps the phantom registered — only the
+    // head-check can heal it. The window must skip it and backfill.
+    bucket.delete("phantom.ndjson")
+    expect((await runDiscover(2)).map((o) => o.key)).toEqual(["live-a.ndjson", "live-b.ndjson"])
+
+    // The registration is gone, not merely skipped: a later pass never
+    // head-checks the phantom again, and the live entries behind the
+    // window were not dropped with it.
+    headCalls.clear()
+    await writeReceipt(source, "live-a.ndjson", "etag-live-a.ndjson")
+    await writeReceipt(source, "live-b.ndjson", "etag-live-b.ndjson")
+    expect((await runDiscover(2)).map((o) => o.key)).toEqual(["live-c.ndjson", "live-d.ndjson"])
+    expect(headCalls.has("phantom.ndjson")).toBe(false)
   })
 })

@@ -31,6 +31,19 @@
  * prefix nor stats a receipt file per candidate. Only a cold index (or a
  * truncated first listing) expands the request until the listing is
  * exhaustive, so a first pass still learns the whole backlog.
+ *
+ * The merge has one blind spot: a truncated listing never proves an
+ * indexed object is *gone*, so an object another consumer deleted (the
+ * GPS compaction consuming `gps/inbox/` files the bucket-audio source
+ * also tracks) stays registered forever, and its download fails with
+ * NoSuchKey on every pass — the window wedges on it, exactly the stale-
+ * registration failure the GPS store hit. Window selection therefore
+ * checks each candidate against the object head (the head is
+ * object-true) and drops registrations with no object from the index,
+ * backfilling the window from the backlog behind them — the same
+ * exists-check heal as `liveInboxFiles` in the GPS store (Nov 9, 2026).
+ * A head that *errors* proves nothing, so the registration is kept and
+ * the download gets to fail visibly, as before.
  */
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
@@ -138,17 +151,49 @@ export const discoverFresh = <T>(
     // Receipted objects leave the index; the rest is the pending backlog,
     // newest-first, from which this pass takes its window.
     const pending = toObjects(seen).filter((item) => !isReceipted(item))
+
+    // Take the window, healing stale registrations on the way (see the
+    // module doc): walk the ingestable backlog in order, head-checking
+    // each candidate, until the window holds `limit` objects that
+    // provably exist. A candidate with no object behind its registration
+    // is dropped from the index; the walk continues past it, so one
+    // stale entry can neither wedge the window nor fail a download.
+    // Candidates past a full window are not checked this pass — they
+    // heal when they reach the window.
+    const headExists = (key: string) =>
+      api.head(key).pipe(
+        Effect.map((object) => object !== null),
+        // A failed head proves nothing either way; keep the entry and
+        // let its download surface the failure, as it would have before.
+        Effect.orElseSucceed(() => true)
+      )
     const fresh: Array<T> = []
-    for (const item of pending) {
-      if (fresh.length >= limit) break
-      if (!ingestable(item)) continue
-      fresh.push(item)
+    const staleKeys = new Set<string>()
+    const candidates = pending.filter((item) => ingestable(item))
+    let scanned = 0
+    while (fresh.length < limit && scanned < candidates.length) {
+      const slice = candidates.slice(scanned, scanned + 64)
+      scanned += slice.length
+      const verdicts = yield* Effect.forEach(
+        slice,
+        (item) => Effect.map(headExists(identity(item).key), (exists) => ({ item, exists })),
+        { concurrency: 16 }
+      )
+      for (const { item, exists } of verdicts) {
+        if (!exists) staleKeys.add(identity(item).key)
+        else if (fresh.length < limit) fresh.push(item)
+      }
+    }
+    if (staleKeys.size > 0) {
+      yield* Effect.log(
+        `${sourceName}: dropped ${staleKeys.size} stale registrations (listed, but no object)`
+      )
     }
 
     // Persist what is still pending (as bucket objects, so the caller's
     // mapping is re-applied next pass) plus the newest-seen cursor.
     const pendingIdentities = new Set(pending.map((item) => identity(item).key))
-    const kept = seen.filter((object) => pendingIdentities.has(object.key))
+    const kept = seen.filter((object) => pendingIdentities.has(object.key) && !staleKeys.has(object.key))
     const cursor = seen.reduce<string | null>(
       (max, object) => (object.lastModified !== null && (max === null || object.lastModified > max) ? object.lastModified : max),
       index.cursor

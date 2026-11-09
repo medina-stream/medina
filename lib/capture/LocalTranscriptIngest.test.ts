@@ -34,14 +34,14 @@ const phoneJson = JSON.stringify({
   text: "hello world second line"
 })
 
+const listedObject = { key: "install-1/transcript/2026/09/19/x.json", size: phoneJson.length, etag: "etag-1", lastModified: "2026-09-19T01:00:00Z" }
 const stubApi = {
   configured: true,
-  list: () =>
-    Effect.succeed([
-      { key: "install-1/transcript/2026/09/19/x.json", size: phoneJson.length, etag: "etag-1", lastModified: "2026-09-19T01:00:00Z" }
-    ]),
+  list: () => Effect.succeed([listedObject]),
   download: (_key: string) => Effect.succeed(Stream.fromIterable([Buffer.from(phoneJson)])),
-  head: (_key: string) => Effect.succeed(null)
+  // The head answers from the same object the listing reports, the way
+  // the real head answers from the bucket (discovery head-checks it).
+  head: (key: string) => Effect.succeed(key === listedObject.key ? listedObject : null)
 } as unknown as SourceBucketApi
 
 const live = BunFileSystem.layer
@@ -107,14 +107,15 @@ describe("live transcript ingest", () => {
       segments: [{ start: 0.0, end: 4.2, text }],
       text
     })
-  const liveApiFor = (uuid: string, seq: number, text: string, etag: string) =>
-    ({
+  const liveApiFor = (uuid: string, seq: number, text: string, etag: string) => {
+    const listed = { key: liveKeyFor(uuid), size: 100, etag, lastModified: "2026-09-19T01:00:00Z" }
+    return ({
       configured: true,
-      list: () =>
-        Effect.succeed([{ key: liveKeyFor(uuid), size: 100, etag, lastModified: "2026-09-19T01:00:00Z" }]),
+      list: () => Effect.succeed([listed]),
       download: (_key: string) => Effect.succeed(Stream.fromIterable([Buffer.from(liveJson(uuid, seq, text))])),
-      head: (_key: string) => Effect.succeed(null)
+      head: (key: string) => Effect.succeed(key === listed.key ? listed : null)
     }) as unknown as SourceBucketApi
+  }
 
   test("files each tick as a provisional, overwriting the last", async () => {
     const uuid = uuidFor(1)

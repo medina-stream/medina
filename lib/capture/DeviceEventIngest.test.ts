@@ -35,14 +35,14 @@ const eventJson = JSON.stringify({
   }
 })
 
+const listedObject = { key: "install-1/events/2026/09/19/20260919T003000Z-uuid.json", size: eventJson.length, etag: "etag-1", lastModified: "2026-09-19T01:00:00Z" }
 const stubApi = {
   configured: true,
-  list: () =>
-    Effect.succeed([
-      { key: "install-1/events/2026/09/19/20260919T003000Z-uuid.json", size: eventJson.length, etag: "etag-1", lastModified: "2026-09-19T01:00:00Z" }
-    ]),
+  list: () => Effect.succeed([listedObject]),
   download: (_key: string) => Effect.succeed(Stream.fromIterable([Buffer.from(eventJson)])),
-  head: (_key: string) => Effect.succeed(null)
+  // The head answers from the same object the listing reports, the way
+  // the real head answers from the bucket (discovery head-checks it).
+  head: (key: string) => Effect.succeed(key === listedObject.key ? listedObject : null)
 } as unknown as SourceBucketApi
 
 const live = BunFileSystem.layer
@@ -79,13 +79,12 @@ describe("device event ingest", () => {
 
   test("skips mock locations without touching latest-location", async () => {
     const mockJson = eventJson.replace("\"mock\":false", "\"mock\":true").replace("etag-1", "etag-2")
+    const mockObject = { key: "install-1/events/2026/09/19/20260919T003100Z-mock.json", size: mockJson.length, etag: "etag-2", lastModified: "2026-09-19T01:01:00Z" }
     const mockApi = {
       ...stubApi,
-      list: () =>
-        Effect.succeed([
-          { key: "install-1/events/2026/09/19/20260919T003100Z-mock.json", size: mockJson.length, etag: "etag-2", lastModified: "2026-09-19T01:01:00Z" }
-        ]),
-      download: (_key: string) => Effect.succeed(Stream.fromIterable([Buffer.from(mockJson)]))
+      list: () => Effect.succeed([mockObject]),
+      download: (_key: string) => Effect.succeed(Stream.fromIterable([Buffer.from(mockJson)])),
+      head: (key: string) => Effect.succeed(key === mockObject.key ? mockObject : null)
     } as unknown as SourceBucketApi
     const source = deviceEventsSource(mockApi, "install-1/", 25)
     const result = await run(source.ingest)
