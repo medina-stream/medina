@@ -262,6 +262,18 @@ export const Api = Cloudflare.Worker("Api", {
     // redeploy (and add the two tokens to medina-dev's .env +
     // restart if the server must resume writing snapshots).
     DAYINDEX_MODE: "live",
+    // Milestone 4 step 8 (transcript-search piece): the search
+    // notebook (a Durable Object holding the FTS5 passage index
+    // in its own SQLite storage) and mode — the index build runs
+    // identically in both modes; "live" additionally makes journal
+    // serving answer SearchTranscripts from it, with medina-dev's
+    // transcript-search resource standing down in the same batch
+    // (MEDINA_SOURCES without "transcript-search"). Until the
+    // flip, serving keeps answering that search has not moved.
+    TranscriptSearchShadow: Cloudflare.DurableObject(
+      "TranscriptSearchShadow",
+    ),
+    SEARCH_MODE: "shadow",
     HOME_TZ: "America/Los_Angeles",
     // The media stages presign R2 URLs and mint temporary R2
     // credentials — impossible with the native R2 binding — so

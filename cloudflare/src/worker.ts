@@ -146,6 +146,12 @@ import {
   type DayIndexEnv,
 } from "./dayindex.ts";
 import {
+  querySearchIndex,
+  runSearchPass,
+  searchPlatformLayer,
+  type SearchEnv,
+} from "./search.ts";
+import {
   parseS3Credentials,
   presignGetUrl,
   type S3CredentialsValue,
@@ -153,7 +159,12 @@ import {
 import {
   handleJournal,
   refreshReadModelSnapshot,
+  type SearchTranscriptsFn,
 } from "./journal.ts";
+import {
+  ApiError,
+  TranscriptSearchHit,
+} from "../../lib/lifelog/JournalApi.ts";
 
 export { CaptureShadow } from "./capture.ts";
 export { StarsShadow } from "./stars.ts";
@@ -162,6 +173,7 @@ export { NormalizeShadow } from "./normalize.ts";
 export { TranscribeShadow } from "./transcribe.ts";
 export { GpsShadow } from "./gps.ts";
 export { DayIndexShadow } from "./dayindex.ts";
+export { TranscriptSearchShadow } from "./search.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -242,6 +254,7 @@ interface Env {
   readonly TranscribeShadow: DurableObjectNamespaceLike;
   readonly GpsShadow: DurableObjectNamespaceLike;
   readonly DayIndexShadow: DurableObjectNamespaceLike;
+  readonly TranscriptSearchShadow: DurableObjectNamespaceLike;
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
@@ -282,6 +295,10 @@ interface Env {
   readonly GPS_MODE?: string;
   /** Step 8: "live" makes the day-index resource perform; else shadow. */
   readonly DAYINDEX_MODE?: string;
+  /** Step 8 (transcript-search): "live" makes journal serving answer
+   * SearchTranscripts from this Worker's index; else it answers
+   * not-moved. The index build runs identically either way. */
+  readonly SEARCH_MODE?: string;
   /** The home zone (medina-dev's HOME_TZ); it participates in the
    * day-index and attribution bases, so it must match the server's. */
   readonly HOME_TZ?: string;
@@ -330,6 +347,48 @@ const dayIndexEnv = (env: Env): DayIndexEnv => ({
 
 const dayIndexMode = (env: Env): "live" | "shadow" =>
   env.DAYINDEX_MODE === "live" ? "live" : "shadow";
+
+const searchEnv = (env: Env): SearchEnv => ({
+  artifacts: env.ARTIFACTS,
+  notebook: env.TranscriptSearchShadow,
+});
+
+const searchMode = (env: Env): "live" | "shadow" =>
+  env.SEARCH_MODE === "live" ? "live" : "shadow";
+
+/**
+ * The journal serving's SearchTranscripts implementation, present
+ * only when SEARCH_MODE is live: the same query path the gated
+ * /search/query probe uses, with notebook failures surfaced as
+ * the RPC's human-readable error.
+ */
+const journalSearchFn = (env: Env): SearchTranscriptsFn | undefined =>
+  searchMode(env) === "live"
+    ? (query, limit) =>
+        querySearchIndex(env.TranscriptSearchShadow, query, limit).pipe(
+          Effect.map((hits) =>
+            hits.map(
+              (hit) =>
+                new TranscriptSearchHit({
+                  day: hit.day,
+                  captureId: hit.captureId,
+                  startTime: hit.startTime,
+                  timeZone: hit.timeZone,
+                  speaker: hit.speaker,
+                  startMs: hit.startMs,
+                  endMs: hit.endMs,
+                  excerpt: hit.excerpt,
+                }),
+            ),
+          ),
+          Effect.mapError(
+            (cause) =>
+              new ApiError({
+                message: `transcript search failed: ${String(cause).slice(0, 200)}`,
+              }),
+          ),
+        )
+    : undefined;
 
 const normalizeEnv = (env: Env, artifactsS3?: string): NormalizeEnv => ({
   rangeGet: async (key, offset, length) => {
@@ -435,6 +494,7 @@ const stagePlatform = (env: Env) =>
           dayIndexPlatformLayer(dayIndexEnv(env)).pipe(
             Layer.provide(base),
           ),
+          searchPlatformLayer(searchEnv(env)).pipe(Layer.provide(base)),
         );
       }),
     ),
@@ -1191,6 +1251,103 @@ const serveDayIndexStatus = (
   });
 
 /**
+ * Manual trigger for one transcript-search pass (§4.3 step 8),
+ * same device-token gate: it refreshes the incremental index in
+ * the TranscriptSearchShadow notebook from the current day-index
+ * snapshot — or from the one snapshot named by `?snapshot=` (a
+ * full key under index/days-v1), which is the rehearsal pin: build
+ * from the exact basis the server built its published index from,
+ * then compare answers through /search/query.
+ */
+const serveSearchRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const snapshotParam = url.searchParams.get("snapshot");
+    const outcome = yield* runSearchPass({
+      mode: "manual",
+      now: new Date(),
+      perform: searchMode(env) === "live",
+      ...(snapshotParam !== null ? { snapshotKey: snapshotParam } : {}),
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The transcript-search notebook (last report + index counts), same gate. */
+const serveSearchStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.TranscriptSearchShadow.get(
+      env.TranscriptSearchShadow.idFromName("transcript-search-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://transcript-search/status")),
+    );
+    if (!response.ok) return fail(500, "transcript-search status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+/**
+ * A search against this Worker's index, same device-token gate —
+ * the rehearsal battery's probe (the journal RPC exercises the
+ * same query path once SEARCH_MODE is live). Body: { query,
+ * limit? }.
+ */
+const serveSearchQuery = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const body = (yield* Effect.promise(() =>
+      request.json().catch(() => ({})),
+    )) as { query?: unknown; limit?: unknown };
+    if (typeof body.query !== "string") {
+      return fail(400, "query required");
+    }
+    const hits = yield* querySearchIndex(
+      env.TranscriptSearchShadow,
+      body.query,
+      typeof body.limit === "number" ? body.limit : undefined,
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.succeed({ error: String(cause).slice(0, 300) } as const),
+      ),
+    );
+    return Array.isArray(hits)
+      ? json({ hits })
+      : json(hits, 500);
+  });
+
+/**
  * Manual trigger for one media-normalize pass (§4.3 step 5), same
  * device-token gate — parity tooling: in shadow mode it diffs the
  * census slice named by `?offset=`/`?limit=` (defaults 0/500), or
@@ -1708,6 +1865,15 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   if (request.method === "POST" && url.pathname === "/day-index/run") {
     return serveDayIndexRun(env, request, url);
   }
+  if (request.method === "GET" && url.pathname === "/search/status") {
+    return serveSearchStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/search/run") {
+    return serveSearchRun(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/search/query") {
+    return serveSearchQuery(env, request, url);
+  }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
   }
@@ -1727,8 +1893,11 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   // surface over the same bucket, gated by the same token registry.
   // handleJournal returns null for paths outside the journal family.
   return Effect.flatMap(
-    handleJournal(request, env.ARTIFACTS, (token) =>
-      isValidToken(env, token),
+    handleJournal(
+      request,
+      env.ARTIFACTS,
+      (token) => isValidToken(env, token),
+      journalSearchFn(env),
     ),
     (response) => Effect.succeed(response ?? fail(404, "not found")),
   );
@@ -2090,6 +2259,29 @@ export default {
           Effect.provide(stagePlatform(env)),
           Effect.catch((cause) =>
             Effect.logError("day-index pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // Transcript-search (§4.3 step 8): keep the notebook's index
+    // current with the day-index snapshot. The build is identical
+    // in shadow and live — SEARCH_MODE only gates whether journal
+    // serving answers from it. Same failure posture.
+    ctx.waitUntil(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const report = yield* runSearchPass({
+            mode: "cron",
+            now: new Date(controller.scheduledTime),
+            perform: searchMode(env) === "live",
+          });
+          yield* Effect.logInfo(
+            `transcript-search pass: ${report.capturesIndexed}/${report.capturesExpected} captures indexed, ${report.passages} passages, upserts ${report.upserts}, deletes ${report.deletes}, basis ${report.searchInputHash.slice(0, 12)}, errors ${report.errors.length}`,
+          );
+        }).pipe(
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("transcript-search pass failed", cause),
           ),
         ),
       ),

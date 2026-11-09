@@ -72,6 +72,7 @@ import {
   SourceStatus,
   StageStatus,
   StatusTotals,
+  TranscriptSearchHit,
   TranscriptTurn,
 } from "../../lib/lifelog/JournalApi.ts";
 import {
@@ -1296,7 +1297,21 @@ const loadPlaces = (
     return [];
   });
 
-const makeHandlers = (bucket: JournalBucket) =>
+/**
+ * The SearchTranscripts implementation, supplied by the worker
+ * when SEARCH_MODE is live (built on the transcript-search
+ * notebook in src/search.ts); absent, the RPC keeps answering
+ * that search has not moved.
+ */
+export type SearchTranscriptsFn = (
+  query: string,
+  limit?: number,
+) => Effect.Effect<ReadonlyArray<TranscriptSearchHit>, ApiError>;
+
+const makeHandlers = (
+  bucket: JournalBucket,
+  searchTranscripts?: SearchTranscriptsFn,
+) =>
   JournalsGroup.toLayer({
     ListDays: ({ limit, offset }) =>
       Effect.map(readModel(bucket), (model) => {
@@ -1338,7 +1353,10 @@ const makeHandlers = (bucket: JournalBucket) =>
       }),
     GetDayTranscripts: ({ day }) => dayTranscripts(bucket, day),
     GetStatus: () => Effect.map(readModel(bucket), rpcStatus),
-    SearchTranscripts: () => notMoved("transcript search"),
+    SearchTranscripts: ({ query, limit }) =>
+      searchTranscripts !== undefined
+        ? searchTranscripts(query, limit)
+        : notMoved("transcript search"),
     ListPlaces: () => loadPlaces(bucket),
     ListPlaceCandidates: () => notMoved("place candidates"),
     SearchAddress: () => notMoved("address search"),
@@ -1407,6 +1425,7 @@ const normalizeRpcRequest = async (request: Request): Promise<Request> => {
 const serveRpc = (
   bucket: JournalBucket,
   request: Request,
+  searchTranscripts?: SearchTranscriptsFn,
 ): Effect.Effect<Response> =>
   Effect.promise(async () => {
     const rpcRequest = await normalizeRpcRequest(request);
@@ -1416,7 +1435,7 @@ const serveRpc = (
           const httpEffect = yield* RpcServer.toHttpEffect(
             JournalsGroup,
           ).pipe(
-            Effect.provide(makeHandlers(bucket)),
+            Effect.provide(makeHandlers(bucket, searchTranscripts)),
             Effect.provide(RpcSerialization.layerNdjson),
           );
           const res = yield* httpEffect.pipe(
@@ -1517,6 +1536,7 @@ export const handleJournal = (
   request: Request,
   bucket: JournalBucket,
   authorize: (token: string) => Effect.Effect<boolean>,
+  searchTranscripts?: SearchTranscriptsFn,
 ): Effect.Effect<Response | null> =>
   Effect.gen(function* () {
     const url = new URL(request.url);
@@ -1559,7 +1579,7 @@ export const handleJournal = (
 
     if (path === "/rpc") {
       if (request.method !== "POST") return notFound();
-      return yield* serveRpc(bucket, request);
+      return yield* serveRpc(bucket, request, searchTranscripts);
     }
 
     if (request.method !== "GET") return notFound();
