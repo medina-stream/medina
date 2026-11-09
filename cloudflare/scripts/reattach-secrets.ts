@@ -44,6 +44,14 @@ const SECRET_NAMES = [
   // keys: bind by name only, never reconcile values.
   "ARTIFACTS_S3_ACCESS_KEY_ID",
   "ARTIFACTS_S3_SECRET_ACCESS_KEY",
+  // Step 10 (Drive): Scott created the dedicated service account
+  // medina-drive-reader@medina-492522.iam.gserviceaccount.com on
+  // Nov 2 and placed its email + private key in the store under
+  // these names. Bound now so the visibility-parity probe (and
+  // later the Drive sources port) can exchange them Worker-side;
+  // the values never transit the repo or the deploy.
+  "GOOGLE_SERVICE_ACCOUNT_EMAIL",
+  "GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY",
 ];
 
 interface Binding {

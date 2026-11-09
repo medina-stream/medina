@@ -156,6 +156,7 @@ import {
   runMovementPass,
   type MovementEnv,
 } from "./movement.ts";
+import { driveVisibilityProbe } from "./drive.ts";
 import {
   parseS3Credentials,
   presignGetUrl,
@@ -273,6 +274,12 @@ interface Env {
    * stages report their vendor paths unconfigured while absent. */
   readonly ASSEMBLYAI_API_KEY?: SecretsStoreSecretLike;
   readonly TRANSLOADIT_API_KEY?: SecretsStoreSecretLike;
+  /** Secrets Store bindings for step 10 (Drive): the dedicated
+   * service account's email + private key, attached out-of-band
+   * the same way (scripts/reattach-secrets.ts). Read only by the
+   * Drive probe/port; values never leave the Worker. */
+  readonly GOOGLE_SERVICE_ACCOUNT_EMAIL?: SecretsStoreSecretLike;
+  readonly GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?: SecretsStoreSecretLike;
   /** secret_text binding (declared in alchemy.run.ts once a
    * bucket-scoped keypair is supplied): the JSON-encoded S3
    * keypair for sco-lifelog the media stages presign and mint
@@ -1444,6 +1451,49 @@ const serveMovementStatus = (
   });
 
 /**
+ * Step 10 visibility-parity probe, same device-token gate: exchanges
+ * the dedicated service account's Secrets Store credentials for a
+ * Drive token Worker-side and summarizes what the account can see
+ * (counts, bytes, folder names, an id-set hash) for comparison
+ * against the broker credential's view. Read-only.
+ */
+const serveDriveProbe = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const email = yield* resolveStoreSecret(env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+    const key = yield* resolveStoreSecret(
+      env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY,
+    );
+    if (email.state !== "ok" || key.state !== "ok") {
+      return json(
+        {
+          ok: false as const,
+          error: `service account bindings: email=${email.state}, key=${key.state}`,
+        },
+        500,
+      );
+    }
+    const outcome = yield* Effect.promise(() =>
+      driveVisibilityProbe(email.value, key.value),
+    ).pipe(
+      Effect.map((summary) => ({ ok: true as const, summary })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 300),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/**
  * Manual trigger for one media-normalize pass (§4.3 step 5), same
  * device-token gate — parity tooling: in shadow mode it diffs the
  * census slice named by `?offset=`/`?limit=` (defaults 0/500), or
@@ -1975,6 +2025,9 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   }
   if (request.method === "POST" && url.pathname === "/movement/run") {
     return serveMovementRun(env, request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/drive/probe") {
+    return serveDriveProbe(env, request, url);
   }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
