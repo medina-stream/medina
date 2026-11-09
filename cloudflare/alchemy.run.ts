@@ -212,6 +212,15 @@ export const Api = Cloudflare.Worker("Api", {
     // (MEDINA_SOURCES without "normalize" / "transcribe").
     NormalizeShadow: Cloudflare.DurableObject("NormalizeShadow"),
     TranscribeShadow: Cloudflare.DurableObject("TranscribeShadow"),
+    // Milestone 4 step 7: the GPS stages' notebook and mode, same
+    // pattern as steps 2–6 — "shadow" (the step-7 build) checks
+    // medina-dev's compaction and stays without performing;
+    // "live" performs, with medina-dev's gps-compact / gps-stays
+    // stages standing down in the same batch (MEDINA_SOURCES
+    // without them). Rolling back is flipping this to "shadow",
+    // redeploying, and re-enabling the stages on medina-dev.
+    GpsShadow: Cloudflare.DurableObject("GpsShadow"),
+    GPS_MODE: "shadow",
     // The media stages presign R2 URLs and mint temporary R2
     // credentials — impossible with the native R2 binding — so
     // the Worker needs an S3 keypair for sco-lifelog, delivered

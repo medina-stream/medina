@@ -82,6 +82,14 @@
  * vendor key binding and make one authenticated read-only vendor
  * call — the flip gate for steps 5–6.
  *
+ * Milestone 4 step 7 adds the GPS stages (src/gps.ts) to the same
+ * Cron Trigger: gps-compact merges the points inbox into per-day
+ * Parquet partitions and gps-stays runs stay detection over them,
+ * both ported from medina-dev's stages over the shared bucket
+ * store; GPS_MODE flips them from shadow to performing.
+ * `POST /gps/run` and `GET /gps/status` (same device-token gate)
+ * expose the stage for parity checks.
+ *
  * The handler is an Effect program (the repo's HTTP precedent is
  * Effect HttpRouter on the server; the full router port arrives with
  * the read-cutover phase of the migration — for two routes and a
@@ -119,6 +127,11 @@ import {
   type TranscribeEnv,
 } from "./transcribe.ts";
 import {
+  gpsPlatformLayer,
+  runGpsPass,
+  type GpsEnv,
+} from "./gps.ts";
+import {
   parseS3Credentials,
   presignGetUrl,
   type S3CredentialsValue,
@@ -133,6 +146,7 @@ export { StarsShadow } from "./stars.ts";
 export { ArchiveShadow } from "./archive.ts";
 export { NormalizeShadow } from "./normalize.ts";
 export { TranscribeShadow } from "./transcribe.ts";
+export { GpsShadow } from "./gps.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -211,6 +225,7 @@ interface Env {
   readonly ArchiveShadow: DurableObjectNamespaceLike;
   readonly NormalizeShadow: DurableObjectNamespaceLike;
   readonly TranscribeShadow: DurableObjectNamespaceLike;
+  readonly GpsShadow: DurableObjectNamespaceLike;
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
@@ -247,6 +262,8 @@ interface Env {
   readonly NORMALIZE_MODE?: string;
   /** Step 6: "live" makes media-transcribe perform; else shadow. */
   readonly TRANSCRIBE_MODE?: string;
+  /** Step 7: "live" makes the GPS stages perform; else shadow. */
+  readonly GPS_MODE?: string;
   /** Optional AssemblyAI client parity with medina-dev's config
    * (ASSEMBLYAI_PROMPT / ASSEMBLYAI_SPEAKER_NAMES); unset today. */
   readonly ASSEMBLYAI_PROMPT?: string;
@@ -276,6 +293,14 @@ const starsMode = (env: Env): "live" | "shadow" =>
 
 const archiveMode = (env: Env): "live" | "shadow" =>
   env.ARCHIVE_SWEEP_MODE === "live" ? "live" : "shadow";
+
+const gpsEnv = (env: Env): GpsEnv => ({
+  artifacts: env.ARTIFACTS,
+  notebook: env.GpsShadow,
+});
+
+const gpsMode = (env: Env): "live" | "shadow" =>
+  env.GPS_MODE === "live" ? "live" : "shadow";
 
 const normalizeEnv = (env: Env, artifactsS3?: string): NormalizeEnv => ({
   rangeGet: async (key, offset, length) => {
@@ -377,6 +402,7 @@ const stagePlatform = (env: Env) =>
           transcribePlatformLayer(transcribeEnv(env, artifactsS3)).pipe(
             Layer.provide(base),
           ),
+          gpsPlatformLayer(gpsEnv(env)).pipe(Layer.provide(base)),
         );
       }),
     ),
@@ -1003,6 +1029,77 @@ const serveArchiveStatus = (
   });
 
 /**
+ * Manual trigger for one GPS pass (§4.3 step 7), same device-token
+ * gate: in shadow mode it settles recorded expectations, checks
+ * stays, and records fresh expectations from the current inbox
+ * (when it fits `?limit=`, default 500); in live mode it performs
+ * one bounded batch and the stays recompute.
+ */
+const serveGpsRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const now = new Date();
+    const limitRaw = Number(url.searchParams.get("limit") ?? "500");
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0
+        ? Math.floor(limitRaw)
+        : 500;
+    const staleMinutes = Number(url.searchParams.get("staleMinutes") ?? "120");
+    const staleAfterMs =
+      (Number.isFinite(staleMinutes) && staleMinutes > 0
+        ? staleMinutes
+        : 120) * 60_000;
+    const outcome = yield* runGpsPass({
+      mode: "manual",
+      now,
+      limit,
+      staleAfterMs,
+      perform: gpsMode(env) === "live",
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The GPS stages' notebook (last report), same gate. */
+const serveGpsStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.GpsShadow.get(
+      env.GpsShadow.idFromName("gps-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://gps-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "gps status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+/**
  * Manual trigger for one media-normalize pass (§4.3 step 5), same
  * device-token gate — parity tooling: in shadow mode it diffs the
  * census slice named by `?offset=`/`?limit=` (defaults 0/500), or
@@ -1508,6 +1605,12 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   if (request.method === "POST" && url.pathname === "/transcribe/run") {
     return serveTranscribeRun(env, request, url);
   }
+  if (request.method === "GET" && url.pathname === "/gps/status") {
+    return serveGpsStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/gps/run") {
+    return serveGpsRun(env, request, url);
+  }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
   }
@@ -1811,6 +1914,47 @@ export default {
           Effect.provide(stagePlatform(env)),
           Effect.catch((cause) =>
             Effect.logError("media-transcribe pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // The GPS stages (§4.3 step 7): live mode performs one bounded
+    // compaction batch (500 inbox files) plus the stays recompute
+    // when the basis moved; the checking pass always runs —
+    // settling recorded expectations and comparing stays — so in
+    // shadow mode it is the rehearsal, and in live mode it keeps
+    // verifying the Worker's own output. Same failure posture:
+    // log and swallow.
+    const gpsNow = new Date(controller.scheduledTime);
+    ctx.waitUntil(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          if (gpsMode(env) === "live") {
+            const performed = yield* runGpsPass({
+              mode: "cron",
+              now: gpsNow,
+              limit: 500,
+              staleAfterMs: 2 * 60 * 60 * 1000,
+              perform: true,
+            });
+            yield* Effect.logInfo(
+              `gps pass (live): inbox ${performed.inboxFiles}, merged ${performed.performedFiles} files into ${performed.performedPartitions} partitions, stays days written ${performed.performedStaysDays}, errors ${performed.errors.length}`,
+            );
+          }
+          const report = yield* runGpsPass({
+            mode: "cron",
+            now: gpsNow,
+            limit: 500,
+            staleAfterMs: 2 * 60 * 60 * 1000,
+            perform: false,
+          });
+          yield* Effect.logInfo(
+            `gps pass (check): inbox ${report.inboxFiles}, expectations settled ${report.expectationsSettled} (matched ${report.expectationsMatched}, mismatched ${report.expectationsMismatched}, pending ${report.expectationsPending}), stays basis ${report.staysBasisState}, stays days matched ${report.staysDaysMatched}/${report.staysDaysCompared}, errors ${report.errors.length}`,
+          );
+        }).pipe(
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("gps pass failed", cause),
           ),
         ),
       ),
