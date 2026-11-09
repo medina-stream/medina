@@ -221,6 +221,18 @@ export const Api = Cloudflare.Worker("Api", {
     // redeploying, and re-enabling the stages on medina-dev.
     GpsShadow: Cloudflare.DurableObject("GpsShadow"),
     GPS_MODE: "shadow",
+    // Milestone 4 step 8 (day-index piece): the day-index
+    // resource's notebook and mode, same pattern — "shadow"
+    // computes the corpus basis and compares medina-dev's
+    // snapshot without writing; "live" writes the snapshot and
+    // the attribution artifacts it computes, with medina-dev's
+    // attribution + day-index resources standing down in the
+    // same batch (MEDINA_SOURCES without "attribution" /
+    // "day-index"). HOME_TZ must match medina-dev's: the zone
+    // participates in both bases.
+    DayIndexShadow: Cloudflare.DurableObject("DayIndexShadow"),
+    DAYINDEX_MODE: "shadow",
+    HOME_TZ: "America/Los_Angeles",
     // The media stages presign R2 URLs and mint temporary R2
     // credentials — impossible with the native R2 binding — so
     // the Worker needs an S3 keypair for sco-lifelog, delivered

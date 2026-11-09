@@ -90,6 +90,15 @@
  * `POST /gps/run` and `GET /gps/status` (same device-token gate)
  * expose the stage for parity checks.
  *
+ * Milestone 4 step 8 (the day-index piece) adds the day-index
+ * resource (src/dayindex.ts) to the same Cron Trigger: it keeps
+ * the incremental selection/attribution caches in its notebook,
+ * computes the corpus basis exactly as medina-dev does, and
+ * compares — or, when DAYINDEX_MODE is live, writes — the
+ * content-addressed snapshot serving already reads.
+ * `POST /day-index/run` and `GET /day-index/status` (same gate)
+ * expose it for parity checks.
+ *
  * The handler is an Effect program (the repo's HTTP precedent is
  * Effect HttpRouter on the server; the full router port arrives with
  * the read-cutover phase of the migration — for two routes and a
@@ -132,6 +141,11 @@ import {
   type GpsEnv,
 } from "./gps.ts";
 import {
+  dayIndexPlatformLayer,
+  runDayIndexPass,
+  type DayIndexEnv,
+} from "./dayindex.ts";
+import {
   parseS3Credentials,
   presignGetUrl,
   type S3CredentialsValue,
@@ -147,6 +161,7 @@ export { ArchiveShadow } from "./archive.ts";
 export { NormalizeShadow } from "./normalize.ts";
 export { TranscribeShadow } from "./transcribe.ts";
 export { GpsShadow } from "./gps.ts";
+export { DayIndexShadow } from "./dayindex.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -226,6 +241,7 @@ interface Env {
   readonly NormalizeShadow: DurableObjectNamespaceLike;
   readonly TranscribeShadow: DurableObjectNamespaceLike;
   readonly GpsShadow: DurableObjectNamespaceLike;
+  readonly DayIndexShadow: DurableObjectNamespaceLike;
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
@@ -264,6 +280,11 @@ interface Env {
   readonly TRANSCRIBE_MODE?: string;
   /** Step 7: "live" makes the GPS stages perform; else shadow. */
   readonly GPS_MODE?: string;
+  /** Step 8: "live" makes the day-index resource perform; else shadow. */
+  readonly DAYINDEX_MODE?: string;
+  /** The home zone (medina-dev's HOME_TZ); it participates in the
+   * day-index and attribution bases, so it must match the server's. */
+  readonly HOME_TZ?: string;
   /** Optional AssemblyAI client parity with medina-dev's config
    * (ASSEMBLYAI_PROMPT / ASSEMBLYAI_SPEAKER_NAMES); unset today. */
   readonly ASSEMBLYAI_PROMPT?: string;
@@ -301,6 +322,14 @@ const gpsEnv = (env: Env): GpsEnv => ({
 
 const gpsMode = (env: Env): "live" | "shadow" =>
   env.GPS_MODE === "live" ? "live" : "shadow";
+
+const dayIndexEnv = (env: Env): DayIndexEnv => ({
+  artifacts: env.ARTIFACTS,
+  notebook: env.DayIndexShadow,
+});
+
+const dayIndexMode = (env: Env): "live" | "shadow" =>
+  env.DAYINDEX_MODE === "live" ? "live" : "shadow";
 
 const normalizeEnv = (env: Env, artifactsS3?: string): NormalizeEnv => ({
   rangeGet: async (key, offset, length) => {
@@ -403,6 +432,9 @@ const stagePlatform = (env: Env) =>
             Layer.provide(base),
           ),
           gpsPlatformLayer(gpsEnv(env)).pipe(Layer.provide(base)),
+          dayIndexPlatformLayer(dayIndexEnv(env)).pipe(
+            Layer.provide(base),
+          ),
         );
       }),
     ),
@@ -1100,6 +1132,65 @@ const serveGpsStatus = (
   });
 
 /**
+ * Manual trigger for one day-index pass (§4.3 step 8), same
+ * device-token gate: it refreshes the incremental caches, computes
+ * the corpus basis, and compares the server's snapshot at that
+ * basis — or, in live mode, writes the missing attribution
+ * artifacts and the snapshot itself.
+ */
+const serveDayIndexRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const outcome = yield* runDayIndexPass({
+      mode: "manual",
+      now: new Date(),
+      zone: env.HOME_TZ ?? "UTC",
+      perform: dayIndexMode(env) === "live",
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The day-index notebook (last report), same gate. */
+const serveDayIndexStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.DayIndexShadow.get(
+      env.DayIndexShadow.idFromName("dayindex-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://dayindex-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "day-index status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+/**
  * Manual trigger for one media-normalize pass (§4.3 step 5), same
  * device-token gate — parity tooling: in shadow mode it diffs the
  * census slice named by `?offset=`/`?limit=` (defaults 0/500), or
@@ -1611,6 +1702,12 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   if (request.method === "POST" && url.pathname === "/gps/run") {
     return serveGpsRun(env, request, url);
   }
+  if (request.method === "GET" && url.pathname === "/day-index/status") {
+    return serveDayIndexStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/day-index/run") {
+    return serveDayIndexRun(env, request, url);
+  }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
   }
@@ -1955,6 +2052,44 @@ export default {
           Effect.provide(stagePlatform(env)),
           Effect.catch((cause) =>
             Effect.logError("gps pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // The day-index resource (§4.3 step 8): live mode writes the
+    // missing attribution artifacts and the snapshot for the
+    // current basis; the checking pass always runs — refreshing
+    // the incremental caches and comparing the snapshot at the
+    // computed basis — so in shadow mode it is the rehearsal and
+    // in live mode a continuous self-check. Same failure posture.
+    const dayIndexNow = new Date(controller.scheduledTime);
+    ctx.waitUntil(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          if (dayIndexMode(env) === "live") {
+            const performed = yield* runDayIndexPass({
+              mode: "cron",
+              now: dayIndexNow,
+              zone: env.HOME_TZ ?? "UTC",
+              perform: true,
+            });
+            yield* Effect.logInfo(
+              `day-index pass (live): ${performed.captures} captures, basis ${performed.inputHash.slice(0, 12)}, snapshot written ${performed.performedSnapshot}, attributions written ${performed.performedAttributions}, errors ${performed.errors.length}`,
+            );
+          }
+          const report = yield* runDayIndexPass({
+            mode: "cron",
+            now: dayIndexNow,
+            zone: env.HOME_TZ ?? "UTC",
+            perform: false,
+          });
+          yield* Effect.logInfo(
+            `day-index pass (check): ${report.captures} captures (${report.changedSelections} selections refreshed), basis ${report.inputHash.slice(0, 12)}, snapshot ${report.snapshotState}, days matched ${report.daysMatched}/${report.daysCompared} (mismatched ${report.daysMismatched}), attributions computed ${report.attributionsComputed} / artifact ${report.attributionsFromArtifact} / cached ${report.attributionsFromCache}, errors ${report.errors.length}`,
+          );
+        }).pipe(
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("day-index pass failed", cause),
           ),
         ),
       ),

@@ -792,7 +792,7 @@ type LifelogEnv = Drive.Drive | Bucket.Bucket | Bucket.SourceBucket | R2TempCred
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const enabled = new Set(
-      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive,normalize,transcribe,gps-compact,gps-stays")
+      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive,normalize,transcribe,gps-compact,gps-stays,attribution,day-index")
         .split(",")
         .map((name) => name.trim())
         .filter(Boolean)
@@ -991,7 +991,19 @@ const Ingest = Layer.effectDiscard(
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement
         // changes), movement enriches journals, and the journal reads both.
-        [attributionResource, dayIndexResource, transcriptSearchResource, movementResource, notesResource, journalResource, starsResource],
+        // Attribution and day-index are excludable like the stages: at
+        // their migration cutover (docs/cloudflare-migration.md §4.3
+        // step 8) the Worker writes the attribution artifacts and the
+        // day-index snapshots, and these resources stand down
+        // (MEDINA_SOURCES without "attribution" / "day-index"). The
+        // on-demand paths (currentAttribution / currentDayIndex) keep
+        // working either way: existence at the content-addressed key
+        // is freshness, whoever wrote it.
+        [
+          ...(enabled.has("attribution") ? [attributionResource] : []),
+          ...(enabled.has("day-index") ? [dayIndexResource] : []),
+          transcriptSearchResource, movementResource, notesResource, journalResource, starsResource
+        ],
         dataPath,
         { name: "ingest", cadenceMs: 60_000 }
       ).pipe(
