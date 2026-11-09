@@ -863,27 +863,70 @@ HTTP API with the token above.
    `shadow` + redeploy; add `attribution,day-index` to
    medina-dev's `.env` + restart if the server must resume
    writing snapshots.
-   **Transcript-search and movement: design only (Nov 9, 2026) —
-   not built.** Both remain resources on medina-dev. The design
-   follows the day-index pattern: a Durable Object notebook
-   holding an incremental, per-capture index keyed by the same
-   content tokens, refreshed by a Worker pass, with derived
-   artifacts materialized to R2 at content-addressed keys so
-   existing readers keep working. Transcript-search: index each
-   capture's text as it changes (the day-index pass already
-   tracks exactly which captures changed) into a SQLite-backed
-   notebook, sharded by day to bound per-pass work; the serving
-   Worker's `SearchTranscripts` then reads that index instead of
-   answering a typed not-implemented error. Movement: derive the
-   per-day summaries inside the GPS pass, where the day's points
-   partitions are already decoded, reading places and geocode
-   inputs from their artifacts the way `Movement.ts` now does
-   through the seam. Sequencing: movement's inputs are stable
-   now that the GPS stages are live on the Worker; transcript-
-   search is independent and can go first. Neither blocks the
-   remaining steps — medina-dev keeps running both until they
-   move — but together with steps 9–10 they are what stands
-   between here and the write-surface move (steps 11–12).
+   **Transcript-search: done Nov 9, 2026 — live on the Worker.**
+   The port (`cloudflare/src/search.ts`) follows the design: a
+   Durable Object holds the index in SQLite tables mirroring the
+   server's exactly (`passages` + an FTS5 `passages_fts`,
+   unicode61) plus a per-capture token registry (the token runs
+   over day | start | zone | transcript key | the listing's
+   size:etag), so a pass re-reads only the captures whose listing
+   token moved. The pass takes its corpus from the newest
+   day-index snapshot (the same selection rule as journal
+   serving; a `?snapshot=` pin exists for rehearsals). Rehearsal:
+   pinned to the snapshot behind the server's then-current
+   published index, the Worker's build reproduced the server's
+   input hash exactly, indexed exactly the server's counts
+   (2,129 captures, 85,419 passages, counted in the server's own
+   SQLite file), and answered a 40-query battery (common words,
+   phrases, AND queries, names, empty/punctuation/apostrophe edge
+   cases, limits 1–50) with identical ordered results including
+   excerpts — 40 of 40. Flip (6207844): `SEARCH_MODE` live, and
+   the server's resource stood down by removing the
+   `transcript-search` token from medina-dev's `MEDINA_SOURCES`;
+   the journal `SearchTranscripts` call on the serving Worker now
+   answers from this index (verified live over the wire). The
+   server's read path keeps serving its last self-built index,
+   frozen — a standing fallback. Rollback: `SEARCH_MODE` back to
+   `shadow` + redeploy; restore the token + restart.
+   **Movement: done Nov 9, 2026 — live on the Worker.** The port
+   (`cloudflare/src/movement.ts`) derives each eager day inside
+   the Worker cron's GPS cadence: the basis hash is the server's
+   own form (derivation version, zone, the stays-day basis hash,
+   per-UTC-day partition content hashes — sha256 of the parquet
+   bytes, cached in the movement notebook by listing token — and
+   the places hash), points and stays decode with the GPS
+   module's readers, and the composition is the server's,
+   line for line; artifacts land at the same content-addressed
+   keys (`gps/movement-v1/<day>/<basis hash>.json`). Two
+   documented narrowings: points still in `gps/inbox` are not
+   read (the basis covers partitions only on both sides; the
+   inbox was empty at rehearsal and the GPS stages consume it on
+   the same cadence), and the narrative is null until step 9's
+   AI Gateway client exists — the server's own failure shape;
+   journals consume the segments, not the narrative. Rehearsal:
+   14 days compared — deterministic content (stays, gaps, travel
+   times and fix counts, stay suggestions) matched exactly on 8;
+   on 6 the only differences were travel distance/mode on slices
+   containing same-timestamp fix clusters. That class is the
+   server's own irreproducibility, proven during the rehearsal:
+   a travel's path distance sums its fixes in order, the
+   server's DuckDB produces no consistent order for
+   same-timestamp clusters (one stored day contradicts itself
+   cluster to cluster), and one Nov 2 travel is stored at 514 m
+   where the server's own current point order — and this port —
+   compute 410 m. Roughly 6% of travel segments are affected,
+   under any fixed order. The port orders fixes by
+   (ts, source, lat, lon) — the order the GPS compaction writes
+   partitions in — so the orders converge, and the flip retires
+   the instability: from here one deterministic order produces
+   every artifact. Zero structural mismatches, zero errors.
+   Flip (aef203a): `MOVEMENT_MODE` live + the server's movement
+   resource gated behind the `movement` token (present in the
+   default set, absent from medina-dev's `.env`), stood down on
+   restart. Rollback: `MOVEMENT_MODE` back to `shadow` +
+   redeploy; add `movement` to medina-dev's `.env` + restart.
+   Step 8 is complete: every resource (attribution, day-index,
+   transcript-search, movement) now runs on the Worker.
 9. **`notes` + `journal`** (LLM) — Cloudflare Workflows port of the
    cluster workflows; needs the LLM credential row above.
 10. **Drive sources + `inventory`** — needs the Google credential
