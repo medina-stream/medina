@@ -319,7 +319,15 @@ const mergeInboxSubBatch = (
     if (failures.length === 0) {
       // Another process may have compacted the same idempotent batch
       // first; deleting an absent artifact succeeds by seam semantics.
-      for (const key of inboxKeys) yield* Files.remove(dataPath(key))
+      // The deletes are independent store round trips (~1 s each
+      // against the bucket from medina-dev): sequential, consuming a
+      // 500-file sub-batch took minutes and dominated the stage, so
+      // they run with bounded concurrency.
+      yield* Effect.forEach(
+        inboxKeys,
+        (key) => Files.remove(dataPath(key)),
+        { concurrency: 16, discard: true }
+      )
     }
     return { staged, consumed: failures.length === 0, failures }
   })

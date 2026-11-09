@@ -1159,7 +1159,11 @@ export const runGpsPass = (
             );
             performedPartitions++;
           }
-          for (const key of batch) yield* data.removeKey(key);
+          yield* Effect.forEach(
+            batch,
+            (key) => data.removeKey(key),
+            { concurrency: 16, discard: true },
+          );
           performedFiles = batch.length;
         }
       }
