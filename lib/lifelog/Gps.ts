@@ -4,20 +4,30 @@
  * Unlike audio, the HTTP envelope around GPS batches is scaffolding, not
  * signal — the points are what matters. So gps-* posts are parsed
  * immediately into rows (raw body preserved as a column for traceability)
- * and appended to a transient inbox of NDJSON files; the hourly pass
- * compacts inbox rows into per-UTC-day parquet partitions
+ * and appended to a transient inbox of NDJSON files; the compaction pass
+ * merges inbox rows into per-UTC-day parquet partitions
  * (`gps/points-v1/day=YYYY-MM-DD/points.parquet`) and deletes what it
  * consumed. DuckDB is the stateless query engine over the partitions —
  * there is no database file.
  *
  * A body that fails to parse falls back to blob capture, so nothing is
  * silently dropped.
+ *
+ * The store is the artifact store (the `Files` seam), like every other
+ * pipeline artifact since the milestone-3 flip: inbox files and
+ * partitions are bucket artifacts, and DuckDB — a local-files-only
+ * engine — works on scratch materializations of them. This module used
+ * raw filesystem calls until Nov 9, 2026, which silently kept the whole
+ * points store on medina-dev's local disk after everything else had
+ * moved to the bucket (the seam fix that step 7 of the Cloudflare
+ * migration is built on; see docs/cloudflare-migration.md §4.3).
  */
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Schema from "effect/Schema"
+import * as Files from "../Files.ts"
 import { dataPath } from "./Resources.ts"
 import type { Source, SourceReport } from "../Resource.ts"
 import { queryJson as duckdb, quote } from "../connectors/DuckDB.ts"
@@ -139,22 +149,59 @@ export const parseGpsBody = (source: string, body: string): Array<GpsPoint> | nu
 // --- inbox -------------------------------------------------------------------
 
 /** Append parsed points to the transient inbox (one NDJSON file per post).
- * Tmp + rename, like every other writer: queries scan this directory with
- * `read_ndjson_auto`, and a reader catching a half-written file would fail
- * the whole DuckDB scan. */
+ * A single seam write (`Files.putBytes`): tmp + rename on the local
+ * store, one object PUT in the bucket — either way a reader never sees
+ * a half-written file, which matters because queries scan the inbox
+ * with `read_ndjson_auto` and one torn file would fail the whole scan. */
 export const gpsInboxWrite = Effect.fn("gpsInboxWrite")(function*(points: ReadonlyArray<GpsPoint>) {
-  const fs = yield* FileSystem.FileSystem
   const lines = points.map((point) => JSON.stringify(point)).join("\n") + "\n"
   const name = `${new Date().toISOString().replace(/[:.]/g, "")}-${
     createHash("sha256").update(lines).digest("hex").slice(0, 8)
   }.ndjson`
-  yield* fs.makeDirectory(dataPath(INBOX_PREFIX), { recursive: true })
-  const path = dataPath(`${INBOX_PREFIX}/${name}`)
-  const tmp = `${path}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  yield* fs.writeFileString(tmp, lines)
-  yield* fs.rename(tmp, path)
+  yield* Files.putBytes(dataPath(`${INBOX_PREFIX}/${name}`), new TextEncoder().encode(lines))
   return points.length
 })
+
+// --- scratch materialization ---------------------------------------------------
+
+/**
+ * DuckDB reads and writes local paths only, so store-resident inputs are
+ * materialized into a fresh scratch directory (the layout under it
+ * mirrors the artifact keys) and outputs are stored back through the
+ * seam. The scratch is the caller's to remove (`removeScratch`).
+ */
+export interface ScratchArtifacts {
+  readonly dir: string
+  /** Local path for an artifact key (whether or not it was found). */
+  readonly pathFor: (key: string) => string
+  /** Keys that existed and were materialized. */
+  readonly found: ReadonlySet<string>
+}
+
+export const materializeArtifacts = (
+  keys: ReadonlyArray<string>,
+  into?: string
+): Effect.Effect<ScratchArtifacts, Error, FileSystem.FileSystem> =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const dir = into ?? `${tmpdir()}/medina-gps-scratch-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    yield* fs.makeDirectory(dir, { recursive: true })
+    // Bounded concurrency: a post-gap inbox can hold thousands of small
+    // files, and sequential round trips would dominate the pass.
+    const results = yield* Effect.forEach(
+      keys,
+      (key) => Effect.map(Files.getFile(dataPath(key), `${dir}/${key}`), (got) => [key, got] as const),
+      { concurrency: 8 }
+    )
+    const found = new Set(results.filter(([, got]) => got).map(([key]) => key))
+    return { dir, pathFor: (key: string) => `${dir}/${key}`, found }
+  }).pipe(Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))))
+
+export const removeScratch = (scratch: ScratchArtifacts) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    yield* fs.remove(scratch.dir, { recursive: true }).pipe(Effect.ignore)
+  })
 
 // --- compaction --------------------------------------------------------------
 
@@ -170,108 +217,121 @@ export const gpsCompactSource: Source<FileSystem.FileSystem> = {
   name: "gps-compact",
   ingest: Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
-    const inboxDir = dataPath(INBOX_PREFIX)
-    const files = (yield* fs.exists(inboxDir)) ? yield* fs.readDirectory(inboxDir) : []
-    const batch = files.filter((file) => file.endsWith(".ndjson")).sort()
+    const batch = (yield* Files.listFiles(dataPath(INBOX_PREFIX)))
+      .filter((file) => file.endsWith(".ndjson"))
     if (batch.length === 0) {
       return { discovered: 0, ingested: 0, cached: 0, skipped: 0, failures: [] } satisfies SourceReport
     }
 
-    const paths = batch.map((file) => `${inboxDir}/${file}`)
-    const listSql = paths.map(quote).join(", ")
     const failures: Array<{ item: string; error: string }> = []
 
-    // Which days does the batch touch, and which of those already have a
-    // partition to merge with?
-    const daysJson = yield* duckdb(
-      `SELECT DISTINCT strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') AS day
-       FROM read_ndjson_auto([${listSql}], union_by_name=true)`
-    ).pipe(Effect.catchCause((cause) =>
-      Effect.sync(() => {
-        failures.push({ item: "inbox-scan", error: String(cause).slice(0, 500) })
-        return "[]"
-      })
-    ))
-    const days: Array<string> = JSON.parse(daysJson || "[]").map((row: { day: string }) => row.day)
-    if (days.length === 0) {
-      return { discovered: batch.length, ingested: 0, cached: 0, skipped: 0, failures } satisfies SourceReport
-    }
-    const existing: Array<string> = []
-    for (const day of days) {
-      const partition = dataPath(gpsPartitionKey(day))
-      if (yield* fs.exists(partition)) existing.push(partition)
-    }
-
-    // One pass: inbox rows + touched partitions, deduped, re-partitioned by
-    // UTC day into a staging dir. Staging lives on LOCAL disk: duckdb is a
-    // separate process, and network-mount dentry caching means its freshly
-    // written directories may not be visible to us for ~a second; local
-    // staging avoids the race entirely (and is faster), with this process
-    // doing the mount writes itself.
-    const staging = `${tmpdir()}/medina-gps-staging-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const existingSql = existing.length
-      // hive_partitioning=false: the partition path carries day=YYYY-MM-DD,
-      // which would otherwise be inferred as a column and collide with the
-      // day we compute for PARTITION_BY (duckdb silently writes day_1=).
-      ? ` UNION ALL BY NAME SELECT ${COLUMNS} FROM read_parquet([${existing.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)`
-      : ""
-    // Partitions store no day column -- the day lives in the hive path, and
-    // PARTITION_BY drops it from the written files, keeping the schema
-    // identical between a day's partition and the inbox rows it came from.
-    let staged = 0
-    yield* duckdb(
-      `COPY (
-         SELECT ${COLUMNS}, strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') AS day
-         FROM (
-           SELECT DISTINCT ON (source, ts, lat, lon) ${COLUMNS}
-           FROM (
-             SELECT ${COLUMNS} FROM read_ndjson_auto([${listSql}], union_by_name=true)${existingSql}
-           )
-           ORDER BY ts
-         )
-       ) TO ${quote(staging)} (FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (day))`
-    ).pipe(Effect.catchCause((cause) =>
-      Effect.sync(() => {
-        failures.push({ item: "compact", error: String(cause).slice(0, 500) })
-        return ""
-      })
-    ))
-
-    if (failures.length === 0) {
-      for (const day of days) {
-        const stagedFiles = yield* fs.readDirectory(`${staging}/day=${day}`).pipe(
-          Effect.orElseSucceed(() => [] as Array<string>)
-        )
-        const stagedFile = stagedFiles.find((file) => file.endsWith(".parquet"))
-        if (!stagedFile) {
-          failures.push({ item: day, error: "no staged partition produced" })
-          continue
-        }
-        const partition = dataPath(gpsPartitionKey(day))
-        yield* fs.makeDirectory(partition.slice(0, partition.lastIndexOf("/")), { recursive: true })
-        // copy + rename: staging is on a different filesystem, and the
-        // rename keeps partition replacement atomic for concurrent readers.
-        const tmp = `${partition}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`
-        yield* fs.copyFile(`${staging}/day=${day}/${stagedFile}`, tmp)
-        yield* fs.rename(tmp, partition)
-        staged += 1
+    // Materialize the batch (and, below, the partitions it touches) into
+    // local scratch: DuckDB is a separate process that reads paths, and
+    // the inbox and partitions are store artifacts, not local files.
+    const inboxKeys = batch.map((file) => `${INBOX_PREFIX}/${file}`)
+    const scratch = yield* materializeArtifacts(inboxKeys)
+    const report = yield* Effect.gen(function*() {
+      // A listed file that will not materialize means the batch changed
+      // under us (another compactor consumed it): fail the pass without
+      // touching anything, and let the next pass re-derive from the
+      // listing. Merging is idempotent, so a retry is harmless.
+      for (const key of inboxKeys) {
+        if (!scratch.found.has(key)) failures.push({ item: key, error: "inbox file vanished before read" })
       }
-    }
-    yield* fs.remove(staging, { recursive: true }).pipe(Effect.ignore)
+      if (failures.length > 0) {
+        return { discovered: batch.length, ingested: 0, cached: 0, skipped: 0, failures } satisfies SourceReport
+      }
+      const paths = inboxKeys.map((key) => scratch.pathFor(key))
+      const listSql = paths.map(quote).join(", ")
 
-    // Only consume the inbox when every touched day merged cleanly.
-    if (failures.length === 0) {
-      // Another process may have compacted the same idempotent batch first.
-      for (const path of paths) if (yield* fs.exists(path)) yield* fs.remove(path)
-      yield* Effect.log(`gps-compact: ${batch.length} inbox files -> ${days.length} day partitions`)
-    }
-    return {
-      discovered: batch.length,
-      ingested: staged,
-      cached: 0,
-      skipped: 0,
-      failures
-    } satisfies SourceReport
+      // Which days does the batch touch, and which of those already have
+      // a partition to merge with?
+      const daysJson = yield* duckdb(
+        `SELECT DISTINCT strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') AS day
+         FROM read_ndjson_auto([${listSql}], union_by_name=true)`
+      ).pipe(Effect.catchCause((cause) =>
+        Effect.sync(() => {
+          failures.push({ item: "inbox-scan", error: String(cause).slice(0, 500) })
+          return "[]"
+        })
+      ))
+      const days: Array<string> = JSON.parse(daysJson || "[]").map((row: { day: string }) => row.day)
+      if (days.length === 0) {
+        return { discovered: batch.length, ingested: 0, cached: 0, skipped: 0, failures } satisfies SourceReport
+      }
+      // Into the same scratch: the outer ensuring removes both at once.
+      const partitions = yield* materializeArtifacts(days.map((day) => gpsPartitionKey(day)), scratch.dir)
+      const existing = days
+        .filter((day) => partitions.found.has(gpsPartitionKey(day)))
+        .map((day) => partitions.pathFor(gpsPartitionKey(day)))
+
+      // One pass: inbox rows + touched partitions, deduped, re-partitioned
+      // by UTC day into a staging dir inside the scratch. Staging is local
+      // because DuckDB is a separate process; this process stores the
+      // results back through the seam itself.
+      const staging = `${scratch.dir}/staging`
+      const existingSql = existing.length
+        // hive_partitioning=false: the partition path carries day=YYYY-MM-DD,
+        // which would otherwise be inferred as a column and collide with the
+        // day we compute for PARTITION_BY (duckdb silently writes day_1=).
+        ? ` UNION ALL BY NAME SELECT ${COLUMNS} FROM read_parquet([${existing.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)`
+        : ""
+      // Partitions store no day column -- the day lives in the hive path, and
+      // PARTITION_BY drops it from the written files, keeping the schema
+      // identical between a day's partition and the inbox rows it came from.
+      let staged = 0
+      yield* duckdb(
+        `COPY (
+           SELECT ${COLUMNS}, strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') AS day
+           FROM (
+             SELECT DISTINCT ON (source, ts, lat, lon) ${COLUMNS}
+             FROM (
+               SELECT ${COLUMNS} FROM read_ndjson_auto([${listSql}], union_by_name=true)${existingSql}
+             )
+             ORDER BY ts
+           )
+         ) TO ${quote(staging)} (FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (day))`
+      ).pipe(Effect.catchCause((cause) =>
+        Effect.sync(() => {
+          failures.push({ item: "compact", error: String(cause).slice(0, 500) })
+          return ""
+        })
+      ))
+
+      if (failures.length === 0) {
+        for (const day of days) {
+          const stagedFiles = yield* fs.readDirectory(`${staging}/day=${day}`).pipe(
+            Effect.orElseSucceed(() => [] as Array<string>)
+          )
+          const stagedFile = stagedFiles.find((file) => file.endsWith(".parquet"))
+          if (!stagedFile) {
+            failures.push({ item: day, error: "no staged partition produced" })
+            continue
+          }
+          // One seam write per partition: the store registers it, and a
+          // reader either sees the old partition or the new one, never a
+          // partial file — the atomicity the old copy + rename provided.
+          yield* Files.putFile(dataPath(gpsPartitionKey(day)), `${staging}/day=${day}/${stagedFile}`)
+          staged += 1
+        }
+      }
+
+      // Only consume the inbox when every touched day merged cleanly.
+      if (failures.length === 0) {
+        // Another process may have compacted the same idempotent batch
+        // first; deleting an absent artifact succeeds by seam semantics.
+        for (const key of inboxKeys) yield* Files.remove(dataPath(key))
+        yield* Effect.log(`gps-compact: ${batch.length} inbox files -> ${days.length} day partitions`)
+      }
+      return {
+        discovered: batch.length,
+        ingested: staged,
+        cached: 0,
+        skipped: 0,
+        failures
+      } satisfies SourceReport
+    }).pipe(Effect.ensuring(removeScratch(scratch)))
+    return report
   })
 }
 
@@ -280,42 +340,53 @@ export const gpsCompactSource: Source<FileSystem.FileSystem> = {
 /** All points for one UTC day, chronological. */
 export const gpsDay = (day: string) =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
-    const partition = dataPath(gpsPartitionKey(day))
-    const inboxDir = dataPath(INBOX_PREFIX)
-    const inbox = (yield* fs.exists(inboxDir))
-      ? (yield* fs.readDirectory(inboxDir)).filter((file) => file.endsWith(".ndjson"))
-      : []
     // Points still in the inbox are part of the day too — readers should not
-    // have to wait for the hourly compaction.
-    const parts: Array<string> = []
-    if (yield* fs.exists(partition)) {
-      parts.push(`SELECT ${COLUMNS} FROM read_parquet(${quote(partition)}, hive_partitioning=false)`)
-    }
-    if (inbox.length > 0) {
-      const listSql = inbox.map((file) => quote(`${inboxDir}/${file}`)).join(", ")
-      parts.push(`SELECT ${COLUMNS} FROM read_ndjson_auto([${listSql}], union_by_name=true)`)
-    }
-    if (parts.length === 0) return []
-    const json = yield* duckdb(
-      `SELECT DISTINCT ON (source, ts, lat, lon)
-         source,
-         strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%S.%g') || 'Z' AS ts,
-         lat, lon, speed, alt, acc, batt
-       FROM (${parts.join(" UNION ALL BY NAME ")})
-       WHERE strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') = ${quote(day)}
-       ORDER BY ts`
-    )
-    return JSON.parse(json || "[]") as Array<{
-      source: string
-      ts: string
-      lat: number
-      lon: number
-      speed: number | null
-      alt: number | null
-      acc: number | null
-      batt: number | null
-    }>
+    // have to wait for the compaction pass. Partition and inbox are store
+    // artifacts; materialize both into scratch for DuckDB.
+    const inboxFiles = (yield* Files.listFiles(dataPath(INBOX_PREFIX)))
+      .filter((file) => file.endsWith(".ndjson"))
+    const keys = [
+      gpsPartitionKey(day),
+      ...inboxFiles.map((file) => `${INBOX_PREFIX}/${file}`)
+    ]
+    const scratch = yield* materializeArtifacts(keys)
+    const rows = yield* Effect.gen(function*() {
+      const parts: Array<string> = []
+      if (scratch.found.has(gpsPartitionKey(day))) {
+        parts.push(
+          `SELECT ${COLUMNS} FROM read_parquet(${quote(scratch.pathFor(gpsPartitionKey(day)))}, hive_partitioning=false)`
+        )
+      }
+      const inboxPaths = inboxFiles
+        .map((file) => `${INBOX_PREFIX}/${file}`)
+        .filter((key) => scratch.found.has(key))
+        .map((key) => scratch.pathFor(key))
+      if (inboxPaths.length > 0) {
+        const listSql = inboxPaths.map(quote).join(", ")
+        parts.push(`SELECT ${COLUMNS} FROM read_ndjson_auto([${listSql}], union_by_name=true)`)
+      }
+      if (parts.length === 0) return []
+      const json = yield* duckdb(
+        `SELECT DISTINCT ON (source, ts, lat, lon)
+           source,
+           strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%S.%g') || 'Z' AS ts,
+           lat, lon, speed, alt, acc, batt
+         FROM (${parts.join(" UNION ALL BY NAME ")})
+         WHERE strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') = ${quote(day)}
+         ORDER BY ts`
+      )
+      return JSON.parse(json || "[]") as Array<{
+        source: string
+        ts: string
+        lat: number
+        lon: number
+        speed: number | null
+        alt: number | null
+        acc: number | null
+        batt: number | null
+      }>
+    }).pipe(Effect.ensuring(removeScratch(scratch)))
+    return rows
   })
 // --- "my location": the end-user view ------------------------------------------
 

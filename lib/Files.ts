@@ -17,7 +17,7 @@ import * as FileSystem from "effect/FileSystem"
 import * as Option from "effect/Option"
 import * as Schema from "effect/Schema"
 import { dirname } from "node:path"
-import { ArtifactStore, type ArtifactStoreApi } from "./ArtifactStore.ts"
+import { ArtifactStore, type ArtifactHead, type ArtifactStoreApi } from "./ArtifactStore.ts"
 
 const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)))
 
@@ -183,6 +183,24 @@ export const size = (
       if (!(yield* fs.exists(file))) return Option.none()
       const info = yield* fs.stat(file)
       return Option.some(Number(info.size))
+    }).pipe(Effect.mapError(asError))
+  )
+
+/** The artifact's head — size plus the store's etag when it reports one
+ * (null etag on the plain filesystem) — or none when it does not exist.
+ * Freshness checks that must follow the artifact across stores key on
+ * this, never on a local stat of a path that may only name the artifact. */
+export const head = (
+  file: string
+): Effect.Effect<Option.Option<ArtifactHead>, Error, FileSystem.FileSystem> =>
+  withStore(
+    file,
+    (store, key) => store.head(key),
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      if (!(yield* fs.exists(file))) return Option.none()
+      const info = yield* fs.stat(file)
+      return Option.some({ size: Number(info.size), etag: null })
     }).pipe(Effect.mapError(asError))
   )
 

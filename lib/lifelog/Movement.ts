@@ -13,7 +13,7 @@ import { gpsDay, haversineMeters } from "./Gps.ts"
 import { readStaysBasis, staysDayBasisHash, staysOverlappingDay, type StayRow } from "./Stays.ts"
 import { dataPath } from "./Resources.ts"
 import { eagerSinceDay, homeTimeZone, withinEagerWindow } from "./Time.ts"
-import { cachedFileHash, cachedFileHashes, flushFileHashes } from "./FileHashes.ts"
+import { cachedFileHash, cachedFileHashes, fileStatToken, flushFileHashes } from "./FileHashes.ts"
 
 export const MOVEMENT_VERSION = "movement-v1"
 const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2"
@@ -197,10 +197,13 @@ export const forwardGeocode = (query: string): Effect.Effect<ReadonlyArray<Geoco
   Effect.gen(function*() {
     const key = `gps/geocode-fwd-v1/${sha256(query.trim().toLowerCase())}.json`
     const path = dataPath(key)
-    const fs = yield* FileSystem.FileSystem
-    if (yield* fs.exists(path)) {
+    // The cache is written through the seam (below); read it through the
+    // seam too, or the read checks a local path that only names the
+    // artifact and the cache never hits once the store is the bucket.
+    const cached = yield* Files.readText(path).pipe(Effect.catchCause(() => Effect.succeed(Option.none<string>())))
+    if (Option.isSome(cached)) {
       try {
-        return yield* Schema.decodeUnknownEffect(GeocodeResults)(JSON.parse(yield* fs.readFileString(path))).pipe(
+        return yield* Schema.decodeUnknownEffect(GeocodeResults)(JSON.parse(cached.value)).pipe(
           Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<GeocodeResult>))
         )
       } catch {
@@ -242,10 +245,11 @@ const reverseGeocode = (lat: number, lon: number) => Effect.gen(function*() {
   const roundedLat = lat.toFixed(4)
   const roundedLon = lon.toFixed(4)
   const key = `gps/geocode-v1/${roundedLat}_${roundedLon}.json`
-  const fs = yield* FileSystem.FileSystem
   const path = dataPath(key)
-  if (yield* fs.exists(path)) {
-    try { return shortGeocodeName(JSON.parse(yield* fs.readFileString(path))) } catch { return null }
+  // Seam read for the seam-written cache (see forwardGeocode).
+  const cached = yield* Files.readText(path).pipe(Effect.orElseSucceed(() => Option.none<string>()))
+  if (Option.isSome(cached)) {
+    try { return shortGeocodeName(JSON.parse(cached.value)) } catch { return null }
   }
   const wait = Math.max(0, 1000 - (Date.now() - lastGeocodeAt))
   if (wait > 0) yield* Effect.sleep(`${wait} millis`)
@@ -261,7 +265,9 @@ const reverseGeocode = (lat: number, lon: number) => Effect.gen(function*() {
   lastGeocodeAt = Date.now()
   if (!response.ok) return null
   const json = yield* Effect.tryPromise({ try: () => response.json(), catch: (error) => new Error(String(error)) })
-  if (!(yield* fs.exists(path))) yield* Files.writeJson(path, json)
+  if (Option.isNone(yield* Files.readText(path).pipe(Effect.orElseSucceed(() => Option.none<string>())))) {
+    yield* Files.writeJson(path, json)
+  }
   return shortGeocodeName(json)
 }).pipe(Effect.catchCause(() => Effect.succeed(null)))
 
@@ -280,15 +286,16 @@ const narrative = (segments: ReadonlyArray<unknown>) => {
 }
 
 const readPlaces = Effect.gen(function*() {
-  const fs = yield* FileSystem.FileSystem
+  // Through the seam: `replacePlaces` writes through it, so reading the
+  // raw filesystem here would keep serving the pre-flip on-disk copy
+  // while edits land in the bucket.
   for (const key of [PLACES_KEY, LEGACY_PLACES_KEY]) {
-    const path = dataPath(key)
-    if (!(yield* fs.exists(path))) continue
-    const text = yield* fs.readFileString(path)
-    const places = yield* Schema.decodeUnknownEffect(Places)(JSON.parse(text)).pipe(
+    const text = yield* Files.readText(dataPath(key))
+    if (Option.isNone(text)) continue
+    const places = yield* Schema.decodeUnknownEffect(Places)(JSON.parse(text.value)).pipe(
       Effect.mapError((error) => new Error(String(error)))
     )
-    return { places, hash: sha256(text) }
+    return { places, hash: sha256(text.value) }
   }
   return { places: [] as ReadonlyArray<Place>, hash: sha256("") }
 })
@@ -382,11 +389,10 @@ export const placeCandidates: Effect.Effect<ReadonlyArray<PlaceCandidate>, Error
  * Manifest-cached (see FileHashes): unchanged partitions cost a stat. */
 const pointPartitionHashes = (utcDays: ReadonlyArray<string>) =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const present: Array<{ day: string; path: string }> = []
     for (const day of utcDays) {
       const path = dataPath(`gps/points-v1/day=${day}/points.parquet`)
-      if (yield* fs.exists(path)) present.push({ day, path })
+      if (yield* Files.exists(path)) present.push({ day, path })
     }
     const hashes = yield* Effect.forEach(present, ({ path }) => cachedFileHash(path), { concurrency: 4 })
     yield* flushFileHashes
@@ -431,13 +437,12 @@ let basisHashesMemo: { key: string; value: Map<string, string> } | null = null
 
 const partitionFingerprint = (root: string, entries: ReadonlyArray<string>) =>
   Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
+    // Freshness tokens from the governing store (etag in the bucket,
+    // size+mtime locally) via FileHashes — a raw fs.stat here would
+    // fingerprint the frozen on-disk copies after the store flip.
     const stats = yield* Effect.forEach(entries, (relative) =>
-      Effect.gen(function*() {
-        const info = yield* fs.stat(dataPath(`${root}/${relative}`))
-        const mtimeMs = Option.match(info.mtime, { onNone: () => 0, onSome: (date: Date) => date.getTime() })
-        return `${relative}:${Number(info.size)}:${mtimeMs}`
-      }), { concurrency: 8 })
+      Effect.map(fileStatToken(dataPath(`${root}/${relative}`)), (token) => `${relative}:${token}`),
+      { concurrency: 8 })
     return stats.join("\n")
   })
 
@@ -662,12 +667,12 @@ export const utcPartitionLocalDays = (utcDay: string, zone: string): ReadonlyArr
 export const movementDays = Effect.gen(function*() {
   const memoKey = `${(yield* readStaysBasis).basisHash}\n${yield* homeTimeZone}`
   if (movementDaysMemo?.key === memoKey) return movementDaysMemo.days
-  const fs = yield* FileSystem.FileSystem
   const zone = yield* homeTimeZone
-  const root = dataPath("gps/points-v1")
-  const entries = (yield* fs.exists(root)) ? yield* fs.readDirectory(root) : []
+  // The partition listing through the seam (relative file paths), not a
+  // directory read of a local path that only names the store subtree.
+  const entries = yield* Files.listFiles(dataPath("gps/points-v1"))
   const days = [...new Set(entries.flatMap((entry) => {
-    const match = /^day=(\d{4}-\d{2}-\d{2})$/.exec(entry)
+    const match = /^day=(\d{4}-\d{2}-\d{2})\/points\.parquet$/.exec(entry)
     return match ? utcPartitionLocalDays(match[1]!, zone) : []
   }))].sort()
   movementDaysMemo = { key: memoKey, days }

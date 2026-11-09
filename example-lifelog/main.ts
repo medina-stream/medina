@@ -792,7 +792,7 @@ type LifelogEnv = Drive.Drive | Bucket.Bucket | Bucket.SourceBucket | R2TempCred
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const enabled = new Set(
-      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive,normalize,transcribe")
+      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive,normalize,transcribe,gps-compact,gps-stays")
         .split(",")
         .map((name) => name.trim())
         .filter(Boolean)
@@ -981,7 +981,12 @@ const Ingest = Layer.effectDiscard(
           // down (MEDINA_SOURCES without "normalize" / "transcribe").
           ...(enabled.has("normalize") ? [mediaNormalizeSource] : []),
           ...(enabled.has("transcribe") ? [mediaTranscribeSource] : []),
-          gpsCompactSource, staysSource
+          // The GPS stages are excludable like the media stages: at
+          // their migration cutover (docs/cloudflare-migration.md §4.3
+          // step 7) the Worker performs them and these stand down
+          // (MEDINA_SOURCES without "gps-compact" / "gps-stays").
+          ...(enabled.has("gps-compact") ? [gpsCompactSource] : []),
+          ...(enabled.has("gps-stays") ? [staysSource] : [])
         ],
         // Order matters: movement enriches journals, after attribution/index.
         // Order matters: notes are extraction from audio (stable across movement

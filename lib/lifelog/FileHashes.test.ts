@@ -15,12 +15,24 @@ describe("manifestHash", () => {
   test("hits only when path, size, and mtime all match", () => {
     const manifest = new FileHashManifest({
       version: "file-hashes-v1",
-      entries: { "/x": new HashEntry({ size: 3, mtimeMs: 42, hash: "abc" }) }
+      entries: { "/x": new HashEntry({ size: 3, mtimeMs: 42, etag: null, hash: "abc" }) }
     })
-    expect(manifestHash(manifest, "/x", 3, 42)).toBe("abc")
-    expect(manifestHash(manifest, "/x", 4, 42)).toBeNull()
-    expect(manifestHash(manifest, "/x", 3, 43)).toBeNull()
-    expect(manifestHash(manifest, "/y", 3, 42)).toBeNull()
+    expect(manifestHash(manifest, "/x", 3, 42, null)).toBe("abc")
+    expect(manifestHash(manifest, "/x", 4, 42, null)).toBeNull()
+    expect(manifestHash(manifest, "/x", 3, 43, null)).toBeNull()
+    expect(manifestHash(manifest, "/y", 3, 42, null)).toBeNull()
+  })
+
+  test("an etag on both sides is the token; a token-kind change misses", () => {
+    const manifest = new FileHashManifest({
+      version: "file-hashes-v1",
+      entries: { "/x": new HashEntry({ size: 3, mtimeMs: 0, etag: "e1", hash: "abc" }) }
+    })
+    expect(manifestHash(manifest, "/x", 3, 0, "e1")).toBe("abc")
+    expect(manifestHash(manifest, "/x", 3, 0, "e2")).toBeNull()
+    // The caller now keys by mtime (no etag): the etag-keyed entry must
+    // not hit on its placeholder mtime alone.
+    expect(manifestHash(manifest, "/x", 3, 99, null)).toBeNull()
   })
 })
 
