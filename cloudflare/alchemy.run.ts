@@ -220,7 +220,24 @@ export const Api = Cloudflare.Worker("Api", {
     // without them). Rolling back is flipping this to "shadow",
     // redeploying, and re-enabling the stages on medina-dev.
     GpsShadow: Cloudflare.DurableObject("GpsShadow"),
-    GPS_MODE: "shadow",
+    // Flipped live Nov 9, 2026. Rehearsal evidence: the stays
+    // check matched medina-dev 113/113 days over the post-drain
+    // partitions; a side-by-side merge of a live snapshot (the
+    // day's existing partition + 21 inbox files) produced the
+    // identical 29-row set from the Worker's merge and from
+    // medina-dev's DuckDB merge; and medina-dev's DuckDB reads
+    // the Worker's parquet encoding exactly (the interop probe).
+    // One known representational difference: device-event points
+    // arrive with microsecond timestamps, which the server's
+    // DuckDB path incidentally preserves in its partitions; the
+    // Worker (like every reader in the system, including the
+    // server's own API) works at millisecond precision, so its
+    // partitions store those points truncated to the millisecond.
+    // medina-dev's MEDINA_SOURCES dropped "gps-compact" /
+    // "gps-stays" in the same batch (.env.bak-2026-11-09-gps).
+    // Rollback: back to "shadow" + redeploy + restore the two
+    // tokens in medina-dev's .env + restart.
+    GPS_MODE: "live",
     // Milestone 4 step 8 (day-index piece): the day-index
     // resource's notebook and mode, same pattern — "shadow"
     // computes the corpus basis and compares medina-dev's
