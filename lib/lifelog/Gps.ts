@@ -206,122 +206,155 @@ export const removeScratch = (scratch: ScratchArtifacts) =>
 // --- compaction --------------------------------------------------------------
 
 /**
+ * Files per merge. The merge is all-or-nothing per call — it scans the
+ * whole sub-batch with one DuckDB query — and the pre-seam stage wedged
+ * permanently in Oct 2026 by scanning an ever-growing inbox in a single
+ * call: once the backlog passed what one DuckDB invocation could scan
+ * inside its timeout, every pass failed on the same batch and the
+ * inbox only grew (8,051 files by Nov 9). Bounded sub-batches keep
+ * every call small; a failed sub-batch leaves its files for the next
+ * pass and stops the pass, and merges are idempotent, so chunking
+ * changes nothing about the end state.
+ */
+const COMPACT_SUB_BATCH = 500
+
+/**
+ * Merge one sub-batch of inbox files into their days' partitions.
+ * Returns the number of partitions written. On any failure the
+ * sub-batch's files are left in the inbox untouched.
+ */
+const mergeInboxSubBatch = (
+  scratch: ScratchArtifacts,
+  stagingName: string,
+  files: ReadonlyArray<string>
+): Effect.Effect<{ staged: number; consumed: boolean; failures: Array<{ item: string; error: string }> }, Error, FileSystem.FileSystem> =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const failures: Array<{ item: string; error: string }> = []
+    const inboxKeys = files.map((file) => `${INBOX_PREFIX}/${file}`)
+    const materialized = yield* materializeArtifacts(inboxKeys, scratch.dir)
+    // A listed file that will not materialize means the batch changed
+    // under us (another compactor consumed it): fail the sub-batch
+    // without touching anything. Merging is idempotent, so a retry on
+    // the next pass is harmless.
+    for (const key of inboxKeys) {
+      if (!materialized.found.has(key)) failures.push({ item: key, error: "inbox file vanished before read" })
+    }
+    if (failures.length > 0) return { staged: 0, consumed: false, failures }
+
+    const paths = inboxKeys.map((key) => materialized.pathFor(key))
+    const listSql = paths.map(quote).join(", ")
+
+    // Which days does the sub-batch touch, and which of those already
+    // have a partition to merge with?
+    const daysJson = yield* duckdb(
+      `SELECT DISTINCT strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') AS day
+       FROM read_ndjson_auto([${listSql}], union_by_name=true)`
+    ).pipe(Effect.catchCause((cause) =>
+      Effect.sync(() => {
+        failures.push({ item: "inbox-scan", error: String(cause).slice(0, 500) })
+        return "[]"
+      })
+    ))
+    const days: Array<string> = JSON.parse(daysJson || "[]").map((row: { day: string }) => row.day)
+    if (days.length === 0) return { staged: 0, consumed: false, failures }
+
+    const partitions = yield* materializeArtifacts(days.map((day) => gpsPartitionKey(day)), scratch.dir)
+    const existing = days
+      .filter((day) => partitions.found.has(gpsPartitionKey(day)))
+      .map((day) => partitions.pathFor(gpsPartitionKey(day)))
+
+    // One merge: sub-batch rows + touched partitions, deduped,
+    // re-partitioned by UTC day into a staging dir inside the scratch.
+    // Staging is local because DuckDB is a separate process; this
+    // process stores the results back through the seam itself.
+    const staging = `${scratch.dir}/${stagingName}`
+    const existingSql = existing.length
+      // hive_partitioning=false: the partition path carries day=YYYY-MM-DD,
+      // which would otherwise be inferred as a column and collide with the
+      // day we compute for PARTITION_BY (duckdb silently writes day_1=).
+      ? ` UNION ALL BY NAME SELECT ${COLUMNS} FROM read_parquet([${existing.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)`
+      : ""
+    // Partitions store no day column -- the day lives in the hive path, and
+    // PARTITION_BY drops it from the written files, keeping the schema
+    // identical between a day's partition and the inbox rows it came from.
+    let staged = 0
+    yield* duckdb(
+      `COPY (
+         SELECT ${COLUMNS}, strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') AS day
+         FROM (
+           SELECT DISTINCT ON (source, ts, lat, lon) ${COLUMNS}
+           FROM (
+             SELECT ${COLUMNS} FROM read_ndjson_auto([${listSql}], union_by_name=true)${existingSql}
+           )
+           ORDER BY ts
+         )
+       ) TO ${quote(staging)} (FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (day))`
+    ).pipe(Effect.catchCause((cause) =>
+      Effect.sync(() => {
+        failures.push({ item: "compact", error: String(cause).slice(0, 500) })
+        return ""
+      })
+    ))
+
+    if (failures.length === 0) {
+      for (const day of days) {
+        const stagedFiles = yield* fs.readDirectory(`${staging}/day=${day}`).pipe(
+          Effect.orElseSucceed(() => [] as Array<string>)
+        )
+        const stagedFile = stagedFiles.find((file) => file.endsWith(".parquet"))
+        if (!stagedFile) {
+          failures.push({ item: day, error: "no staged partition produced" })
+          continue
+        }
+        // One seam write per partition: the store registers it, and a
+        // reader either sees the old partition or the new one, never a
+        // partial file — the atomicity the old copy + rename provided.
+        yield* Files.putFile(dataPath(gpsPartitionKey(day)), `${staging}/day=${day}/${stagedFile}`)
+        staged += 1
+      }
+    }
+
+    // Only consume the sub-batch when every touched day merged cleanly.
+    if (failures.length === 0) {
+      // Another process may have compacted the same idempotent batch
+      // first; deleting an absent artifact succeeds by seam semantics.
+      for (const key of inboxKeys) yield* Files.remove(dataPath(key))
+    }
+    return { staged, consumed: failures.length === 0, failures }
+  })
+
+/**
  * Merge inbox rows into their days' parquet partitions, then delete the
- * consumed inbox files. One DuckDB pass regardless of how many days the
- * batch touches (hive PARTITION_BY into a staging dir, then per-day atomic
- * renames), so a months-long backfill compacts as cheaply as an hourly
- * trickle. Idempotent: the merge de-duplicates on (source, ts, lat, lon),
- * and a crash before the deletes only means rows merge again to no effect.
+ * consumed inbox files, in bounded sub-batches (see COMPACT_SUB_BATCH).
+ * Idempotent end to end: the merge de-duplicates on (source, ts, lat,
+ * lon), and a crash before a sub-batch's deletes only means its rows
+ * merge again to no effect.
  */
 export const gpsCompactSource: Source<FileSystem.FileSystem> = {
   name: "gps-compact",
   ingest: Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
     const batch = (yield* Files.listFiles(dataPath(INBOX_PREFIX)))
       .filter((file) => file.endsWith(".ndjson"))
     if (batch.length === 0) {
       return { discovered: 0, ingested: 0, cached: 0, skipped: 0, failures: [] } satisfies SourceReport
     }
-
-    const failures: Array<{ item: string; error: string }> = []
-
-    // Materialize the batch (and, below, the partitions it touches) into
-    // local scratch: DuckDB is a separate process that reads paths, and
-    // the inbox and partitions are store artifacts, not local files.
-    const inboxKeys = batch.map((file) => `${INBOX_PREFIX}/${file}`)
-    const scratch = yield* materializeArtifacts(inboxKeys)
+    // One scratch for the whole pass; sub-batches materialize into it.
+    const scratch = yield* materializeArtifacts([])
     const report = yield* Effect.gen(function*() {
-      // A listed file that will not materialize means the batch changed
-      // under us (another compactor consumed it): fail the pass without
-      // touching anything, and let the next pass re-derive from the
-      // listing. Merging is idempotent, so a retry is harmless.
-      for (const key of inboxKeys) {
-        if (!scratch.found.has(key)) failures.push({ item: key, error: "inbox file vanished before read" })
-      }
-      if (failures.length > 0) {
-        return { discovered: batch.length, ingested: 0, cached: 0, skipped: 0, failures } satisfies SourceReport
-      }
-      const paths = inboxKeys.map((key) => scratch.pathFor(key))
-      const listSql = paths.map(quote).join(", ")
-
-      // Which days does the batch touch, and which of those already have
-      // a partition to merge with?
-      const daysJson = yield* duckdb(
-        `SELECT DISTINCT strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') AS day
-         FROM read_ndjson_auto([${listSql}], union_by_name=true)`
-      ).pipe(Effect.catchCause((cause) =>
-        Effect.sync(() => {
-          failures.push({ item: "inbox-scan", error: String(cause).slice(0, 500) })
-          return "[]"
-        })
-      ))
-      const days: Array<string> = JSON.parse(daysJson || "[]").map((row: { day: string }) => row.day)
-      if (days.length === 0) {
-        return { discovered: batch.length, ingested: 0, cached: 0, skipped: 0, failures } satisfies SourceReport
-      }
-      // Into the same scratch: the outer ensuring removes both at once.
-      const partitions = yield* materializeArtifacts(days.map((day) => gpsPartitionKey(day)), scratch.dir)
-      const existing = days
-        .filter((day) => partitions.found.has(gpsPartitionKey(day)))
-        .map((day) => partitions.pathFor(gpsPartitionKey(day)))
-
-      // One pass: inbox rows + touched partitions, deduped, re-partitioned
-      // by UTC day into a staging dir inside the scratch. Staging is local
-      // because DuckDB is a separate process; this process stores the
-      // results back through the seam itself.
-      const staging = `${scratch.dir}/staging`
-      const existingSql = existing.length
-        // hive_partitioning=false: the partition path carries day=YYYY-MM-DD,
-        // which would otherwise be inferred as a column and collide with the
-        // day we compute for PARTITION_BY (duckdb silently writes day_1=).
-        ? ` UNION ALL BY NAME SELECT ${COLUMNS} FROM read_parquet([${existing.map(quote).join(", ")}], union_by_name=true, hive_partitioning=false)`
-        : ""
-      // Partitions store no day column -- the day lives in the hive path, and
-      // PARTITION_BY drops it from the written files, keeping the schema
-      // identical between a day's partition and the inbox rows it came from.
+      const failures: Array<{ item: string; error: string }> = []
       let staged = 0
-      yield* duckdb(
-        `COPY (
-           SELECT ${COLUMNS}, strftime(CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC', '%Y-%m-%d') AS day
-           FROM (
-             SELECT DISTINCT ON (source, ts, lat, lon) ${COLUMNS}
-             FROM (
-               SELECT ${COLUMNS} FROM read_ndjson_auto([${listSql}], union_by_name=true)${existingSql}
-             )
-             ORDER BY ts
-           )
-         ) TO ${quote(staging)} (FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (day))`
-      ).pipe(Effect.catchCause((cause) =>
-        Effect.sync(() => {
-          failures.push({ item: "compact", error: String(cause).slice(0, 500) })
-          return ""
-        })
-      ))
-
-      if (failures.length === 0) {
-        for (const day of days) {
-          const stagedFiles = yield* fs.readDirectory(`${staging}/day=${day}`).pipe(
-            Effect.orElseSucceed(() => [] as Array<string>)
-          )
-          const stagedFile = stagedFiles.find((file) => file.endsWith(".parquet"))
-          if (!stagedFile) {
-            failures.push({ item: day, error: "no staged partition produced" })
-            continue
-          }
-          // One seam write per partition: the store registers it, and a
-          // reader either sees the old partition or the new one, never a
-          // partial file — the atomicity the old copy + rename provided.
-          yield* Files.putFile(dataPath(gpsPartitionKey(day)), `${staging}/day=${day}/${stagedFile}`)
-          staged += 1
-        }
+      let consumed = 0
+      for (let start = 0; start < batch.length; start += COMPACT_SUB_BATCH) {
+        const chunk = batch.slice(start, start + COMPACT_SUB_BATCH)
+        const result = yield* mergeInboxSubBatch(scratch, `staging-${start}`, chunk)
+        staged += result.staged
+        failures.push(...result.failures)
+        if (result.failures.length > 0) break
+        if (result.consumed) consumed += chunk.length
       }
-
-      // Only consume the inbox when every touched day merged cleanly.
-      if (failures.length === 0) {
-        // Another process may have compacted the same idempotent batch
-        // first; deleting an absent artifact succeeds by seam semantics.
-        for (const key of inboxKeys) yield* Files.remove(dataPath(key))
-        yield* Effect.log(`gps-compact: ${batch.length} inbox files -> ${days.length} day partitions`)
+      if (consumed > 0) {
+        yield* Effect.log(`gps-compact: ${consumed} inbox files merged (${staged} partition writes)`)
       }
       return {
         discovered: batch.length,

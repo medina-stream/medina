@@ -84,4 +84,31 @@ describe("gps store seam", () => {
     expect(restays.cached).toBe(0)
     expect((await run(readStaysBasis)).stays).toBe(2)
   })
+
+  test("a backlog larger than one sub-batch drains across chunks", async () => {
+    resetFileHashCacheForTest()
+    const memory = makeMemory(DATA_DIR)
+    const layers = Layer.mergeAll(BunFileSystem.layer, Layer.succeed(ArtifactStore, memory.api))
+    const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
+      Effect.runPromise(effect.pipe(Effect.provide(layers)) as Effect.Effect<A, E, never>)
+
+    // 501 one-point inbox files (one past the 500-file sub-batch),
+    // 300 on Feb 1 and 201 on Feb 2 — the wedge shape from Oct 2026,
+    // when a single all-inbox scan outgrew its DuckDB timeout and the
+    // stage never consumed anything again.
+    for (let i = 0; i < 501; i++) {
+      const day = i < 300 ? "2026-02-01" : "2026-02-02"
+      const minute = i % 300
+      const ts = `${day}T${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}:00.000Z`
+      await run(gpsInboxWrite([point(ts)]))
+    }
+    expect(await run(Files.listFiles(dataPath("gps/inbox")))).toHaveLength(501)
+
+    const compacted = await run(gpsCompactSource.ingest)
+    expect(compacted.failures).toEqual([])
+    expect(compacted.discovered).toBe(501)
+    expect(await run(Files.listFiles(dataPath("gps/inbox")))).toHaveLength(0)
+    expect(await run(gpsDay("2026-02-01"))).toHaveLength(300)
+    expect(await run(gpsDay("2026-02-02"))).toHaveLength(201)
+  })
 })
