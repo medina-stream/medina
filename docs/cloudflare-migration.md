@@ -133,8 +133,9 @@ Worker duplicates its two public routes additively, §4.)
 
 ## 2. Target architecture (Workers-native)
 
-One Alchemy stack, **Medina** (`cloudflare/alchemy.run.ts`), local state
-like hskping. Everything below is a Worker, a Cron Trigger, a Queue, a
+One Alchemy stack, **Medina** (`cloudflare/alchemy.run.ts`); state was
+local files like hskping at first and moved to Alchemy's encrypted
+remote state store on Nov 9 (§4.3, "State store switch"). Everything below is a Worker, a Cron Trigger, a Queue, a
 Workflow, or a Durable Object — no containers, no VMs, no mounted
 filesystems. Development continues in this repo on `effect-rethink`;
 the bun server remains the running production until cutover (§3).
@@ -1230,6 +1231,59 @@ isn't the main server's (workflows, one-shot tools, the Worker
 port) must be checked for store provision — the fallback is silent
 by design. Relatedly, the journal stage's move to the Worker
 (step 9) removes this server-side split entirely.
+
+### State store switch (Nov 9) — Alchemy state is now remote
+
+Alchemy's record of what this stack has deployed (which Worker,
+which buckets, which secrets it manages) used to live in files
+under `cloudflare/.alchemy/` in this repo. That made the record
+easy to lose and awkward to share: only the machine holding the
+files could deploy safely, and the files themselves contain a
+secret value, so they never belonged in git. On Nov 9 (Scott's
+call, ahead of him starting local development) the stack switched
+to Alchemy's encrypted remote state store for Cloudflare
+(`Cloudflare.state()` in `alchemy.run.ts`): a small Worker backed
+by a Durable Object holds the state, encrypted at rest, with its
+credentials in the account's Secrets Store. It is the store
+Alchemy recommends for Cloudflare projects, and the same one
+serves every stack on the account.
+
+How the switch was made, carefully, because the state describes
+live infrastructure — starting from an empty store would have
+made Alchemy try to recreate the live Worker and buckets:
+
+1. The whole local `.alchemy/` directory was backed up outside
+   the repo first (`~/workspace/medina-state-backup-2026-11-09/`
+   in the sandbox; it holds secret material, so it stays out of
+   git like the originals).
+2. A plan against the untouched local state came back "no
+   changes" — the baseline.
+3. The config switched to `Cloudflare.state()`. The account's
+   state-store Worker already existed and was serving, so no
+   bootstrap deploy was needed; the first plan against the remote
+   store failed safe — it could see the live resources in the
+   cloud but, with an empty record, refused to treat them as this
+   stack's.
+4. The four local state records for the dev stage (Api, Artifacts,
+   CaptureIn, IndexApiToken) plus the stack output were copied
+   into the remote store record by record, with no deletions
+   anywhere. (Alchemy beta.83's CLI has no copy command, and its
+   library "sync" helper deletes destination stacks it isn't
+   told about — including the state store's own — so the copy
+   was done explicitly, one record at a time.)
+5. A plan against the remote store then came back "no changes",
+   identical to the local baseline — the record carried over
+   exactly. Only then did a real deploy run: also a no-op (the
+   Worker itself was untouched), with the secrets reattach
+   asserting all 23 bindings as usual.
+
+Aftermath: `.alchemy/` is now just a local cache. It is
+gitignored (`cloudflare/.alchemy/` in the root `.gitignore`) and
+the previously tracked files were removed from the index; the
+secret-bearing snapshot of the index token is no longer in the
+repo at all. One operational note: the installed Alchemy CLI
+(beta.83) must be run through bun in this repo — under plain node
+it fails to resolve `effect/Crypto` against effect 4.1.1.
 
 ### Access + domain (staged, one open decision)
 

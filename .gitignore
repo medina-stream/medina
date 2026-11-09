@@ -1,4 +1,8 @@
 node_modules/
+# Alchemy state is remote (Cloudflare.state()) since Nov 9, 2026 —
+# cloudflare/.alchemy/ is local cache only and holds secret-bearing
+# state snapshots; never commit it.
+cloudflare/.alchemy/
 .wrangler/
 .dev.vars
 .dev.vars.*

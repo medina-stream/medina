@@ -1,7 +1,6 @@
 import * as Alchemy from "alchemy";
 import { adopt } from "alchemy/AdoptPolicy";
 import * as Cloudflare from "alchemy/Cloudflare";
-import { localState } from "alchemy/State";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import { existsSync } from "node:fs";
@@ -43,9 +42,17 @@ import { fileURLToPath } from "node:url";
 // required value fails loudly below rather than reconciling a secret
 // to an empty value.
 //
-// State is local (`.alchemy/` in this directory, committed with the
-// code), matching hskping: the remote state store needs Secrets Store
-// permissions the deploy token doesn't have.
+// State lives in Alchemy's encrypted remote state store for
+// Cloudflare (a Worker backed by a Durable Object, credentials in the
+// account Secrets Store, state encrypted at rest) — Scott's call,
+// Nov 9, 2026, so more than one machine can deploy this stack
+// against the same record. It was local files before (`.alchemy/` in
+// this directory) because the deploy token then lacked the Secrets
+// Store permissions the remote store needs; the Nov 9 switch was
+// gated on a backup of the local state plus a clean plan against the
+// remote store before any deploy (see docs/cloudflare-migration.md).
+// The account is pinned by the deploy environment
+// (CLOUDFLARE_ACCOUNT_ID), and `.alchemy/` is now just local cache.
 
 export const Artifacts = Cloudflare.R2.Bucket("Artifacts", {
   name: "sco-lifelog",
@@ -244,7 +251,7 @@ export default Alchemy.Stack(
   "Medina",
   {
     providers: Cloudflare.providers(),
-    state: localState(),
+    state: Cloudflare.state(),
   },
   Effect.gen(function* () {
     const worker = yield* Api;
