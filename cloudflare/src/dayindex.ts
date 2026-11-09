@@ -1103,56 +1103,74 @@ export const runDayIndexPass = (
       selectionUpserts = [];
       yield* notebook.applySelections(batch, []);
     });
-    const capturedAtById = new Map<string, string | null>();
+    // Reads are independent per capture, so selections resolve
+    // with bounded concurrency (a sequential first pass over the
+    // corpus is tens of minutes of one-at-a-time bucket reads).
+    // Effect.forEach preserves input order, so the pairs — and
+    // therefore the basis — are unaffected.
     let changedSelections = 0;
+    const selectionOutcomes = yield* Effect.forEach(
+      ids,
+      (captureId) =>
+        Effect.gen(function* () {
+          const token = tokenFor(captureId);
+          const cached = cachedSelections.get(captureId);
+          if (cached !== undefined && cached.token === token) {
+            return {
+              captureId,
+              selectedKey: cached.selectedKey,
+              capturedAt: cached.capturedAt,
+              upsert: null as SelectionRow | null,
+            };
+          }
+          const live = parseLiveCaptureId(captureId);
+          let selectedKey: string | null;
+          let capturedAt: string | null;
+          if (live !== null) {
+            const key = liveTranscriptKey(live.installId, live.segmentUuid);
+            const parsed = yield* data.readJson(key);
+            selectedKey = usableTranscript(parsed) ? key : null;
+            capturedAt = transcriptCapturedAt(parsed);
+          } else {
+            const canonical = yield* data.readJson(transcriptKey(captureId));
+            capturedAt = transcriptCapturedAt(canonical);
+            if (usableTranscript(canonical)) {
+              selectedKey = transcriptKey(captureId);
+            } else {
+              const firstLook = yield* data.readJson(
+                localTranscriptKey(captureId),
+              );
+              selectedKey = usableTranscript(firstLook)
+                ? localTranscriptKey(captureId)
+                : null;
+            }
+          }
+          return {
+            captureId,
+            selectedKey,
+            capturedAt,
+            upsert: { captureId, token, selectedKey, capturedAt },
+          };
+        }),
+      { concurrency: 16 },
+    );
+    const capturedAtById = new Map<string, string | null>();
     const pairs: Array<{
       captureId: string;
       correctionHash: string | null;
       selectedKey: string | null;
     }> = [];
-    for (const captureId of ids) {
-      const token = tokenFor(captureId);
-      const cached = cachedSelections.get(captureId);
-      let selectedKey: string | null;
-      let capturedAt: string | null;
-      if (cached !== undefined && cached.token === token) {
-        selectedKey = cached.selectedKey;
-        capturedAt = cached.capturedAt;
-      } else {
+    for (const outcome of selectionOutcomes) {
+      if (outcome.upsert !== null) {
         changedSelections++;
-        const live = parseLiveCaptureId(captureId);
-        if (live !== null) {
-          const key = liveTranscriptKey(live.installId, live.segmentUuid);
-          const parsed = yield* data.readJson(key);
-          selectedKey = usableTranscript(parsed) ? key : null;
-          capturedAt = transcriptCapturedAt(parsed);
-        } else {
-          const canonical = yield* data.readJson(transcriptKey(captureId));
-          capturedAt = transcriptCapturedAt(canonical);
-          if (usableTranscript(canonical)) {
-            selectedKey = transcriptKey(captureId);
-          } else {
-            const firstLook = yield* data.readJson(
-              localTranscriptKey(captureId),
-            );
-            selectedKey = usableTranscript(firstLook)
-              ? localTranscriptKey(captureId)
-              : null;
-          }
-        }
-        selectionUpserts.push({
-          captureId,
-          token,
-          selectedKey,
-          capturedAt,
-        });
+        selectionUpserts.push(outcome.upsert);
         if (selectionUpserts.length >= 200) yield* flushSelections;
       }
-      capturedAtById.set(captureId, capturedAt);
+      capturedAtById.set(outcome.captureId, outcome.capturedAt);
       pairs.push({
-        captureId,
-        correctionHash: corrections.get(captureId)?.hash ?? null,
-        selectedKey,
+        captureId: outcome.captureId,
+        correctionHash: corrections.get(outcome.captureId)?.hash ?? null,
+        selectedKey: outcome.selectedKey,
       });
     }
     const idSet = new Set(ids);
@@ -1195,95 +1213,144 @@ export const runDayIndexPass = (
       list.push(entry);
       days.set(day, list);
     };
-    for (const pair of pairs) {
-      if (pair.selectedKey === null) continue;
-      const live = parseLiveCaptureId(pair.captureId);
-      if (live !== null) {
-        const capturedAt = capturedAtById.get(pair.captureId) ?? null;
-        if (capturedAt === null) continue;
-        const wall = wallClockInZone(capturedAt, zone);
-        if (wall === null) continue;
-        place(wall.day, {
-          captureId: pair.captureId,
-          transcriptKey: pair.selectedKey,
-          startTime: wall.startTime,
-          timeZone: zone,
-          channel: "audio",
-          correctionHash: null,
-        });
-        continue;
-      }
-      const basisHash = yield* sha256Text(
-        `${ATTRIBUTION_VERSION}\n${zone}\n${pair.correctionHash ?? ""}\n${rulesDigest}`,
-      );
-      const cached = cachedAttributions.get(pair.captureId);
-      let fields: {
-        day: string | null;
-        startTime: string | null;
-        timeZone: string | null;
-        channel: string;
-      } | null = null;
-      if (cached !== undefined && cached.basisHash === basisHash) {
-        fields = cached;
-        attributionsFromCache++;
-      } else {
-        const artifact = parseAttributionArtifact(
-          yield* data.readJson(attributionKey(pair.captureId, basisHash)),
-        );
-        if (artifact !== null) {
-          fields = artifact;
-          attributionsFromArtifact++;
-        } else {
-          const evidence = yield* gatherEvidence(
-            data,
-            pair.captureId,
-            capturedAtById.get(pair.captureId) ?? null,
-          );
-          const shape = computeAttribution(
-            pair.captureId,
-            evidence,
-            corrections.get(pair.captureId)?.correction ?? null,
-            zone,
-          );
-          fields = {
-            day: shape.day,
-            startTime: shape.estimatedStartTime,
-            timeZone: shape.timeZone,
-            channel: shape.channel,
+    // Attribution resolution is likewise independent per capture
+    // (and likewise order-preserving): entries are placed in pair
+    // order when the outcomes fold, exactly as the sequential
+    // pass placed them.
+    interface AttributionOutcome {
+      readonly entry: { readonly day: string; readonly entry: DayEntryShape } | null;
+      readonly upsert: AttributionRow | null;
+      readonly source: "cache" | "artifact" | "computed" | "none";
+      readonly wroteArtifact: boolean;
+    }
+    const resolvePair = (
+      pair: (typeof pairs)[number],
+    ): Effect.Effect<AttributionOutcome, DayIndexError, never> =>
+      Effect.gen(function* () {
+          const none: AttributionOutcome = {
+            entry: null,
+            upsert: null,
+            source: "none",
+            wroteArtifact: false,
           };
-          attributionsComputed++;
-          if (options.perform) {
-            yield* data.writeText(
-              attributionKey(pair.captureId, basisHash),
-              JSON.stringify({ ...shape, attributedAt: nowIso }, null, 2),
-            );
-            performedAttributions++;
+          if (pair.selectedKey === null) return none;
+          const live = parseLiveCaptureId(pair.captureId);
+          if (live !== null) {
+            const capturedAt = capturedAtById.get(pair.captureId) ?? null;
+            if (capturedAt === null) return none;
+            const wall = wallClockInZone(capturedAt, zone);
+            if (wall === null) return none;
+            return {
+              entry: {
+                day: wall.day,
+                entry: {
+                  captureId: pair.captureId,
+                  transcriptKey: pair.selectedKey,
+                  startTime: wall.startTime,
+                  timeZone: zone,
+                  channel: "audio",
+                  correctionHash: null,
+                },
+              },
+              upsert: null,
+              source: "none",
+              wroteArtifact: false,
+            };
           }
-        }
-        attributionUpserts.push({
-          captureId: pair.captureId,
-          basisHash,
-          day: fields.day,
-          startTime: fields.startTime,
-          timeZone: fields.timeZone,
-          channel: fields.channel,
-        });
+          const basisHash = yield* sha256Text(
+            `${ATTRIBUTION_VERSION}\n${zone}\n${pair.correctionHash ?? ""}\n${rulesDigest}`,
+          );
+          const cached = cachedAttributions.get(pair.captureId);
+          let fields: {
+            day: string | null;
+            startTime: string | null;
+            timeZone: string | null;
+            channel: string;
+          };
+          let source: AttributionOutcome["source"];
+          let upsert: AttributionRow | null = null;
+          let wroteArtifact = false;
+          if (cached !== undefined && cached.basisHash === basisHash) {
+            fields = cached;
+            source = "cache";
+          } else {
+            const artifact = parseAttributionArtifact(
+              yield* data.readJson(attributionKey(pair.captureId, basisHash)),
+            );
+            if (artifact !== null) {
+              fields = artifact;
+              source = "artifact";
+            } else {
+              const evidence = yield* gatherEvidence(
+                data,
+                pair.captureId,
+                capturedAtById.get(pair.captureId) ?? null,
+              );
+              const shape = computeAttribution(
+                pair.captureId,
+                evidence,
+                corrections.get(pair.captureId)?.correction ?? null,
+                zone,
+              );
+              fields = {
+                day: shape.day,
+                startTime: shape.estimatedStartTime,
+                timeZone: shape.timeZone,
+                channel: shape.channel,
+              };
+              source = "computed";
+              if (options.perform) {
+                yield* data.writeText(
+                  attributionKey(pair.captureId, basisHash),
+                  JSON.stringify({ ...shape, attributedAt: nowIso }, null, 2),
+                );
+                wroteArtifact = true;
+              }
+            }
+            upsert = {
+              captureId: pair.captureId,
+              basisHash,
+              day: fields.day,
+              startTime: fields.startTime,
+              timeZone: fields.timeZone,
+              channel: fields.channel,
+            };
+          }
+          return {
+            entry:
+              fields.day !== null &&
+              fields.startTime !== null &&
+              fields.timeZone !== null
+                ? {
+                    day: fields.day,
+                    entry: {
+                      captureId: pair.captureId,
+                      transcriptKey: pair.selectedKey,
+                      startTime: fields.startTime,
+                      timeZone: fields.timeZone,
+                      channel: fields.channel,
+                      correctionHash: pair.correctionHash,
+                    },
+                  }
+                : null,
+            upsert,
+            source,
+            wroteArtifact,
+          };
+      });
+    const attributionOutcomes = yield* Effect.forEach(pairs, resolvePair, {
+      concurrency: 16,
+    });
+    for (const outcome of attributionOutcomes) {
+      if (outcome.source === "cache") attributionsFromCache++;
+      if (outcome.source === "artifact") attributionsFromArtifact++;
+      if (outcome.source === "computed") attributionsComputed++;
+      if (outcome.wroteArtifact) performedAttributions++;
+      if (outcome.upsert !== null) {
+        attributionUpserts.push(outcome.upsert);
         if (attributionUpserts.length >= 200) yield* flushAttributions;
       }
-      if (
-        fields.day !== null &&
-        fields.startTime !== null &&
-        fields.timeZone !== null
-      ) {
-        place(fields.day, {
-          captureId: pair.captureId,
-          transcriptKey: pair.selectedKey,
-          startTime: fields.startTime,
-          timeZone: fields.timeZone,
-          channel: fields.channel,
-          correctionHash: pair.correctionHash,
-        });
-      }
+      if (outcome.entry !== null) place(outcome.entry.day, outcome.entry.entry);
     }
     const attributionDeletes = [...cachedAttributions.keys()].filter(
       (captureId) => !idSet.has(captureId),
