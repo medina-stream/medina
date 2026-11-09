@@ -85,6 +85,44 @@ describe("gps store seam", () => {
     expect((await run(readStaysBasis)).stays).toBe(2)
   })
 
+  test("a listed inbox file with no object behind it is dropped, not wedging", async () => {
+    resetFileHashCacheForTest()
+    const memory = makeMemory(DATA_DIR)
+    // The Nov 9, 2026 wedge: the bucket index listed an inbox file
+    // whose object did not exist (registered during the milestone-3
+    // copy, consumed on disk before the flip). Listings said it was
+    // there; reads said it was not; every batch failed on it. The
+    // wrapper re-injects the phantom into listings until the stage
+    // removes it — the seam's remove is what unregisters it.
+    const phantomName = "2099-01-01T000000000Z-phantom.ndjson"
+    let phantomLive = true
+    const api = {
+      ...memory.api,
+      list: (prefix: string) =>
+        Effect.map(memory.api.list(prefix), (keys) =>
+          phantomLive && prefix.endsWith("gps/inbox")
+            ? [...keys, `${prefix}/${phantomName}`]
+            : keys
+        ),
+      delete: (key: string) =>
+        Effect.tap(memory.api.delete(key), () =>
+          Effect.sync(() => {
+            if (key.endsWith(phantomName)) phantomLive = false
+          })
+        )
+    }
+    const layers = Layer.mergeAll(BunFileSystem.layer, Layer.succeed(ArtifactStore, api))
+    const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
+      Effect.runPromise(effect.pipe(Effect.provide(layers)) as Effect.Effect<A, E, never>)
+
+    await run(gpsInboxWrite([point("2026-03-01T08:00:00.000Z")]))
+    const compacted = await run(gpsCompactSource.ingest)
+    expect(compacted.failures).toEqual([])
+    expect(compacted.discovered).toBe(1)
+    expect(await run(gpsDay("2026-03-01"))).toHaveLength(1)
+    expect(phantomLive).toBe(false)
+  })
+
   test("a backlog larger than one sub-batch drains across chunks", async () => {
     resetFileHashCacheForTest()
     const memory = makeMemory(DATA_DIR)

@@ -203,6 +203,42 @@ export const removeScratch = (scratch: ScratchArtifacts) =>
     yield* fs.remove(scratch.dir, { recursive: true }).pipe(Effect.ignore)
   })
 
+/**
+ * The inbox files that actually exist, healing the listing on the
+ * way. Store listings come from the index; an inbox file consumed
+ * back when consumption deleted from a different store than the
+ * listing reads (the disk era's compactions, whose deletes the
+ * bucket index never saw) leaves a registration with no object
+ * behind it. Such an entry lists but cannot be read — and because
+ * a batch is all-or-nothing, one stale entry wedged compaction
+ * outright (Nov 9, 2026: `gps/inbox/2026-10-28T051944075Z-….ndjson`,
+ * registered during the milestone-3 copy, consumed on disk before
+ * the flip, 404 in the bucket ever since). Existence here is the
+ * object head, not the index, so it tells the truth; dropping the
+ * entry through the seam's remove unregisters it, and the listing
+ * is object-true from then on.
+ */
+export const liveInboxFiles = Effect.gen(function*() {
+  const listed = (yield* Files.listFiles(dataPath(INBOX_PREFIX)))
+    .filter((file) => file.endsWith(".ndjson"))
+  const checked = yield* Effect.forEach(
+    listed,
+    (file) => Effect.map(Files.exists(dataPath(`${INBOX_PREFIX}/${file}`)), (exists) => ({ file, exists })),
+    { concurrency: 16 }
+  )
+  const present = checked.filter(({ exists }) => exists).map(({ file }) => file)
+  const stale = checked.filter(({ exists }) => !exists).map(({ file }) => file)
+  if (stale.length > 0) {
+    yield* Effect.forEach(
+      stale,
+      (file) => Files.remove(dataPath(`${INBOX_PREFIX}/${file}`)),
+      { concurrency: 16, discard: true }
+    ).pipe(Effect.ignore)
+    yield* Effect.log(`gps: dropped ${stale.length} stale inbox registrations (listed, but no object)`)
+  }
+  return present
+})
+
 // --- compaction --------------------------------------------------------------
 
 /**
@@ -342,8 +378,7 @@ const mergeInboxSubBatch = (
 export const gpsCompactSource: Source<FileSystem.FileSystem> = {
   name: "gps-compact",
   ingest: Effect.gen(function*() {
-    const batch = (yield* Files.listFiles(dataPath(INBOX_PREFIX)))
-      .filter((file) => file.endsWith(".ndjson"))
+    const batch = yield* liveInboxFiles
     if (batch.length === 0) {
       return { discovered: 0, ingested: 0, cached: 0, skipped: 0, failures: [] } satisfies SourceReport
     }
@@ -384,8 +419,7 @@ export const gpsDay = (day: string) =>
     // Points still in the inbox are part of the day too — readers should not
     // have to wait for the compaction pass. Partition and inbox are store
     // artifacts; materialize both into scratch for DuckDB.
-    const inboxFiles = (yield* Files.listFiles(dataPath(INBOX_PREFIX)))
-      .filter((file) => file.endsWith(".ndjson"))
+    const inboxFiles = yield* liveInboxFiles
     const keys = [
       gpsPartitionKey(day),
       ...inboxFiles.map((file) => `${INBOX_PREFIX}/${file}`)
