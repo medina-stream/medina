@@ -78,7 +78,7 @@ const program = Effect.gen(function*() {
       ),
       Effect.catchCause((cause) =>
         Effect.sync(() => {
-          failures.push(String(cause).slice(0, 300))
+          failures.push(`${key}: ${String(cause).slice(0, 300)}`)
           if (++done % 500 === 0) console.log(`  ${done}/${files.length}`)
         })
       )
