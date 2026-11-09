@@ -130,15 +130,18 @@ interface DriveFile {
   readonly size?: string;
 }
 
-/** The server's listAll, verbatim query shape (lib/Drive.ts). */
+/** The server's listAll, verbatim query shape (lib/Drive.ts). The
+ * query can be overridden for diagnostics (the parity probe's
+ * `sharedWithMe` cross-check). */
 export const listAllDrive = async (
   accessToken: string,
+  query = "trashed = false",
 ): Promise<ReadonlyArray<DriveFile>> => {
   const items: Array<DriveFile> = [];
   let pageToken: string | undefined;
   do {
     const params = new URLSearchParams({
-      q: "trashed = false",
+      q: query,
       pageSize: "1000",
       fields:
         "nextPageToken,files(id,name,mimeType,modifiedTime,md5Checksum,size,parents)",
@@ -183,7 +186,8 @@ export const summarizeDrive = async (
 export const driveVisibilityProbe = async (
   email: string,
   privateKeyPem: string,
+  query?: string,
 ): Promise<DriveProbeSummary> => {
   const accessToken = await serviceAccountAccessToken(email, privateKeyPem);
-  return summarizeDrive(await listAllDrive(accessToken));
+  return summarizeDrive(await listAllDrive(accessToken, query));
 };

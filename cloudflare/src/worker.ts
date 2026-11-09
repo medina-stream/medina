@@ -1480,7 +1480,13 @@ const serveDriveProbe = (
       );
     }
     const outcome = yield* Effect.promise(() =>
-      driveVisibilityProbe(email.value, key.value),
+      driveVisibilityProbe(
+        email.value,
+        key.value,
+        url.searchParams.get("shared") === "1"
+          ? "sharedWithMe = true and trashed = false"
+          : undefined,
+      ),
     ).pipe(
       Effect.map((summary) => ({ ok: true as const, summary })),
       Effect.catch((cause) =>
