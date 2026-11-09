@@ -766,10 +766,122 @@ HTTP API with the token above.
 7. **`gps-compact` / `gps-stays`** — pure derivations, but the points
    store is Parquet partitions; a Worker-side Parquet writer is a
    design item of its own, so these sit late deliberately.
+   **Done Nov 9, 2026 — live on the Worker.** Two server-side
+   problems had to be fixed first. (a) The points store never went
+   through the artifact-store seam — it read the local disk while
+   the store had moved to the bucket — so `lib/lifelog/Gps.ts`,
+   `Stays.ts`, and `Movement.ts` were routed through the seam
+   (7a24656), and the disk-era state was copied into the bucket
+   with every file hash-verified on read-back: 8,253 files (8,051
+   inbox, 101 points partitions, 100 stays partitions, one basis
+   file). (b) Two wedges had frozen the stage since Oct 28: one
+   all-inbox DuckDB scan outgrew its timeout, and the
+   all-or-nothing merge could never recover (fixed by merging in
+   bounded 500-file sub-batches, b86cc42); and a phantom bucket
+   registration — a file the milestone-3 copy had registered but
+   whose object a disk-era compaction had already consumed —
+   failed every batch that listed it (fixed in b2ab619 by checking
+   each listed file against the object head and dropping
+   registrations with no object; the listing heals on first
+   contact). The backlog drained the same day: 8,202 files
+   consumed with zero failures, and the day the drain started
+   from still serves exactly its pre-drain points (2026-10-20:
+   106). The Worker port (`cloudflare/src/gps.ts`) merges with
+   the same first-wins dedupe on (source, ts, lat, lon) and
+   detects stays with a line-for-line port of the server's
+   detector; partitions stay Parquet, written with hyparquet.
+   Rehearsal, all with medina-dev still authoritative: the stays
+   check matched on all 113 days over the post-drain partitions;
+   a side-by-side merge of a live snapshot (the day's 29-row
+   partition plus 21 inbox files) produced the identical row set
+   from the Worker's merge and from medina-dev's DuckDB merge;
+   medina-dev's DuckDB read the Worker's parquet encoding exactly
+   (values, millisecond timestamps, nulls, raw payloads); and a
+   recorded compaction expectation settled as matched. One
+   representational difference, accepted: device-event points
+   carry microsecond timestamps, which the server's DuckDB path
+   incidentally preserves in its partitions; the Worker stores
+   them at millisecond precision — the fidelity every reader in
+   the system, including the server's own API, actually uses.
+   Flip batch: `GPS_MODE` live + deploy; medina-dev's
+   `MEDINA_SOURCES` dropped `gps-compact` / `gps-stays` (backup
+   `.env.bak-2026-11-09-gps`) + restart. First live pass
+   compacted 10 files into 1 partition and rewrote the stays for
+   all 113 days, no errors; medina-dev's on-demand GPS reads
+   (`gpsDay`, movement) keep working over the Worker-written
+   partitions. One operational note: two compactions running at
+   once (a diagnostic one-shot raced a server pass during the
+   drain) can fail a sub-batch with "inbox file vanished before
+   read" — harmless and self-healing, since merges are idempotent
+   and only the loser retries, but the one-shot is not to be run
+   alongside a pass again. Rollback: `GPS_MODE` back to `shadow`
+   + redeploy + restore the two tokens + restart.
 8. **Resources** (`attribution`, `day-index`, `transcript-search`,
    `movement`) — the §2 incremental-DO redesign; the largest single
    work item (§5). The day-index *snapshot artifacts* the pipeline
    already writes are what the serving pass reads meanwhile.
+   **Day-index + attribution: done Nov 9, 2026 — live on the
+   Worker.** The port (`cloudflare/src/dayindex.ts`) is the §5
+   redesign in miniature. Instead of re-deriving the corpus each
+   pass, a Durable Object notebook holds two incremental caches:
+   per-capture transcript selections, keyed by a size:etag token
+   of the corpus listing so only changed captures are re-read;
+   and per-capture attributions, keyed by the attribution basis
+   (zone, correction hash, start-time-rules digest). A pass lists
+   the corpus once, refreshes only the changed selections,
+   resolves attributions cache → stored artifact → compute, and
+   compares — or, live, writes — the snapshot at the same
+   content-addressed key medina-dev writes
+   (`index/days-v1/<input hash>`), so serving never noticed the
+   handover. Rehearsal: the Worker's computed basis reproduced
+   medina-dev's snapshot key exactly, all 87 days' entry sets
+   compared equal, and all 2,089 attributions resolved from the
+   server's own stored artifacts — none had to be computed; the
+   comparison has repeated every minute since. One documented
+   narrowing: container timing comes only from the cached
+   `media-timing.json` artifact; the server additionally probes
+   the media blob when that cache is absent, and post-move blobs
+   are not on medina-dev's disk, so a capture whose timing was
+   never cached could be attributed a different start than the
+   server would have chosen — if one ever occurs it surfaces as
+   a named mismatch in the check passes, not a silent drift.
+   Flip (1e7f187): `DAYINDEX_MODE` live + deploy. The server
+   half needed no `.env` change: medina-dev's `MEDINA_SOURCES`
+   never carried the `attribution` / `day-index` tokens, so its
+   passes stood the resources down when the gated build deployed
+   (2a62c37), and on-demand materialization still serves direct
+   reads there. Both sides write only-when-absent at identical
+   keys, so the overlap has no double-write hazard. Since the
+   flip the snapshot has stayed current at every new corpus
+   basis (2,899 captures at last check) with the check passes
+   still reporting 87/87. This also closes the star detector's
+   refresh lag noted under step 1 above: it reads this snapshot,
+   which now refreshes as captures land instead of on
+   medina-dev's pass cadence. Rollback: `DAYINDEX_MODE` back to
+   `shadow` + redeploy; add `attribution,day-index` to
+   medina-dev's `.env` + restart if the server must resume
+   writing snapshots.
+   **Transcript-search and movement: design only (Nov 9, 2026) —
+   not built.** Both remain resources on medina-dev. The design
+   follows the day-index pattern: a Durable Object notebook
+   holding an incremental, per-capture index keyed by the same
+   content tokens, refreshed by a Worker pass, with derived
+   artifacts materialized to R2 at content-addressed keys so
+   existing readers keep working. Transcript-search: index each
+   capture's text as it changes (the day-index pass already
+   tracks exactly which captures changed) into a SQLite-backed
+   notebook, sharded by day to bound per-pass work; the serving
+   Worker's `SearchTranscripts` then reads that index instead of
+   answering a typed not-implemented error. Movement: derive the
+   per-day summaries inside the GPS pass, where the day's points
+   partitions are already decoded, reading places and geocode
+   inputs from their artifacts the way `Movement.ts` now does
+   through the seam. Sequencing: movement's inputs are stable
+   now that the GPS stages are live on the Worker; transcript-
+   search is independent and can go first. Neither blocks the
+   remaining steps — medina-dev keeps running both until they
+   move — but together with steps 9–10 they are what stands
+   between here and the write-surface move (steps 11–12).
 9. **`notes` + `journal`** (LLM) — Cloudflare Workflows port of the
    cluster workflows; needs the LLM credential row above.
 10. **Drive sources + `inventory`** — needs the Google credential
