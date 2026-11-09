@@ -809,7 +809,9 @@ HTTP API with the token above.
    compacted 10 files into 1 partition and rewrote the stays for
    all 113 days, no errors; medina-dev's on-demand GPS reads
    (`gpsDay`, movement) keep working over the Worker-written
-   partitions. One operational note: two compactions running at
+   partitions. In steady state the live check passes report the
+   stays basis matching with all 113 days compared equal — now
+   against the Worker's own written stays. One operational note: two compactions running at
    once (a diagnostic one-shot raced a server pass during the
    drain) can fail a sub-batch with "inbox file vanished before
    read" — harmless and self-healing, since merges are idempotent
