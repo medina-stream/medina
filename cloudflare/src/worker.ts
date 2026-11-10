@@ -178,6 +178,10 @@ import {
   refreshReadModelSnapshot,
   type SearchTranscriptsFn,
 } from "./journal.ts";
+import { handleIn } from "./ingest.ts";
+import { handleAdmin } from "./admin.ts";
+import { makeAuthHost, type AuthHost } from "./authhost.ts";
+import type { R2BucketBindingLike } from "./auth/ObjectStore.ts";
 import {
   ApiError,
   TranscriptSearchHit,
@@ -342,6 +346,11 @@ interface Env {
   /** Step 9 (notes + journal): "live" makes the journal pass
    * write the missing notes/journal artifacts through the AI
    * Gateway; else it only compares. */
+  /** Step 12 (auth): the canonical origin the @yielded/auth HTTP
+   * layer is configured for. A plain var (declared in
+   * alchemy.run.ts); absent, the host derives the canonical
+   * https://sco.medina.stream. */
+  readonly AUTH_ORIGIN?: string;
   readonly JOURNAL_MODE?: string;
   /** Step 9: the journal report's model (medina-dev's
    * JOURNAL_LLM_MODEL role; the gateway route's is gpt-5.5). */
@@ -1068,6 +1077,54 @@ const serveCaptureStatus = (
       },
     });
   });
+
+/**
+ * Push ingest (step 11): POST /in, gated by the same device-token
+ * registry as everything else (Bearer or ?token=), plus the Serve
+ * bridge form POST /serve-in/<token> — see ingest.ts for why the
+ * bridge exists and §4.3's retirement note. A bad or missing token
+ * gets the opaque 404, like every other gate here.
+ */
+const serveIn = (
+  env: Env,
+  request: Request,
+  url: URL,
+  pathToken?: string,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    const token = pathToken ?? gateToken(request, url);
+    if (!(yield* isValidToken(env, token))) {
+      return fail(404, "not found");
+    }
+    return yield* handleIn(env.ARTIFACTS, request, url);
+  });
+
+/**
+ * The @yielded/auth host (step 12), memoized per artifacts bucket
+ * (binding identity is stable per isolate): building it assembles
+ * the framework service, its persistence layers, and the HTTP
+ * handler — all isolate-lifetime state the framework expects to be
+ * shared (KDF admission included).
+ */
+const authHosts = new WeakMap<object, AuthHost>();
+const authHostFor = (env: Env): AuthHost => {
+  const existing = authHosts.get(env.ARTIFACTS);
+  if (existing !== undefined) return existing;
+  const origin = env.AUTH_ORIGIN ?? "https://sco.medina.stream";
+  // The real R2 binding satisfies both structural slices (this
+  // file's journal-facing one and the auth store's); the cast is
+  // the seam between the two local typings of the same binding.
+  const host = makeAuthHost(env.ARTIFACTS as unknown as R2BucketBindingLike, {
+    origin,
+    trustedOrigins: [
+      origin,
+      "https://medina.stream",
+      "https://www.medina.stream",
+    ],
+  });
+  authHosts.set(env.ARTIFACTS, host);
+  return host;
+};
 
 /** The device-token gate value from a request (Bearer or ?token=). */
 const gateToken = (request: Request, url: URL): string => {
@@ -2308,29 +2365,62 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
   }
+  if (request.method === "POST" && url.pathname === "/in") {
+    return serveIn(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname.startsWith("/serve-in/")) {
+    return serveIn(
+      env,
+      request,
+      url,
+      decodeURIComponent(url.pathname.slice("/serve-in/".length)),
+    );
+  }
   if (request.method === "GET" && url.pathname.startsWith("/bucket-capture/")) {
     return serveApk(env, url.pathname.slice("/bucket-capture/".length));
   }
-  if (
-    request.method === "GET" &&
-    url.pathname.startsWith("/api/capture-policy/")
-  ) {
-    return servePolicy(
-      env,
-      decodeURIComponent(url.pathname.slice("/api/capture-policy/".length)),
-    );
-  }
-  // Journal serving (migration milestone 4, §4.3 step 1): the read
-  // surface over the same bucket, gated by the same token registry.
-  // handleJournal returns null for paths outside the journal family.
-  return Effect.flatMap(
-    handleJournal(
-      request,
-      env.ARTIFACTS,
-      (token) => isValidToken(env, token),
-      journalSearchFn(env),
-    ),
-    (response) => Effect.succeed(response ?? fail(404, "not found")),
+  // Auth surface (step 12): the @yielded/auth operations + the
+  // sign-in/bootstrap pages. Returns null outside /auth.
+  // Token administration (step 11 write surface): the /devices page
+  // + the registry admin API, session-gated — checked before the
+  // policy route so the literal "tokens" path is not mistaken for
+  // a policy token. Returns null outside its surface.
+  // Journal serving: the read surface over the same bucket, under
+  // the step-12 two-lane gate (see journal.ts): a verified session
+  // for the HTML surface and writes, a capture-policy token for
+  // machine reads. Returns null outside the journal family.
+  const gates = {
+    authorizeToken: (token: string) => isValidToken(env, token),
+    authorizeSession: (req: Request) =>
+      authHostFor(env).sessionActive(req),
+    signInPath: "/auth/sign-in",
+  };
+  return Effect.flatMap(authHostFor(env).handle(request), (authResponse) =>
+    authResponse !== null
+      ? Effect.succeed(authResponse)
+      : Effect.flatMap(
+          handleAdmin(request, env.ARTIFACTS, url, gates),
+          (adminResponse) =>
+            adminResponse !== null
+              ? Effect.succeed(adminResponse)
+              : request.method === "GET" &&
+                  url.pathname.startsWith("/api/capture-policy/")
+                ? servePolicy(
+                    env,
+                    decodeURIComponent(
+                      url.pathname.slice("/api/capture-policy/".length),
+                    ),
+                  )
+                : Effect.map(
+                    handleJournal(
+                      request,
+                      env.ARTIFACTS,
+                      gates,
+                      journalSearchFn(env),
+                    ),
+                    (response) => response ?? fail(404, "not found"),
+                  ),
+        ),
   );
 };
 

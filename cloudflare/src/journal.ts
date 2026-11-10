@@ -1311,6 +1311,7 @@ export type SearchTranscriptsFn = (
 const makeHandlers = (
   bucket: JournalBucket,
   searchTranscripts?: SearchTranscriptsFn,
+  canWrite = false,
 ) =>
   JournalsGroup.toLayer({
     ListDays: ({ limit, offset }) =>
@@ -1360,7 +1361,41 @@ const makeHandlers = (
     ListPlaces: () => loadPlaces(bucket),
     ListPlaceCandidates: () => notMoved("place candidates"),
     SearchAddress: () => notMoved("address search"),
-    SavePlaces: () => notMoved("saving places"),
+    // The write surface (step 11): replace the whole places file —
+    // the server's Movement.replacePlaces, verbatim: the list is
+    // already schema-decoded by the RPC layer (the validation the
+    // server got from the same schema), re-encoded the same way,
+    // and written as JSON, two-space indent, at the canonical key
+    // this Worker's own loadPlaces reads first. Session-gated: the
+    // caller passes canWrite only for a signed-in session — the
+    // machine-token lane reads, it does not write.
+    SavePlaces: ({ places }) =>
+      canWrite
+        ? Effect.gen(function* () {
+            const encoded = yield* Effect.try({
+              try: () => Schema.encodeSync(Places)([...places]),
+              catch: () =>
+                new ApiError({
+                  message: "places list failed validation",
+                }),
+            });
+            yield* Effect.promise(() =>
+              bucket.put("places.json", JSON.stringify(encoded, null, 2), {
+                httpMetadata: { contentType: "application/json" },
+              }),
+            ).pipe(
+              Effect.mapError(
+                () =>
+                  new ApiError({ message: "places could not be saved" }),
+              ),
+            );
+            return { saved: places.length };
+          })
+        : Effect.fail(
+            new ApiError({
+              message: "saving places needs a signed-in session",
+            }),
+          ),
     StreamEvents: () =>
       Stream.fail(
         new ApiError({
@@ -1426,6 +1461,7 @@ const serveRpc = (
   bucket: JournalBucket,
   request: Request,
   searchTranscripts?: SearchTranscriptsFn,
+  canWrite = false,
 ): Effect.Effect<Response> =>
   Effect.promise(async () => {
     const rpcRequest = await normalizeRpcRequest(request);
@@ -1435,7 +1471,9 @@ const serveRpc = (
           const httpEffect = yield* RpcServer.toHttpEffect(
             JournalsGroup,
           ).pipe(
-            Effect.provide(makeHandlers(bucket, searchTranscripts)),
+            Effect.provide(
+              makeHandlers(bucket, searchTranscripts, canWrite),
+            ),
             Effect.provide(RpcSerialization.layerNdjson),
           );
           const res = yield* httpEffect.pipe(
@@ -1528,14 +1566,37 @@ const isJournalPath = (path: string): boolean =>
   path.startsWith("/journal/");
 
 /**
+ * The journal gate's two lanes (step 12 — the gate swap from the
+ * capture-token registry to @yielded/auth sessions):
+ *
+ *  - the HUMAN lane, a verified sign-in session: required for the
+ *    HTML surface (the home page, day pages as HTML, the client
+ *    assets — everything a browser renders) and for writes
+ *    (SavePlaces). An unauthenticated browser GET is sent to the
+ *    sign-in page; the token-in-URL → gate-cookie exchange that used
+ *    to open the UI retired with this swap.
+ *  - the MACHINE lane, a capture-policy device token (Bearer,
+ *    ?token=, or the legacy gate cookie): read-only — the JSON
+ *    shapes the read bridge and CLI consume (day records, the read
+ *    RPCs, /status). Machine credentials never open HTML and never
+ *    write.
+ */
+export interface JournalGates {
+  readonly authorizeToken: (token: string) => Effect.Effect<boolean>;
+  readonly authorizeSession: (
+    request: Request,
+  ) => Effect.Effect<boolean>;
+  readonly signInPath: string;
+}
+
+/**
  * Handle a journal request, or return null when the path belongs to
- * another route family. `authorize` is the Worker's capture-policy
- * token check — the same registry that gates the policy document.
+ * another route family.
  */
 export const handleJournal = (
   request: Request,
   bucket: JournalBucket,
-  authorize: (token: string) => Effect.Effect<boolean>,
+  gates: JournalGates,
   searchTranscripts?: SearchTranscriptsFn,
 ): Effect.Effect<Response | null> =>
   Effect.gen(function* () {
@@ -1551,35 +1612,39 @@ export const handleJournal = (
       ?.replace(/^Bearer\s+/i, "");
     const presented =
       queryToken ?? bearer ?? cookieValue(request, GATE_COOKIE);
-    const authorized =
+    const tokenOk =
       presented !== null &&
       presented !== undefined &&
-      (yield* authorize(presented));
-    if (!authorized) return notFound();
+      (yield* gates.authorizeToken(presented));
+    const sessionOk = yield* gates.authorizeSession(request);
 
-    // A token arriving by URL is exchanged for the gate cookie and
-    // the browser is sent to the clean URL, so the SPA (which knows
-    // nothing of tokens) carries the cookie from then on.
-    if (
-      queryToken !== null &&
-      cookieValue(request, GATE_COOKIE) !== queryToken &&
-      request.method === "GET" &&
-      (path === "/" || path.startsWith("/journal/"))
-    ) {
-      const clean = new URL(url);
-      clean.searchParams.delete("token");
-      return new Response(null, {
-        status: 302,
-        headers: {
-          location: clean.toString(),
-          "set-cookie": `${GATE_COOKIE}=${queryToken}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${GATE_COOKIE_MAX_AGE}`,
-        },
-      });
+    const wantsHtml =
+      path.startsWith("/journal/") &&
+      (request.headers.get("accept") ?? "").includes("text/html");
+    const htmlSurface =
+      path === "/" ||
+      path === "/app.js" ||
+      path === "/inter.woff2" ||
+      path.startsWith("/icons/") ||
+      wantsHtml;
+
+    if (htmlSurface) {
+      if (!sessionOk) {
+        if (request.method !== "GET") return notFound();
+        const target = new URL(gates.signInPath, url);
+        target.searchParams.set("next", url.pathname);
+        return new Response(null, {
+          status: 302,
+          headers: { location: target.toString() },
+        });
+      }
+    } else if (!sessionOk && !tokenOk) {
+      return notFound();
     }
 
     if (path === "/rpc") {
       if (request.method !== "POST") return notFound();
-      return yield* serveRpc(bucket, request, searchTranscripts);
+      return yield* serveRpc(bucket, request, searchTranscripts, sessionOk);
     }
 
     if (request.method !== "GET") return notFound();
@@ -1634,9 +1699,6 @@ export const handleJournal = (
       });
     }
     const model = yield* readModel(bucket);
-    const wantsHtml = (request.headers.get("accept") ?? "").includes(
-      "text/html",
-    );
     const journal = model.journals.get(day) ?? null;
     const served =
       journal !== null && staleDay(model, day)

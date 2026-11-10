@@ -351,6 +351,11 @@ export const Api = Cloudflare.Worker("Api", {
     // folder from an earlier mistaken share.
     DriveShadow: Cloudflare.DurableObject("DriveShadow"),
     DRIVE_MODE: "live",
+    // Step 12 (auth): the canonical origin @yielded/auth is
+    // configured for — the host the session cookie is issued on.
+    // The other two serving domains are trusted origins for the
+    // operations (see src/authhost.ts / worker.ts authHostFor).
+    AUTH_ORIGIN: "https://sco.medina.stream",
     GDRIVE_FOLDER_ID: "1jPV5VAlHuU-9FtGewJZPqDM5ekoKgG5q",
     SOURCE_LATEST: "10",
     EAGER_WINDOW_DAYS: "7",
