@@ -570,7 +570,7 @@ or this plan). Needed, by stage:
 | `media-transcribe` | `ASSEMBLYAI_API_KEY` — created by Scott Nov 2 ✓; bound to the Worker Nov 3 out-of-band against the existing store secret (Alchemy would reconcile-overwrite the stored value if declared; `scripts/reattach-secrets.ts` keeps the binding across deploys) and verified live from the Worker (transcript list, HTTP 200). The stage still needs the shared `ARTIFACTS_S3` keypair to presign chunk URLs — see §4.3 step 6. | `ASSEMBLYAI_API_URL` → `https://api.assemblyai.com` |
 | `media-normalize` | `TRANSLOADIT_API_KEY` only — created by Scott Nov 2 (scoped key "cloudflare": assemblies read+write). `TRANSLOADIT_AUTH_SECRET` NOT needed: the workspace has Signature Authentication "Not required", verified Nov 2 by an unsigned create+status test from medina-dev (assembly completed). The Worker port authenticates key-only. Bound to the Worker Nov 3 the same out-of-band way as AssemblyAI and verified live from the Worker (empty test assembly completed). The stage also needs the `ARTIFACTS_S3` keypair for presigning/minting — still open, see §4.3 step 6. | none (public API today) |
 | `notes` + `journal` (LLM) | the OpenAI provider key, stored in the **AI Gateway** config (Scott sets it once in the dashboard; Worker code never holds it). Decided Nov 2 (Scott): skip the custom Meta Model API integration; route the journal LLM through **Cloudflare AI Gateway** to the same model used today, `gpt-5.5` (Workers AI proper is Cloudflare-hosted open-weight models only — not a proxy — and does not carry it). `META_MODEL_API_KEY` stays hskping's, unused by Medina. As found Nov 9, 2026: the gateway (`default`) is authenticated (gateway token in the Secrets Store as `AI_GATEWAY_TOKEN`, attached out-of-band) and runs on Cloudflare unified billing — Scott topped up its credits Nov 9, 2026, clearing the 402s that had blocked step 9's flip; see step 9. | `JOURNAL_LLM_API_URL` → the AI Gateway's OpenAI-compatible endpoint for the account gateway |
-| Drive sources + `inventory` | DONE Nov 2 (Scott): new dedicated service account `medina-drive-reader@medina-492522.iam.gserviceaccount.com` (no project roles; access via folder sharing); `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` in the Secrets Store. One folder shared so far — at cutover, parity-check what the new account sees (listAll) against what the broker credential sees, and flag any gap. | `GOOGLE_TOKEN_URL` broker replaced by Worker-side token exchange |
+| Drive sources + `inventory` | DONE Nov 2 (Scott): new dedicated service account `medina-drive-reader@medina-492522.iam.gserviceaccount.com` (no project roles; access via folder sharing); `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` in the Secrets Store. Parity confirmed Nov 9, 2026 (Scott shared the two real folders by id; the account's view matches the broker's exactly, plus a harmless same-named twin folder) and the stage flipped live the same day — see §4.3 step 10. | `GOOGLE_TOKEN_URL` broker replaced by Worker-side token exchange |
 | capture-loop ingest (Worker writes) | `INDEX_API_TOKEN` (Medina-internal machine token) | none — `MEDINA_INDEX_URL` is already the public medina-index Worker |
 
 Checked Oct 30: the store today holds only hskping's secrets plus
@@ -1034,25 +1034,67 @@ HTTP API with the token above.
    medina-dev's `.env` + restart. Step 9 is complete: notes
    and journal writing now run on the Worker; medina-dev
    keeps only the Drive sources and the write-in path.
-10. **Drive sources + `inventory`** — needs the Google credential
-    row above. **Parity check done Nov 9, 2026 — a real gap,
-    Scott's action.** The Worker-side probe (`cloudflare/src/drive.ts`,
-    `GET /drive/probe`) exchanges the dedicated service account's
-    Secrets Store credentials for a token (the exchange works —
-    the account and key are valid) and runs the server's own
-    listAll query. The service account sees **nothing**: 0 files
-    under both the plain query and `sharedWithMe = true`. The
-    broker credential's live listAll, run the same day, sees 462
-    items — 460 files in 2 folders ("AudioRec Recordings",
-    "Easy Voice Recorder"), 126,489,758,473 bytes, id-set hash
-    fc65031e… — identical to the stored inventory's hash, so the
-    broker's view has not changed since Oct 28. Whatever folder
-    was shared on Nov 2 is not shared to
-    medina-drive-reader@medina-492522.iam.gserviceaccount.com
-    today. The Drive sources port does not proceed until the two
-    folders (at minimum the `GDRIVE_FOLDER_ID` audio folder) are
-    shared to that address; the probe re-runs in seconds to
-    confirm parity when they are.
+10. **Drive sources + `inventory`** — **DONE and flipped live
+    Nov 9, 2026** (commits ac7a76b + this note). The sharing gap
+    recorded earlier that day closed the same evening: Scott
+    shared the two real folders to the service account — after a
+    first share turned out to be a same-named twin "AudioRec
+    Recordings" folder (23 files, ~61 GB, from an earlier
+    mistaken share; harmless, still visible, unsharing is
+    Scott's optional cleanup). The account's view then reconciled
+    exactly with the broker credential's — 460 files in the 2
+    real folders, 126,489,758,473 bytes, id-set hash fc65031e… —
+    the excess over the broker view being exactly the twin, to
+    the byte. **The port** (`cloudflare/src/drive.ts`, one-for-one
+    from `lib/capture/Audio.ts`, `lib/capture/DriveAllow.ts`,
+    `lib/Drive.ts`): the broker exchange is replaced by the
+    service account's own token exchange (the probe's, proven
+    Nov 9); `audio-drive` lists `GDRIVE_FOLDER_ID` — set as a
+    plain Alchemy variable to the "Easy Voice Recorder" folder
+    id, targeted **by id, never by name** (the twin is why) —
+    newest `SOURCE_LATEST`=10 first, and ingests each unreceipted
+    audio file by streaming it twice (a SHA-256 pass — the hash
+    IS the capture id — then a multipart R2 upload), landing
+    blob + provenance + receipt at the server's exact keys;
+    `drive-allow` runs the allowlist import state machine
+    (Transloadit pulls the file straight from Drive with a
+    scoped bearer URL) at the server's job-receipt keys, reusing
+    the normalize stage's vendor, temp-credential minting, chunk
+    firing, and settling — a file whose chunk listing comes back
+    empty fails the same way it fails on the server (the known
+    long-file poison case; nothing new is exposed: every
+    allowlisted file is long done); `inventory` re-crawls
+    everything the credential sees hourly (a notebook marker,
+    the server's cadence) and rewrites `inventory/drive/latest.json`
+    only when the crawl changes. Notebook: `DriveShadow` DO;
+    mode `DRIVE_MODE`; routes `GET /drive/status`,
+    `POST /drive/run` (`?inventory=1`, `?bytecheck=<id|smallest>`)
+    beside the probe, device-token gated. **Rehearsal (shadow,
+    server still authoritative)**: ground truth taken from
+    medina-dev with the server's own broker credential — the
+    Worker's discovery set equaled the server's exactly (the
+    same 10 audio ids in the same order, all 10 already
+    receipted; the allowlist's 16 files all visible and all 16
+    already done, none missing); the byte check downloaded the
+    smallest receipted recording (4,550,921 bytes) through the
+    service account and its SHA-256 matched the capture id the
+    server stored it under (`27f9e014…`); the inventory crawl
+    reproduced the service account's known view (483 files,
+    187,631,591,165 bytes — the broker's 460 plus the twin,
+    hash ee86ed90…). **Flip**: `DRIVE_MODE` → `"live"` +
+    redeploy; medina-dev's `MEDINA_SOURCES` dropped
+    `audio` / `allow` / `inventory` (now `notes,bucket`; backup
+    `.env.bak-2026-11-09-drive`) + restart. The first live pass
+    reported everything already done — no file was ingested
+    twice — and rewrote the inventory; verified by direct bucket
+    read: `inventory/drive/latest.json` now holds the Worker's
+    crawl (483 files / 3 folders, id-set hash ee86ed90…), the
+    named delta from the broker-era inventory being exactly the
+    twin folder, which the crawl will keep including until it
+    is unshared. 11 new tests (suite 139/139). Rollback: set
+    `DRIVE_MODE` to `"shadow"` and redeploy; restore the three
+    `MEDINA_SOURCES` tokens on medina-dev from the backup +
+    restart.
 11. **`POST /in`** — moves with the Access milestone (service tokens
     replace the tailnet-identity trust, per the addendum).
 12. **Write surface** (`SavePlaces`, `/devices`, token admin) — stays

@@ -350,7 +350,7 @@ export const Api = Cloudflare.Worker("Api", {
     // account also sees a same-named twin "AudioRec Recordings"
     // folder from an earlier mistaken share.
     DriveShadow: Cloudflare.DurableObject("DriveShadow"),
-    DRIVE_MODE: "shadow",
+    DRIVE_MODE: "live",
     GDRIVE_FOLDER_ID: "1jPV5VAlHuU-9FtGewJZPqDM5ekoKgG5q",
     SOURCE_LATEST: "10",
     EAGER_WINDOW_DAYS: "7",
