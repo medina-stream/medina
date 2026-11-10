@@ -379,6 +379,11 @@ export class JournalReport extends Schema.Class<JournalReport>(
    * errored; a claim-blocked dependency defers silently, per the
    * attempt-window semantics. */
   journalsDeferred: Schema.Number,
+  /** The days whose current-key notes/journal artifacts are
+   * absent (capped) — the rehearsal's named residue, so a
+   * would-write is a day someone can look at, not just a count. */
+  notesWouldWriteDays: Schema.Array(Schema.String),
+  journalsWouldWriteDays: Schema.Array(Schema.String),
   mismatches: Schema.Array(
     Schema.Struct({ day: Schema.String, detail: Schema.String }),
   ),
@@ -781,6 +786,8 @@ interface JournalTallies {
   readonly journalsWouldWrite: number;
   readonly journalsWritten: number;
   readonly journalsDeferred: number;
+  readonly notesWouldWriteDays: ReadonlyArray<string>;
+  readonly journalsWouldWriteDays: ReadonlyArray<string>;
   readonly mismatches: JournalReport["mismatches"];
   readonly proof: JournalReport["proof"];
 }
@@ -899,6 +906,8 @@ export const runJournalPass = (
         journalsWouldWrite: 0,
         journalsWritten: 0,
         journalsDeferred: 0,
+        notesWouldWriteDays: [],
+        journalsWouldWriteDays: [],
         mismatches,
         proof: null,
       });
@@ -1568,6 +1577,10 @@ export const runJournalPass = (
       journalsWouldWrite,
       journalsWritten,
       journalsDeferred,
+      notesWouldWriteDays: notesMissing.map((plan) => plan.day).slice(0, 20),
+      journalsWouldWriteDays: journalsMissing
+        .map((plan) => plan.day)
+        .slice(0, 20),
       mismatches: mismatches.slice(0, 20),
       proof,
     });

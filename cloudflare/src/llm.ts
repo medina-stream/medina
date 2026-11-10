@@ -130,19 +130,33 @@ const finalText = (
 };
 
 /** A gateway error body's human-readable message, when it carries
- * one (OpenAI-shaped `error.message`, or the gateway's own). Never
- * includes request material, so it is safe to surface in reports. */
+ * one (OpenAI-shaped `error.message`, the gateway's
+ * `errors[].message`, or a top-level `message`). Gateway error
+ * bodies carry no request material, so this is safe to surface in
+ * reports. */
 const errorDetail = (body: unknown, status: number): string => {
   if (typeof body === "object" && body !== null) {
-    const error = (body as Record<string, unknown>)["error"];
+    const record = body as Record<string, unknown>;
+    const error = record["error"];
     if (typeof error === "object" && error !== null) {
       const message = (error as Record<string, unknown>)["message"];
       if (typeof message === "string" && message.length > 0) {
-        return message.slice(0, 200);
+        return message.slice(0, 300);
       }
     }
     if (typeof error === "string" && error.length > 0) {
-      return error.slice(0, 200);
+      return error.slice(0, 300);
+    }
+    const errors = record["errors"];
+    if (Array.isArray(errors) && errors.length > 0) {
+      const first = errors[0] as Record<string, unknown>;
+      const message = first?.["message"];
+      if (typeof message === "string" && message.length > 0) {
+        return message.slice(0, 300);
+      }
+    }
+    if (typeof record["message"] === "string" && record["message"].length > 0) {
+      return (record["message"] as string).slice(0, 300);
     }
   }
   return `gateway answered ${status}`;
