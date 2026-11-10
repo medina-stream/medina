@@ -1095,15 +1095,108 @@ HTTP API with the token above.
     `DRIVE_MODE` to `"shadow"` and redeploy; restore the three
     `MEDINA_SOURCES` tokens on medina-dev from the backup +
     restart.
-11. **`POST /in`** — moves with the Access milestone (service tokens
-    replace the tailnet-identity trust, per the addendum).
-12. **Write surface** (`SavePlaces`, `/devices`, token admin) — stays
-    on medina-dev until Access; the MCP bridge and CLI repoint at
-    the read cutover (phase 5) without it.
+11. **`POST /in` — DONE Nov 9–10, 2026.** The server's ingest
+    endpoint is ported (`cloudflare/src/ingest.ts`, mounted ahead of
+    the journal gate): bearer-token or `?token=` capture-policy auth
+    (the addendum's service-token analogue — the same registry the
+    rest of the token surface uses). Bodies are sniffed the way the
+    server sniffs them: GPSLogger form posts, Overland and OwnTracks
+    JSON, and flat lat/lon JSON become one NDJSON object in
+    `gps/inbox/` (content-hash named, byte-identical to the server's
+    write); everything else becomes a capture blob under
+    `capture/<sha256>/` with the server's provenance record. A second
+    mount, `POST /serve-in/:token`, takes the token in the path for
+    the Tailscale Serve bridge (see Retirement). Verified live Nov 10
+    against the real request shapes: GPSLogger form, Overland JSON,
+    blob post (capture id and provenance matched the server's record
+    shape), bad/absent token 404, empty body 400, and a token-gated
+    `/gps/run` consumed exactly the files written. The Android
+    capture client does not use /in (it uploads to the capture
+    bucket and fetches its policy from Worker paths that moved in
+    earlier steps) — GPSLogger is the /in client.
+12. **Write surface — DONE Nov 9–10, 2026.** `/devices` and the
+    capture-policy token admin (`GET/POST
+    /api/capture-policy/tokens`, `POST .../:id/revoke`) are ported
+    (`cloudflare/src/admin.ts`) against the same registry object and
+    response shapes as the server's, now gated by the auth session
+    (below). SavePlaces and ListPlaces run on the Worker's RPC
+    surface (session-only for saves). ListPlaceCandidates and
+    SearchAddress were not ported — two RPCs in the server's table
+    with no Worker counterpart. Verified live in the auth rehearsal:
+    token list/issue/revoke through the session-gated admin, a
+    policy fetch with a Worker-issued token, and SavePlaces/
+    ListPlaces round-trips against the real `places.json` (restored
+    byte-for-byte after).
+
+Auth (supersedes the Oct 27 Access addendum for the browser
+surfaces): the Oct 31 direction — yielded.dev's `@yielded/auth`
+with bucket-backed password/session persistence and the native
+`node:crypto` scrypt hasher (stage-2 increment 1) — was brought
+into main and wired into the Worker (`cloudflare/src/authhost.ts`).
+The journal UI gate now requires a session (`__Host-effect-auth-
+session` cookie); unauthenticated browser reads redirect to
+`/auth/sign-in`, non-browser reads answer 404, and the non-HTML
+machine paths keep accepting capture-policy tokens as before. The
+bootstrap route (`/auth/bootstrap`) is open only while zero
+accounts exist in the bucket and closes permanently at the first
+account; the first account is Scott's, created by him. Password
+reset stays ineligible until an identifier-verification flow
+exists; passkeys are a later increment. One real defect was found
+and fixed during wiring (commit 53c369d): the framework runs
+credential verification deliberately outside any commit scope, and
+the mutating persistence ports then failed closed for lack of one
+— the ports now root their own commit when none is ambient. The
+full HTTP loop (bootstrap, wrong password, sign-in, session check)
+is covered by `cloudflare/src/authhost.test.ts`, and the live
+rehearsal passed end to end on Nov 10 before the rehearsal account
+was wiped back to the zero-account state.
 
 Retirement (§3 phase 6) is last and conditional: medina-dev stops
 only when every row above is verified on Cloudflare. Until then it
 is the fallback and keeps running.
+
+## Retirement — DONE Nov 10, 2026
+
+The medina-dev Medina server was stopped and disabled on Nov 10,
+2026 (`systemctl stop` + `disable` at 06:27 UTC; the unit's
+`Restart=on-failure` left it in the failed state — port 8000
+refuses connections and no server process remains). Every stage,
+the site, and the read surfaces run on the medina-api Worker alone;
+the first cron cycle after the stop (06:29–06:30 UTC) and a manual
+cycle (capture, GPS — 28 inbox files consumed, day-index, journal)
+all completed live with the server down, and the MCP bridge reads
+journals from the Worker.
+
+**The GPSLogger bridge.** GPSLogger posts to the server's tailnet
+hostname (`https://medina-dev.warthog-yo.ts.net/in`). That path is
+kept: Tailscale Serve still terminates `/in` on the box, but its
+target is now a small local forwarder (`medina-in-bridge.service`,
+bun, 127.0.0.1:8020, enabled) that posts each request to the
+Worker's `/serve-in/<token>` mount with a dedicated capture-policy
+token (label `gpslogger-serve-bridge`, id
+`pBHshBYrE-qm5ILTMqT8JuXV`; the value lives only in the service's
+env file on the box). Serve could not proxy to the Worker directly:
+tailscaled's own HTTPS fetches to Cloudflare-fronted hosts are
+bot-filtered (403) and the zone is on the Free plan, which cannot
+except Bot Fight Mode — the forwarder's runtime fetches are not
+filtered. Serve's `/` mount still points at 127.0.0.1:8000 so a
+server restart picks the tailnet root back up unchanged. The
+bridge is retireable whenever GPSLogger is repointed directly at
+`https://sco.medina.stream/in` with a token header.
+
+**What remains on the box.** Only the bridge service above; the
+box, its other workloads (Graze's `garage.service`, Immich), the
+medina checkout, and its `.env` are untouched, per the Oct 29 scope
+rule. Two server sources were never ported and are now dormant:
+`notes-git` (a local checkout of the internal notes repo, fully
+ingested, no new content since Sep 12, 2026) and `bucket-audio`
+(zero discoveries in the final passes). Both revive as-is if the
+server restarts.
+
+**Rollback.** `sudo systemctl enable --now medina-dev` on the box;
+the server resumes against the same bucket (its `MEDINA_SOURCES`
+is `notes,bucket`; the stage mode vars on the Worker are the other
+half of any stage-level rollback, as recorded per step above).
 
 ### Serving design (step 1, this pass)
 
