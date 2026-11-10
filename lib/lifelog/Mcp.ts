@@ -6,6 +6,9 @@ export type LifelogFetch = (input: URL, init?: RequestInit) => Promise<Response>
 export interface LifelogMcpClientOptions {
   /** Medina's HTTP origin; defaults to the local server. */
   readonly baseUrl?: string
+  /** Capture-policy token for the Worker deployment's gated read
+   * lanes; sent as a Bearer credential. Defaults to LIFELOG_TOKEN. */
+  readonly token?: string
   /** Civil-day zone used to decide which 30 days are recent. */
   readonly timeZone?: string
   readonly fetch?: LifelogFetch
@@ -116,6 +119,10 @@ export const makeLifelogMcpClient = (options: LifelogMcpClientOptions = {}) => {
   validateTimeZone(timeZone)
   const request = options.fetch ?? fetch
   const now = options.now ?? (() => new Date())
+  const token = options.token ?? process.env.LIFELOG_TOKEN
+  const authHeaders: Record<string, string> = token
+    ? { authorization: `Bearer ${token}` }
+    : {}
 
   const get = async (day: string): Promise<Response> => {
     const parsed = parseDayId(day)
@@ -123,7 +130,7 @@ export const makeLifelogMcpClient = (options: LifelogMcpClientOptions = {}) => {
     const url = new URL(`/journal/${dayId(parsed)}`, origin)
     let response: Response
     try {
-      response = await request(url)
+      response = await request(url, { headers: authHeaders })
     } catch (error) {
       throw new Error(`could not reach lifelog at ${origin.origin}: ${String(error)}`)
     }
@@ -162,7 +169,7 @@ export const makeLifelogMcpClient = (options: LifelogMcpClientOptions = {}) => {
       const url = new URL(`/stars/${dayId(parsed)}`, origin)
       let response: Response
       try {
-        response = await request(url)
+        response = await request(url, { headers: authHeaders })
       } catch (error) {
         throw new Error(`could not reach lifelog at ${origin.origin}: ${String(error)}`)
       }
@@ -201,7 +208,7 @@ export const makeLifelogMcpClient = (options: LifelogMcpClientOptions = {}) => {
       try {
         response = await request(url, {
           method: "POST",
-          headers: { "content-type": "application/ndjson", accept: "application/ndjson" },
+          headers: { "content-type": "application/ndjson", accept: "application/ndjson", ...authHeaders },
           body: `${requestLine}\n`
         })
       } catch (error) {
