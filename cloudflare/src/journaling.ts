@@ -313,8 +313,59 @@ export const hasJournalInputs = (
   hasNote: boolean,
 ): boolean => entryCount > 0 || hasMovement || hasNote;
 
+/** Whether a stored journal counts as present. A journal whose
+ * report is empty is a derivation that produced nothing — Nov 8,
+ * 2026 was written that way repeatedly during the step-9 handover,
+ * while its inputs were not yet visible to the deriving pass —
+ * and counting it as present is exactly what left the day stuck:
+ * every later pass saw a well-formed artifact at the current key
+ * and moved on. Presence requires report text. */
+export const journalIsPresent = (stored: Journal | null): boolean =>
+  stored !== null && stored.report.trim().length > 0;
+
 const keyStem = (key: string): string =>
   key.split("/").at(-1)!.replace(/\.json$/, "");
+
+// ---------------------------------------------------------------------------
+// The current-journal map: serving's staleness oracle, published by
+// every full pass as one small bucket artifact (read by
+// src/journal.ts).
+//
+// While the server lived, its Views owned this knowledge — which
+// days' current-input journal is on disk — and persisted it in the
+// day rows (views/days-v6.json). That file froze when the server
+// retired, leaving the Worker answering 202 for days whose journals
+// were in fact current (Nov 9–10, 2026). This pass is the one place
+// that computes every day's current key and checks what is stored
+// at it, so the pass publishes the answer: per planned day, the
+// current input hash and whether a journal is present at that key
+// (found by this pass's checks, or written by this pass).
+// Day-scoped manual passes skip the write — a one-day view must
+// not shrink the map.
+// ---------------------------------------------------------------------------
+
+export const JOURNAL_CURRENT_KEY = "views/journal-current-v1.json";
+
+export interface JournalCurrentEntry {
+  readonly inputHash: string;
+  readonly present: boolean;
+}
+
+/** The published map's JSON: one entry per planned day. */
+export const journalCurrentJson = (
+  entries: ReadonlyArray<{
+    readonly day: string;
+    readonly inputHash: string;
+    readonly present: boolean;
+  }>,
+  builtAt: string,
+): string => {
+  const days: Record<string, JournalCurrentEntry> = {};
+  for (const entry of entries) {
+    days[entry.day] = { inputHash: entry.inputHash, present: entry.present };
+  }
+  return `${JSON.stringify({ version: 1, builtAt, days }, null, 2)}\n`;
+};
 
 const nextDayOf = (day: string): string => {
   const [year, month, date] = day.split("-").map(Number) as [
@@ -418,6 +469,13 @@ export interface JournalPassOptions {
   readonly eagerWindowDays: number | null;
   /** One day to check regardless of the window (manual rehearsal). */
   readonly day?: string;
+  /** Days this pass must retry even when an earlier pass in the
+   * same attempt window already claimed them (manual backfill):
+   * their claims are cleared before materialization, and the days
+   * join the plan set when the window would otherwise skip them.
+   * Forcing never re-derives a usable journal — it unblocks the
+   * retry of one that is missing, stale, or empty-reported. */
+  readonly forceDays?: ReadonlyArray<string>;
   /** Enumerate every day, not just the eager window + catch-up
    * (manual rehearsal). */
   readonly all?: boolean;
@@ -1086,6 +1144,7 @@ export const runJournalPass = (
       });
 
     // Enumeration: the server's day set and windows.
+    const forcedDays = new Set(options.forceDays ?? []);
     const allDays = [
       ...new Set([
         ...Object.keys(index.days),
@@ -1140,6 +1199,24 @@ export const runJournalPass = (
         ...eagerPlans.reverse(),
         ...catchupPlans.reverse(),
       ];
+      // Forced days join the plan set even when neither window
+      // reaches them (an old day whose journal object exists but
+      // is unusable is in neither the eager window nor catch-up,
+      // which keys off absence alone).
+      const plannedDays = new Set(plans.map((plan) => plan.day));
+      for (const day of forcedDays) {
+        if (plannedDays.has(day)) continue;
+        const plan = yield* planFor(day);
+        if (
+          hasJournalInputs(
+            plan.entries.length,
+            plan.movementHash !== null,
+            plan.noteHash !== null,
+          )
+        ) {
+          plans.unshift(plan);
+        }
+      }
     }
 
     /** Transcripts for one day's entries, in index order; entries
@@ -1161,6 +1238,7 @@ export const runJournalPass = (
       });
 
     // ---- Checks (both modes): presence + grounding at the keys.
+    const presentJournalKeys = new Set<string>();
     let notesChecked = 0;
     let notesPresent = 0;
     let notesWouldWrite = 0;
@@ -1196,7 +1274,6 @@ export const runJournalPass = (
         }
         journalsChecked++;
         if (yield* data.exists(plan.journalKey)) {
-          journalsPresent++;
           const stored = yield* decodeStored(
             Journal,
             yield* data.readText(plan.journalKey),
@@ -1217,6 +1294,20 @@ export const runJournalPass = (
               detail:
                 "stored journal grounding differs (day/inputHash/transcriptKeys)",
             });
+          } else if (!journalIsPresent(stored)) {
+            // Present on disk but not a journal: an empty report
+            // (see journalIsPresent). Count the day missing so a
+            // live pass re-derives it, and say why in mismatches.
+            journalsWouldWrite++;
+            journalsMissing.push(plan);
+            mismatches.push({
+              day: plan.day,
+              detail:
+                "stored journal has an empty report; treated as missing",
+            });
+          } else {
+            journalsPresent++;
+            presentJournalKeys.add(plan.journalKey);
           }
         } else {
           journalsWouldWrite++;
@@ -1235,6 +1326,7 @@ export const runJournalPass = (
     let notesWritten = 0;
     let journalsWritten = 0;
     let journalsDeferred = 0;
+    const writtenJournalKeys = new Set<string>();
 
     /** Derive a day's notes and write them at the plan's key —
      * the server's NotesWorkflow body. */
@@ -1354,6 +1446,24 @@ export const runJournalPass = (
       ArtifactReadError | IndexRequestError | GatewayError | Error
     > =>
       Effect.gen(function* () {
+        // Publish-if-newer: a usable journal already at the current
+        // key is never overwritten by a re-derivation. The checks
+        // ran earlier in the pass; a concurrent pass may have
+        // produced the day's journal since (or the checks saw the
+        // empty artifact this write would only replace with an
+        // equal-risk derivation).
+        const existing = yield* decodeStored(
+          Journal,
+          yield* data.readText(plan.journalKey),
+        );
+        if (
+          existing !== null &&
+          existing.day === plan.day &&
+          existing.inputHash === keyStem(plan.journalKey) &&
+          journalIsPresent(existing)
+        ) {
+          return;
+        }
         const evidence = yield* assembleEvidence(plan, null);
         const report = evidence
           ? yield* complete(
@@ -1363,6 +1473,17 @@ export const runJournalPass = (
               journalModel,
             )
           : "";
+        if (report.trim().length === 0) {
+          // Never write an empty journal: it decodes as a settled
+          // day and strands the day (Nov 8, 2026). Fail the
+          // attempt instead — the claim defers the retry to the
+          // next window, and the error shows in the pass report.
+          return yield* Effect.fail(
+            new Error(
+              `journal derivation for ${plan.day} produced an empty report; nothing written`,
+            ),
+          );
+        }
         yield* data.writeText(
           plan.journalKey,
           `${JSON.stringify(
@@ -1385,6 +1506,15 @@ export const runJournalPass = (
     if (options.perform) {
       const maxMaterialize = options.maxMaterialize ?? 4;
       const claims = new Map(yield* notebook.claims);
+      // A forced day's earlier claims in this window are cleared:
+      // the backfill exists to retry a day an earlier pass already
+      // attempted (and, for an empty report, "succeeded" at)
+      // without waiting for the window to turn. The notebook's
+      // persisted claims are replaced when this pass re-claims.
+      for (const day of forcedDays) {
+        claims.delete(`${day}|notes`);
+        claims.delete(`${day}|journal`);
+      }
       const window = options.now.toISOString().slice(0, 13);
       const materializedDays = new Set<string>();
       const claimBlocked = (plan: DayPlan, kind: "notes" | "journal", key: string) => {
@@ -1402,6 +1532,7 @@ export const runJournalPass = (
           yield* notebook.setClaim(value);
         });
       const boundReached = (day: string) =>
+        !forcedDays.has(day) &&
         !materializedDays.has(day) &&
         materializedDays.size >= maxMaterialize;
 
@@ -1468,6 +1599,7 @@ export const runJournalPass = (
         const outcome = yield* attempt(materializeJournal(plan));
         if (outcome.ok) {
           journalsWritten++;
+          writtenJournalKeys.add(plan.journalKey);
           materializedDays.add(plan.day);
         } else {
           errors.push({
@@ -1560,6 +1692,58 @@ export const runJournalPass = (
       } else {
         errors.push({
           item: `proof ${proofDay}`,
+          detail: detail(outcome.cause),
+        });
+      }
+    }
+
+    // Publish the current-journal map (see JOURNAL_CURRENT_KEY):
+    // serving's staleness oracle, refreshed by every full pass. A
+    // failed write is reported, never fatal — the next pass retries
+    // and serving falls back to the last published map meanwhile.
+    if (options.day === undefined) {
+      const outcome = yield* attempt(
+        Effect.gen(function* () {
+          // Publish-if-newer: a slower pass finishing after a
+          // fresher one must not rewind the map to its older view.
+          const existingText = yield* data.readText(JOURNAL_CURRENT_KEY);
+          if (existingText !== null) {
+            let existingBuiltAt: string | null = null;
+            try {
+              const parsed = JSON.parse(existingText) as {
+                builtAt?: unknown;
+              };
+              if (typeof parsed.builtAt === "string") {
+                existingBuiltAt = parsed.builtAt;
+              }
+            } catch {
+              existingBuiltAt = null;
+            }
+            if (
+              existingBuiltAt !== null &&
+              existingBuiltAt >= options.now.toISOString()
+            ) {
+              return;
+            }
+          }
+          yield* data.writeText(
+            JOURNAL_CURRENT_KEY,
+            journalCurrentJson(
+              plans.map((plan) => ({
+                day: plan.day,
+                inputHash: keyStem(plan.journalKey),
+                present:
+                  presentJournalKeys.has(plan.journalKey) ||
+                  writtenJournalKeys.has(plan.journalKey),
+              })),
+              options.now.toISOString(),
+            ),
+          );
+        }),
+      );
+      if (!outcome.ok) {
+        errors.push({
+          item: "journal-current",
           detail: detail(outcome.cause),
         });
       }

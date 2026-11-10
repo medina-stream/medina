@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   DayEntry,
+  Journal,
   Transcript,
   Utterance,
 } from "../../lib/lifelog/Resources.ts";
@@ -19,7 +20,9 @@ import type { MovementShape } from "./movement.ts";
 import {
   batches,
   hasJournalInputs,
+  journalCurrentJson,
   journalInputHash,
+  journalIsPresent,
   notesInputHash,
   recordingSpan,
   renderMovementTimeline,
@@ -232,6 +235,71 @@ describe("renderMovementTimeline", () => {
     };
     expect(renderMovementTimeline(movement)).toBe(
       "09:00-10:00 stay at Home (60 min)\n10:00-10:20 walk 1.5 km\n10:20-11:00 gap in GPS evidence",
+    );
+  });
+});
+
+describe("journalCurrentJson", () => {
+  test("publishes one entry per day with its hash and presence", () => {
+    const parsed = JSON.parse(
+      journalCurrentJson(
+        [
+          { day: "2026-11-09", inputHash: "abc123", present: true },
+          { day: "2026-11-08", inputHash: "def456", present: false },
+        ],
+        "2026-11-10T17:00:00.000Z",
+      ),
+    ) as {
+      version: number;
+      builtAt: string;
+      days: Record<string, { inputHash: string; present: boolean }>;
+    };
+    expect(parsed.version).toBe(1);
+    expect(parsed.builtAt).toBe("2026-11-10T17:00:00.000Z");
+    expect(parsed.days["2026-11-09"]).toEqual({
+      inputHash: "abc123",
+      present: true,
+    });
+    expect(parsed.days["2026-11-08"]).toEqual({
+      inputHash: "def456",
+      present: false,
+    });
+    expect(Object.keys(parsed.days)).toHaveLength(2);
+  });
+
+  test("an empty pass publishes an empty map, not an absent file", () => {
+    const parsed = JSON.parse(
+      journalCurrentJson([], "2026-11-10T17:00:00.000Z"),
+    ) as { days: Record<string, unknown> };
+    expect(parsed.days).toEqual({});
+  });
+});
+
+describe("journalIsPresent", () => {
+  const journal = (report: string): Journal =>
+    new Journal({
+      version: "journal-v12",
+      day: "2026-11-08",
+      inputHash: "abc123",
+      transcriptKeys: [],
+      model: "gpt-5.5",
+      generatedAt: "2026-11-09T00:00:00.000Z",
+      status: "completed",
+      report,
+    });
+
+  test("no stored journal is absent", () => {
+    expect(journalIsPresent(null)).toBe(false);
+  });
+
+  test("an empty report is not a journal (the Nov 8 poison)", () => {
+    expect(journalIsPresent(journal(""))).toBe(false);
+    expect(journalIsPresent(journal("  \n\n  "))).toBe(false);
+  });
+
+  test("a journal with report text is present", () => {
+    expect(journalIsPresent(journal("A day.\n\n## 09:00 — Home\nThings."))).toBe(
+      true,
     );
   });
 });

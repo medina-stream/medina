@@ -1603,7 +1603,10 @@ const serveMovementStatus = (
  * regardless of the window; `?all=1` enumerates every day;
  * `?proof=YYYY-MM-DD` additionally derives that day end-to-end
  * in memory (real LLM cost, nothing written) and reports the
- * derived structure beside the stored one.
+ * derived structure beside the stored one. `?force=YYYY-MM-DD`
+ * (comma-separated for several) clears those days' attempt-window
+ * claims so a missing, stale, or empty-reported journal is
+ * retried in this pass rather than deferred to the next window.
  */
 const serveJournalRun = (
   env: Env,
@@ -1616,6 +1619,9 @@ const serveJournalRun = (
     }
     const dayParam = url.searchParams.get("day");
     const proofParam = url.searchParams.get("proof");
+    const forceDays = (url.searchParams.get("force") ?? "")
+      .split(",")
+      .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day));
     const outcome = yield* runJournalPass({
       mode: "manual",
       now: new Date(),
@@ -1626,6 +1632,7 @@ const serveJournalRun = (
       ...(dayParam !== null && /^\d{4}-\d{2}-\d{2}$/.test(dayParam)
         ? { day: dayParam }
         : {}),
+      ...(forceDays.length > 0 ? { forceDays } : {}),
       ...(url.searchParams.get("all") === "1" ? { all: true } : {}),
       ...(proofParam !== null && /^\d{4}-\d{2}-\d{2}$/.test(proofParam)
         ? { proofDay: proofParam }
@@ -2394,6 +2401,7 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
     authorizeSession: (req: Request) =>
       authHostFor(env).sessionActive(req),
     signInPath: "/auth/sign-in",
+    homeZone: env.HOME_TZ ?? "UTC",
   };
   return Effect.flatMap(authHostFor(env).handle(request), (authResponse) =>
     authResponse !== null

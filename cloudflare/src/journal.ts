@@ -17,15 +17,26 @@
  *   GET  /status         pipeline status composed from the loops' run
  *                        reports, the journal listing, and the day
  *                        index — the HTTP twin of the GetStatus RPC
+ *   GET  /stars/:day     the authored stars overlapping one civil
+ *   GET  /star/:id       day / one authored star — the read bridge's
+ *                        star surface, served from the authored
+ *                        records as the server's handlers served it
  *   POST /rpc            the read RPCs the SPA needs (ListDays,
  *                        ListJournals, GetJournal, GetDayTranscripts,
  *                        GetStatus, ListPlaces) over the repo's own
  *                        JournalsGroup schemas; the rest answer a
  *                        typed ApiError until their stage moves
  *
- * The corpus is never re-derived here. The days list is the server's
- * own persisted snapshot (views/days-v6.json — the exact payload its
- * ListDays serves); transcripts for a day come from the newest
+ * The corpus is never re-derived here. The days list starts from the
+ * server's own persisted snapshot (views/days-v6.json — the exact
+ * payload its ListDays served), which froze when the server retired:
+ * freshness no longer comes from it. Staleness is read from the
+ * journal pass's current-journal map (views/journal-current-v1.json,
+ * published by src/journaling.ts on every pass), the journal a day
+ * serves is the one at its current key when the map says it is
+ * present, and days the frozen snapshot never knew are synthesized
+ * from the journals and day index the Worker does own (see
+ * refineModel). Transcripts for a day come from the newest
  * day-index snapshot artifact plus that day's transcript artifacts.
  * Nothing recomputes the DayIndex basis, so the >110 s read tax the
  * server pays on a cold mount does not exist on this side. Reads
@@ -78,9 +89,16 @@ import {
 import {
   DayIndex,
   Journal,
+  Star,
   Transcript,
+  journalKey,
+  starKey,
 } from "../../lib/lifelog/Resources.ts";
 import { Place, Places } from "../../lib/lifelog/Places.ts";
+import {
+  JOURNAL_CURRENT_KEY,
+  type JournalCurrentEntry,
+} from "./journaling.ts";
 
 // ---------------------------------------------------------------------------
 // Bucket access (structural slices of the R2 binding, as in worker.ts)
@@ -205,16 +223,24 @@ const READ_MODEL_TTL_MS = 60_000;
  */
 type RunReportShape = LastRun;
 
-interface ReadModel {
+export interface ReadModel {
   readonly builtAt: number;
-  /** Day rows exactly as the server's ListDays serves them. */
+  /** Day rows for ListDays: the server's frozen snapshot rows with
+   * live staleness applied, plus synthesized rows for journal days
+   * the snapshot never knew (see refineModel). */
   readonly rows: ReadonlyArray<DayRow>;
-  /** Newest journal per day, by generatedAt. */
+  /** Newest journal per day, by generatedAt — replaced by the
+   * journal at the day's current key when the current-journal map
+   * names a different generation as present (refineModel). */
   readonly journals: ReadonlyMap<string, Journal>;
   /** The current day-index snapshot, when one exists. */
   readonly index: DayIndex | null;
   /** Last run report per loop name (ingest / capture / inventory). */
   readonly reports: ReadonlyMap<string, RunReportShape>;
+  /** The journal pass's current-journal map: per day, the current
+   * input hash and whether the journal at that key is present.
+   * Empty when no pass has published one yet. */
+  readonly current: ReadonlyMap<string, JournalCurrentEntry>;
 }
 
 const decodeOrNull = <S extends Schema.Constraint>(
@@ -312,12 +338,18 @@ const emptyJournal = (day: string): Journal =>
     report: "",
   });
 
-/** Days the server's own snapshot marks stale: their current-input
- * journal is not on disk, which is exactly the condition under
- * which the server's `journalCachedForDay` answers None (the RPC
- * GetJournal returns null; the day page answers 202 pending). */
-const staleDay = (model: ReadModel, day: string): boolean =>
-  model.rows.some((row) => row.day === day && row.stale);
+/** Whether a day's current-input journal is not on disk — exactly
+ * the condition under which the server's `journalCachedForDay`
+ * answers None (the RPC GetJournal returns null; the day page
+ * answers 202 pending). The journal pass's current-journal map is
+ * the authority: it computes every day's current key on every pass.
+ * Days the map does not know (older than its first publication)
+ * fall back to the frozen rows' flags, the server's last word. */
+const staleDay = (model: ReadModel, day: string): boolean => {
+  const current = model.current.get(day);
+  if (current !== undefined) return !current.present;
+  return model.rows.some((row) => row.day === day && row.stale);
+};
 
 /** Whether a day has anything a journal could be written from, as
  * far as artifacts can tell: it appears in the day rows or carries
@@ -369,15 +401,43 @@ interface RawReadModel {
   readonly journalsJson: ReadonlyArray<unknown>;
   readonly indexJson: unknown;
   readonly reportsJson: ReadonlyArray<readonly [string, unknown]>;
+  readonly currentJson: unknown;
 }
 
-/** The cheap inputs: the server's previews snapshot and the three
- * run reports — small artifacts, read fresh on every model load. */
+/** Parse the journal pass's current-journal map; an absent or
+ * malformed artifact reads as an empty map (staleness then falls
+ * back to the frozen rows, the pre-map behavior). */
+const parseCurrentMap = (
+  json: unknown,
+): ReadonlyMap<string, JournalCurrentEntry> => {
+  const map = new Map<string, JournalCurrentEntry>();
+  if (typeof json !== "object" || json === null) return map;
+  const days = (json as { days?: unknown }).days;
+  if (typeof days !== "object" || days === null) return map;
+  for (const [day, entry] of Object.entries(
+    days as Record<string, unknown>,
+  )) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { inputHash, present } = entry as {
+      inputHash?: unknown;
+      present?: unknown;
+    };
+    if (typeof inputHash === "string" && typeof present === "boolean") {
+      map.set(day, { inputHash, present });
+    }
+  }
+  return map;
+};
+
+/** The cheap inputs: the server's previews snapshot, the three
+ * run reports, and the journal pass's current-journal map — small
+ * artifacts, read fresh on every model load. */
 const gatherCheapRaw = (
   bucket: JournalBucket,
 ): Effect.Effect<{
   rowsJson: unknown;
   reportsJson: ReadonlyArray<readonly [string, unknown]>;
+  currentJson: unknown;
 }> =>
   Effect.gen(function* () {
     const rowsJson = yield* getJson(bucket, PREVIEWS_KEY);
@@ -385,7 +445,8 @@ const gatherCheapRaw = (
     for (const [name, key] of REPORT_KEYS) {
       reportsJson.push([name, yield* getJson(bucket, key)]);
     }
-    return { rowsJson, reportsJson };
+    const currentJson = yield* getJson(bucket, JOURNAL_CURRENT_KEY);
+    return { rowsJson, reportsJson, currentJson };
   });
 
 /** The expensive inputs: the journal selection scan and the
@@ -425,7 +486,8 @@ const modelFromRaw = (
       const report = yield* decodeOrNull(LastRun, json);
       if (report !== null) reports.set(name, report);
     }
-    return { builtAt, rows, journals, index, reports };
+    const current = parseCurrentMap(raw.currentJson);
+    return { builtAt, rows, journals, index, reports, current };
   });
 
 // ---------------------------------------------------------------------------
@@ -609,15 +671,189 @@ const loadSnapshotParts = (
  * snapshot, gather the expensive inputs live and persist them as
  * the snapshot so the next cold isolate does not pay the scan.
  */
+// ---------------------------------------------------------------------------
+// Row shaping: faithful ports of the server's pure helpers in
+// lib/lifelog/Views.ts, used for the rows refineModel synthesizes.
+// ---------------------------------------------------------------------------
+
+const PREVIEW_CHARS = 160;
+
+/** Views.previewText: the report's first non-empty line, flattened
+ * and truncated for table cells. */
+const previewText = (report: string): string => {
+  const line =
+    report.split("\n").find((candidate) => candidate.trim().length > 0) ??
+    "";
+  const flat = line.replace(/\s+/g, " ").trim();
+  return flat.length > PREVIEW_CHARS
+    ? `${flat.slice(0, PREVIEW_CHARS - 1).trimEnd()}…`
+    : flat;
+};
+
+/** Views.audioSecondsFor: summed per transcript from the last
+ * utterance's end — the only duration a transcript carries. */
+const audioSecondsFor = (transcripts: ReadonlyArray<Transcript>): number =>
+  transcripts.reduce((total, transcript) => {
+    const endMs = transcript.utterances.reduce(
+      (max, utterance) => Math.max(max, utterance.endMs),
+      0,
+    );
+    return total + endMs / 1000;
+  }, 0);
+
+/** Views.startMinutesInZone: minutes since local midnight for an
+ * entry's start, in the entry's own zone. Regular captures store a
+ * UTC instant; live provisionals store an already-local wall clock. */
+const startMinutesInZone = (startTime: string, timeZone: string): number => {
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(startTime)) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(startTime));
+    const get = (type: string) =>
+      Number(parts.find((part) => part.type === type)?.value ?? 0);
+    return get("hour") * 60 + get("minute") + get("second") / 60;
+  }
+  const match = startTime.match(/T(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return 0;
+  return Number(match[1]) * 60 + Number(match[2]) + Number(match[3] ?? 0) / 60;
+};
+
+/** Views.mergeCoverage: sort, then fold overlaps and near-adjacent
+ * stretches (the 2-minute slack absorbs boundary touches and
+ * clock drift). */
+const mergeCoverage = (
+  segments: ReadonlyArray<readonly [number, number]>,
+): Array<[number, number]> => {
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of [...segments].sort((a, b) => a[0] - b[0])) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && start <= last[1] + 2) {
+      last[1] = Math.max(last[1], end);
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  return merged;
+};
+
+/**
+ * Bring a decoded read model up to date with the journal pass's
+ * current-journal map — the refinement the frozen previews
+ * snapshot can no longer perform for itself:
+ *
+ *   - Journals: the server's `currentJournals` serves the journal
+ *     at the day's current key when it is on disk. The snapshot's
+ *     newest-by-generatedAt winner is usually that journal; when
+ *     the map names a different generation as the present current
+ *     one, that exact artifact is read and served instead.
+ *   - Rows: staleness is overridden from the map, and journal days
+ *     the frozen snapshot never knew (every day since the server
+ *     retired) get synthesized rows — preview and summary from the
+ *     served journal's report, audio and coverage from the day's
+ *     transcripts by the server's transcript-fallback math
+ *     (Views.transcriptFallbackSegments). Media-timing coverage is
+ *     the one input not recomputed here, so a synthesized row's
+ *     audio counts the day's transcripts, silent stretches
+ *     included only where a transcript spans them.
+ */
+export const refineModel = (
+  bucket: JournalBucket,
+  model: ReadModel,
+): Effect.Effect<ReadModel> =>
+  Effect.gen(function* () {
+    const journals = new Map(model.journals);
+    for (const [day, current] of model.current) {
+      if (!current.present) continue;
+      const selected = journals.get(day);
+      if (
+        selected !== undefined &&
+        selected.inputHash === current.inputHash
+      ) {
+        continue;
+      }
+      const journal = yield* decodeOrNull(
+        Journal,
+        yield* getJson(bucket, journalKey(day, current.inputHash)),
+      );
+      if (journal !== null) journals.set(day, journal);
+    }
+    const rows: Array<DayRow> = model.rows.map((row) => {
+      const current = model.current.get(row.day);
+      if (current === undefined || row.stale === !current.present) {
+        return row;
+      }
+      return new DayRow({
+        day: row.day,
+        stale: !current.present,
+        preview: row.preview,
+        audioSeconds: row.audioSeconds,
+        coverage: row.coverage,
+        summary: row.summary,
+      });
+    });
+    const knownDays = new Set(rows.map((row) => row.day));
+    for (const [day, journal] of journals) {
+      if (knownDays.has(day)) continue;
+      const entries = model.index?.days[day] ?? [];
+      const pairs = yield* Effect.forEach(
+        entries,
+        (entry) =>
+          Effect.map(
+            Effect.flatMap(getJson(bucket, entry.transcriptKey), (json) =>
+              decodeOrNull(Transcript, json),
+            ),
+            (transcript) => ({ entry, transcript }),
+          ),
+        { concurrency: 8 },
+      );
+      const usable = pairs.flatMap(({ entry, transcript }) =>
+        transcript === null ? [] : [{ entry, transcript }],
+      );
+      const segments: Array<[number, number]> = [];
+      for (const { entry, transcript } of usable) {
+        const endMs = transcript.utterances.reduce(
+          (max, utterance) => Math.max(max, utterance.endMs),
+          0,
+        );
+        if (endMs <= 0) continue;
+        const start = startMinutesInZone(entry.startTime, entry.timeZone);
+        const end = Math.min(1440, start + endMs / 60000);
+        if (end > start) {
+          segments.push([Math.round(start), Math.round(end)]);
+        }
+      }
+      const current = model.current.get(day);
+      rows.push(
+        new DayRow({
+          day,
+          stale: current !== undefined ? !current.present : false,
+          preview: previewText(journal.report),
+          audioSeconds: Math.round(
+            audioSecondsFor(usable.map(({ transcript }) => transcript)),
+          ),
+          coverage: mergeCoverage(segments),
+          summary: journal.report,
+        }),
+      );
+    }
+    rows.sort((a, b) => b.day.localeCompare(a.day));
+    return { ...model, journals, rows };
+  });
+
 const loadModel = (bucket: JournalBucket): Effect.Effect<ReadModel> =>
   Effect.gen(function* () {
     const cheap = yield* gatherCheapRaw(bucket);
     const snapshot = yield* loadSnapshotParts(bucket);
     if (snapshot !== null) {
-      return yield* modelFromRaw(
+      const base = yield* modelFromRaw(
         { ...cheap, journalsJson: snapshot.journalsJson, indexJson: snapshot.indexJson },
         snapshot.builtAt,
       );
+      return yield* refineModel(bucket, base);
     }
     const expensive = yield* gatherExpensiveRaw(bucket);
     const builtAt = Date.now();
@@ -625,7 +861,8 @@ const loadModel = (bucket: JournalBucket): Effect.Effect<ReadModel> =>
     yield* writeSnapshot(bucket, expensive, fingerprint, builtAt).pipe(
       Effect.ignore,
     );
-    return yield* modelFromRaw({ ...cheap, ...expensive }, builtAt);
+    const base = yield* modelFromRaw({ ...cheap, ...expensive }, builtAt);
+    return yield* refineModel(bucket, base);
   });
 
 let readModelCache: Promise<ReadModel> | null = null;
@@ -1343,8 +1580,8 @@ const makeHandlers = (
     // is stale or its journal has not been generated yet, and the
     // transient empty journal for a day with no inputs at all.
     // (Success is NullOr(Journal) — absence is a null, not an
-    // error.) The stale signal is the server's own, from its
-    // persisted day snapshot.
+    // error.) The stale signal is the journal pass's
+    // current-journal map (see staleDay).
     GetJournal: ({ day }) =>
       Effect.map(readModel(bucket), (model) => {
         if (staleDay(model, day)) return null;
@@ -1562,7 +1799,9 @@ const isJournalPath = (path: string): boolean =>
   path === "/status" ||
   path === "/rpc" ||
   path.startsWith("/icons/") ||
-  path.startsWith("/journal/");
+  path.startsWith("/journal/") ||
+  path.startsWith("/stars/") ||
+  path.startsWith("/star/");
 
 /**
  * The journal gate's two lanes (step 12 — the gate swap from the
@@ -1586,7 +1825,77 @@ export interface JournalGates {
     request: Request,
   ) => Effect.Effect<boolean>;
   readonly signInPath: string;
+  /** The lifelog home zone: star day-membership is a civil-day
+   * question, answered in this zone (the server's home zone). */
+  readonly homeZone: string;
 }
+
+// ---------------------------------------------------------------------------
+// Authored stars: the read-only star routes the MCP bridge consumes
+// (GET /stars/:day, GET /star/:id), served from the authored
+// records themselves exactly as the server's handlers served them
+// (example-lifelog/main.ts) — a star is visible the moment it is
+// set; the materialized per-day view is for the pipeline's
+// consumers, not this read. Expired stars disappear when the
+// pipeline's sweep removes their records, as on the server.
+// ---------------------------------------------------------------------------
+
+/** Stars.ts `civilDayInZone`. */
+const civilDayInZone = (instant: Date, timeZone: string): string => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(instant);
+  const part = (type: string) =>
+    parts.find((entry) => entry.type === type)?.value;
+  return `${part("year")}-${part("month")}-${part("day")}`;
+};
+
+const nextDayOf = (day: string): string => {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+};
+
+/** Stars.ts `starDays`: every civil day in `timeZone` the interval
+ * [startUtc, endUtc) touches. */
+const starDays = (star: Star, timeZone: string): ReadonlyArray<string> => {
+  const first = civilDayInZone(new Date(star.startUtc), timeZone);
+  const last = civilDayInZone(
+    new Date(
+      Math.max(Date.parse(star.startUtc), Date.parse(star.endUtc) - 1),
+    ),
+    timeZone,
+  );
+  const days: Array<string> = [];
+  for (let day = first; day <= last; day = nextDayOf(day)) days.push(day);
+  return days;
+};
+
+/** Stars.ts `readAllStars`, over the bucket: every authored record
+ * that decodes, oldest first (createdAt, then id). */
+const readAllStars = (
+  bucket: JournalBucket,
+): Effect.Effect<ReadonlyArray<Star>> =>
+  Effect.gen(function* () {
+    const listed = yield* listAll(bucket, "star/");
+    const stars = yield* Effect.forEach(
+      listed.filter((object) => object.key.endsWith(".json")),
+      (object) =>
+        Effect.flatMap(getJson(bucket, object.key), (json) =>
+          decodeOrNull(Star, json),
+        ),
+      { concurrency: 8 },
+    );
+    return stars
+      .filter((star): star is Star => star !== null)
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+      );
+  });
 
 /**
  * Handle a journal request, or return null when the path belongs to
@@ -1681,6 +1990,43 @@ export const handleJournal = (
       const model = yield* readModel(bucket);
       return new Response(JSON.stringify(httpStatus(model), null, 2), {
         headers: { "content-type": "application/json" },
+      });
+    }
+    if (path.startsWith("/stars/")) {
+      const day = parseDayId(
+        decodeURIComponent(path.slice("/stars/".length)),
+      );
+      if (day === null) {
+        return new Response("not a day: use 020260907 or 2026-09-07", {
+          status: 400,
+        });
+      }
+      const stars = yield* readAllStars(bucket);
+      const forDay = stars.filter((star) =>
+        starDays(star, gates.homeZone).includes(day),
+      );
+      return new Response(JSON.stringify(forDay), {
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "private, max-age=60",
+        },
+      });
+    }
+    if (path.startsWith("/star/")) {
+      const id = decodeURIComponent(path.slice("/star/".length));
+      if (id.length === 0 || id.includes("/")) return notFound();
+      const star = yield* decodeOrNull(
+        Star,
+        yield* getJson(bucket, starKey(id)),
+      );
+      if (star === null) {
+        return new Response("no such star", { status: 404 });
+      }
+      return new Response(JSON.stringify(star), {
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "private, max-age=60",
+        },
       });
     }
     // /journal/:day — the server's handler shape: HTML when the
