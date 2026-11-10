@@ -792,7 +792,7 @@ type LifelogEnv = Drive.Drive | Bucket.Bucket | Bucket.SourceBucket | R2TempCred
 const Ingest = Layer.effectDiscard(
   Effect.gen(function*() {
     const enabled = new Set(
-      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive,normalize,transcribe,gps-compact,gps-stays,attribution,day-index,transcript-search,movement")
+      (process.env.MEDINA_SOURCES ?? "audio,notes,bucket,inventory,allow,capture,stars,archive,normalize,transcribe,gps-compact,gps-stays,attribution,day-index,transcript-search,movement,notes-llm,journal")
         .split(",")
         .map((name) => name.trim())
         .filter(Boolean)
@@ -1019,7 +1019,19 @@ const Ingest = Layer.effectDiscard(
           // way: existence at the content-addressed key is
           // freshness, whoever wrote it.
           ...(enabled.has("movement") ? [movementResource] : []),
-          notesResource, journalResource, starsResource
+          // Notes + journal are excludable the same way: at their
+          // migration cutover (docs/cloudflare-migration.md §4.3
+          // step 9) the Worker derives the notes and journal
+          // artifacts through the AI Gateway, and these resources
+          // stand down (MEDINA_SOURCES without "notes-llm" /
+          // "journal"). The on-demand derefs (notesForDay /
+          // journalForDay) keep working either way: existence at
+          // the content-addressed key is freshness, whoever
+          // wrote it. Order still matters between the two: notes
+          // materialize before the journals that read them.
+          ...(enabled.has("notes-llm") ? [notesResource] : []),
+          ...(enabled.has("journal") ? [journalResource] : []),
+          starsResource
         ],
         dataPath,
         { name: "ingest", cadenceMs: 60_000 }

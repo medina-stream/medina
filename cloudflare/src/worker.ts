@@ -156,6 +156,12 @@ import {
   runMovementPass,
   type MovementEnv,
 } from "./movement.ts";
+import {
+  journalingPlatformLayer,
+  runJournalPass,
+  type JournalEnv,
+} from "./journaling.ts";
+import { probeGateway } from "./llm.ts";
 import { driveVisibilityProbe } from "./drive.ts";
 import {
   parseS3Credentials,
@@ -181,6 +187,7 @@ export { GpsShadow } from "./gps.ts";
 export { DayIndexShadow } from "./dayindex.ts";
 export { TranscriptSearchShadow } from "./search.ts";
 export { MovementShadow } from "./movement.ts";
+export { JournalShadow } from "./journaling.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -263,6 +270,7 @@ interface Env {
   readonly DayIndexShadow: DurableObjectNamespaceLike;
   readonly TranscriptSearchShadow: DurableObjectNamespaceLike;
   readonly MovementShadow: DurableObjectNamespaceLike;
+  readonly JournalShadow: DurableObjectNamespaceLike;
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
@@ -280,6 +288,14 @@ interface Env {
    * Drive probe/port; values never leave the Worker. */
   readonly GOOGLE_SERVICE_ACCOUNT_EMAIL?: SecretsStoreSecretLike;
   readonly GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?: SecretsStoreSecretLike;
+  /** Secrets Store binding for step 9 (notes + journal): the AI
+   * Gateway token, attached out-of-band against the store secret
+   * Scott placed there (scripts/reattach-secrets.ts). Sent as the
+   * `cf-aig-authorization` header on gateway calls when present;
+   * the gateway may also answer without it (the verify route
+   * reports which). Optional in the type because a fresh deploy
+   * strips it until the reattach step runs. */
+  readonly AI_GATEWAY_TOKEN?: SecretsStoreSecretLike;
   /** secret_text binding (declared in alchemy.run.ts once a
    * bucket-scoped keypair is supplied): the JSON-encoded S3
    * keypair for sco-lifelog the media stages presign and mint
@@ -316,6 +332,16 @@ interface Env {
   /** Step 8 (movement): "live" makes the movement pass write the
    * artifacts medina-dev would; else it only compares. */
   readonly MOVEMENT_MODE?: string;
+  /** Step 9 (notes + journal): "live" makes the journal pass
+   * write the missing notes/journal artifacts through the AI
+   * Gateway; else it only compares. */
+  readonly JOURNAL_MODE?: string;
+  /** Step 9: the journal report's model (medina-dev's
+   * JOURNAL_LLM_MODEL role; the gateway route's is gpt-5.5). */
+  readonly JOURNAL_LLM_MODEL?: string;
+  /** Step 9: the notes extraction model (medina-dev's
+   * JOURNAL_LLM_NOTES_MODEL role); unset = the journal model. */
+  readonly JOURNAL_LLM_NOTES_MODEL?: string;
   /** medina-dev's eager window for movement/journal enumeration
    * (EAGER_WINDOW_DAYS there); unset = no window. */
   readonly EAGER_WINDOW_DAYS?: string;
@@ -383,6 +409,17 @@ const movementEnv = (env: Env): MovementEnv => ({
 
 const movementMode = (env: Env): "live" | "shadow" =>
   env.MOVEMENT_MODE === "live" ? "live" : "shadow";
+
+const journalEnv = (env: Env): JournalEnv => ({
+  artifacts: env.ARTIFACTS,
+  notebook: env.JournalShadow,
+  gatewayToken: env.AI_GATEWAY_TOKEN ?? null,
+  journalModel: env.JOURNAL_LLM_MODEL ?? "gpt-5.5",
+  notesModel: env.JOURNAL_LLM_NOTES_MODEL ?? null,
+});
+
+const journalMode = (env: Env): "live" | "shadow" =>
+  env.JOURNAL_MODE === "live" ? "live" : "shadow";
 
 const eagerWindowDays = (env: Env): number | null => {
   const parsed = Number(env.EAGER_WINDOW_DAYS);
@@ -533,6 +570,9 @@ const stagePlatform = (env: Env) =>
           ),
           searchPlatformLayer(searchEnv(env)).pipe(Layer.provide(base)),
           movementPlatformLayer(movementEnv(env)).pipe(Layer.provide(base)),
+          journalingPlatformLayer(journalEnv(env)).pipe(
+            Layer.provide(base),
+          ),
         );
       }),
     ),
@@ -1451,6 +1491,110 @@ const serveMovementStatus = (
   });
 
 /**
+ * Manual trigger for one notes+journal pass (§4.3 step 9), same
+ * device-token gate: it enumerates from the current day-index
+ * snapshot and compares — or, in live mode, writes — the notes
+ * and journal artifacts. `?day=YYYY-MM-DD` checks one day
+ * regardless of the window; `?all=1` enumerates every day;
+ * `?proof=YYYY-MM-DD` additionally derives that day end-to-end
+ * in memory (real LLM cost, nothing written) and reports the
+ * derived structure beside the stored one.
+ */
+const serveJournalRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const dayParam = url.searchParams.get("day");
+    const proofParam = url.searchParams.get("proof");
+    const outcome = yield* runJournalPass({
+      mode: "manual",
+      now: new Date(),
+      zone: env.HOME_TZ ?? "UTC",
+      perform: journalMode(env) === "live",
+      eagerWindowDays: eagerWindowDays(env),
+      maxMaterialize: 16,
+      ...(dayParam !== null && /^\d{4}-\d{2}-\d{2}$/.test(dayParam)
+        ? { day: dayParam }
+        : {}),
+      ...(url.searchParams.get("all") === "1" ? { all: true } : {}),
+      ...(proofParam !== null && /^\d{4}-\d{2}-\d{2}$/.test(proofParam)
+        ? { proofDay: proofParam }
+        : {}),
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The journal notebook (last report), same gate. */
+const serveJournalStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.JournalShadow.get(
+      env.JournalShadow.idFromName("journal-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://journal-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "journal status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+/**
+ * The step-9 credential check (the steps 5–6 flip-gate pattern),
+ * same device-token gate: resolve the AI_GATEWAY_TOKEN binding
+ * and probe the AI Gateway (`default`) Worker-side — both
+ * endpoint shapes, without the gateway-auth header first and
+ * then with it — with one tiny completion each. Reports carry
+ * the binding state and per-attempt statuses only; the token
+ * value never leaves the Worker.
+ */
+const serveJournalVerify = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const resolved = yield* resolveStoreSecret(env.AI_GATEWAY_TOKEN);
+    const attempts = yield* probeGateway(
+      resolved.state === "ok" ? resolved.value : null,
+      env.JOURNAL_LLM_MODEL ?? "gpt-5.5",
+    );
+    return json({
+      ok: attempts.some((attempt) => attempt.ok),
+      binding: resolved.state,
+      gateway: "default",
+      attempts,
+    });
+  });
+
+/**
  * Step 10 visibility-parity probe, same device-token gate: exchanges
  * the dedicated service account's Secrets Store credentials for a
  * Drive token Worker-side and summarizes what the account can see
@@ -2032,6 +2176,15 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   if (request.method === "POST" && url.pathname === "/movement/run") {
     return serveMovementRun(env, request, url);
   }
+  if (request.method === "GET" && url.pathname === "/journal/status") {
+    return serveJournalStatus(env, request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/journal/verify") {
+    return serveJournalVerify(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/journal/run") {
+    return serveJournalRun(env, request, url);
+  }
   if (request.method === "GET" && url.pathname === "/drive/probe") {
     return serveDriveProbe(env, request, url);
   }
@@ -2468,6 +2621,34 @@ export default {
           Effect.provide(stagePlatform(env)),
           Effect.catch((cause) =>
             Effect.logError("movement pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // Notes + journal (§4.3 step 9): enumerate from the current
+    // day-index snapshot; compare the stored artifacts at the
+    // computed keys — or, when JOURNAL_MODE is live, write the
+    // missing ones through the AI Gateway (bounded per pass).
+    // Runs after movement: a journal whose movement artifact is
+    // missing at its keyed basis first asks the movement stage
+    // for that day. Same failure posture.
+    ctx.waitUntil(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const report = yield* runJournalPass({
+            mode: "cron",
+            now: new Date(controller.scheduledTime),
+            zone: env.HOME_TZ ?? "UTC",
+            perform: journalMode(env) === "live",
+            eagerWindowDays: eagerWindowDays(env),
+          });
+          yield* Effect.logInfo(
+            `journal pass (${journalMode(env)}): enumerated ${report.daysEnumerated} days, notes present ${report.notesPresent}/${report.notesChecked} (would write ${report.notesWouldWrite}, written ${report.notesWritten}), journals present ${report.journalsPresent}/${report.journalsChecked} (would write ${report.journalsWouldWrite}, written ${report.journalsWritten}, deferred ${report.journalsDeferred}), mismatches ${report.mismatches.length}, errors ${report.errors.length}`,
+          );
+        }).pipe(
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("journal pass failed", cause),
           ),
         ),
       ),

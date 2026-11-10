@@ -309,6 +309,30 @@ export const Api = Cloudflare.Worker("Api", {
     // .env MEDINA_SOURCES + restart.
     MovementShadow: Cloudflare.DurableObject("MovementShadow"),
     MOVEMENT_MODE: "live",
+    // Milestone 4 step 9 (notes + journal): the journal stage's
+    // notebook (pass reports, the fact cache, and the
+    // attempt-window claims) and mode, same pattern — "shadow"
+    // computes each enumerated day's notes/journal keys from the
+    // current day-index snapshot and compares the stored
+    // artifacts' grounding without writing or calling the LLM;
+    // "live" writes the missing artifacts through the AI Gateway
+    // (gateway `default`; the OpenAI key lives in the gateway's
+    // own config, and the gateway token, if the gateway is
+    // authenticated, is the Secrets Store secret AI_GATEWAY_TOKEN
+    // attached out-of-band by scripts/reattach-secrets.ts — never
+    // declared here), with medina-dev's notes-llm + journal
+    // resources standing down in the same batch (MEDINA_SOURCES
+    // without "notes-llm" / "journal"). The models mirror
+    // medina-dev's effective config with the one change Scott
+    // decided Nov 2: the journal write moves gpt-5.4-mini →
+    // gpt-5.5 on the gateway route; notes extraction keeps
+    // gpt-5.4-nano. Rollback: JOURNAL_MODE back to "shadow" +
+    // redeploy, and restore the two tokens in medina-dev's .env
+    // + restart.
+    JournalShadow: Cloudflare.DurableObject("JournalShadow"),
+    JOURNAL_MODE: "shadow",
+    JOURNAL_LLM_MODEL: "gpt-5.5",
+    JOURNAL_LLM_NOTES_MODEL: "gpt-5.4-nano",
     EAGER_WINDOW_DAYS: "7",
     HOME_TZ: "America/Los_Angeles",
     // The media stages presign R2 URLs and mint temporary R2

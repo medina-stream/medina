@@ -114,7 +114,9 @@ import {
 // ---------------------------------------------------------------------------
 
 export const MOVEMENT_VERSION = "movement-v1";
-const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2";
+/** Exported for the journal port (src/journaling.ts), which
+ * composes the same per-day basis to key its journal inputs. */
+export const MOVEMENT_BASIS_VERSION = "stays-v1-composition-2";
 /** Check-memo entries are only valid for the comparison code that
  * made them; the memo stores this epoch alongside the basis so a
  * comparison change (o2: the (ts, source, lat, lon) fix order and

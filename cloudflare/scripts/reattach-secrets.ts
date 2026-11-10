@@ -52,6 +52,11 @@ const SECRET_NAMES = [
   // the values never transit the repo or the deploy.
   "GOOGLE_SERVICE_ACCOUNT_EMAIL",
   "GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY",
+  // Step 9 (notes + journal): the AI Gateway token for gateway
+  // `default`, placed by Scott Nov 9. Sent Worker-side as the
+  // cf-aig-authorization header on gateway calls; bound by name
+  // only, like every other store secret here.
+  "AI_GATEWAY_TOKEN",
 ];
 
 interface Binding {
@@ -135,7 +140,7 @@ for (const name of SECRET_NAMES) {
 console.log(
   added.length > 0
     ? `reattaching: ${added.join(", ")}`
-    : "both store secrets already bound; re-asserting settings as-is",
+    : "all store secrets already bound; re-asserting settings as-is",
 );
 
 // 2. PATCH the settings back. The multipart body carries only the
@@ -180,8 +185,8 @@ if (patchStatus !== 200 || patchPayload?.success !== true) {
 console.log(`PATCH settings: HTTP ${patchStatus}, success`);
 
 // 3. Read back and assert: the binding count grew by exactly the
-// number attached, both store secrets are present as
-// secrets_store_secret bindings against the right store, and the
+// number attached, every store secret is present as a
+// secrets_store_secret binding against the right store, and the
 // stack-declared INDEX_API_TOKEN binding is still there.
 const after = await getSettings("read back settings");
 const afterBindings = after.bindings ?? [];
@@ -214,5 +219,5 @@ if (problems.length > 0) {
   fail(`read-back assertion failed — ${problems.join("; ")}`);
 }
 console.log(
-  `reattach-secrets: OK — ${afterBindings.length} bindings, all media-stage store secrets present`,
+  `reattach-secrets: OK — ${afterBindings.length} bindings, all out-of-band store secrets present`,
 );
