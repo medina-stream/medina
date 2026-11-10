@@ -58,6 +58,8 @@ import {
 import type { AuthenticationRevision } from "@yielded/auth/Sessions";
 import {
   CurrentCommitJournal,
+  LifecycleHooks,
+  coordinateCommit,
   type CommitJournal,
 } from "@yielded/auth/Hooks";
 import {
@@ -105,6 +107,35 @@ const requireJournal: Effect.Effect<CommitJournal, Failure> = Effect.flatMap(
       ? Effect.succeed(journal.value)
       : Effect.fail(unavailable),
 );
+
+/**
+ * Run a port call under a commit root — see the matching helper in
+ * SessionPersistence.ts. Framework operations verify credentials
+ * outside any commit scope, then call the mutating port methods,
+ * which require an ambient CurrentCommitJournal; when the caller
+ * has not already rooted the call (the adapter tests do), this call
+ * opens its own `coordinateCommit` root so the staged decision
+ * commits exactly when the call's writes have all succeeded.
+ */
+const rootCommit = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | Failure, R> => {
+  // See SessionPersistence.ts: the self-rooted branch's context
+  // gains LifecycleHooks; port callers already run with the hooks
+  // layer in context.
+  const rooted = Effect.map(
+    coordinateCommit(() => effect).pipe(
+      Effect.catchTag("HookConfigurationError", () =>
+        Effect.fail(unavailable),
+      ),
+    ),
+    (result) => result.value,
+  ) as Effect.Effect<A, E | Failure, R>;
+  return Effect.flatMap(
+    Effect.serviceOption(CurrentCommitJournal),
+    (ambient) => (Option.isSome(ambient) ? effect : rooted),
+  );
+};
 
 interface AuthorityState {
   readonly subject: Versioned<SubjectRecord>;
@@ -356,7 +387,7 @@ export const makePasswordPersistence = (
     ),
 
   addIfAbsent: (input, prepare) =>
-    orUnavailable(
+    rootCommit(orUnavailable(
       Effect.gen(function* () {
         const journal = yield* requireJournal;
         const state = yield* readAuthority(
@@ -429,10 +460,10 @@ export const makePasswordPersistence = (
         }
         return prepared;
       }),
-    ),
+    )),
 
   replaceIfCurrent: (input, prepare) =>
-    orUnavailable(
+    rootCommit(orUnavailable(
       Effect.gen(function* () {
         const journal = yield* requireJournal;
         const { state, stored } = yield* guardMutation(store, input);
@@ -440,10 +471,10 @@ export const makePasswordPersistence = (
         yield* applyReplacement(store, state, stored, input);
         return prepared;
       }),
-    ),
+    )),
 
   resetWithProof: (input, prepare) =>
-    orUnavailable(
+    rootCommit(orUnavailable(
       Effect.gen(function* () {
         const journal = yield* requireJournal;
         const { state, stored } = yield* guardMutation(store, input);
@@ -459,7 +490,7 @@ export const makePasswordPersistence = (
         yield* applyReplacement(store, state, stored, input);
         return prepared;
       }),
-    ),
+    )),
 });
 
 export const layerPasswordPersistence: Layer.Layer<

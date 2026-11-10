@@ -3,6 +3,7 @@ import * as assert from "node:assert/strict";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import { hooksLayer } from "@yielded/auth/Persistence";
 import { LoginIdentifier } from "@yielded/auth/Identity";
 import { TokenDigest } from "@yielded/auth/Schema";
 import { AuthenticationAssurance } from "@yielded/auth/Operations";
@@ -173,19 +174,29 @@ describe("StatefulSessionPersistence.establish + verify", () => {
     assert.equal(tag, "StaleAuthentication");
   });
 
-  it("rejects ambient use with no commit journal", async () => {
+  it("roots its own commit when no journal is ambient", async () => {
     const { sessions, revision } = await setup();
-    const tag = await failureTag(
-      sessions.establish(
-        {
-          session: sessionFor(revision, "digest-1"),
-          evidence: evidenceFor(revision),
-          now: at(T0),
-        },
-        (record, journal) => journal.prepare(record),
-      ),
+    // Production shape: framework operations verify credentials
+    // outside any commit scope, then call establish; the port opens
+    // its own root, so the receipt is readable as soon as it returns.
+    const prepared = await Effect.runPromise(
+      sessions
+        .establish(
+          {
+            session: sessionFor(revision, "digest-1"),
+            evidence: evidenceFor(revision),
+            now: at(T0),
+          },
+          (record, journal) => journal.prepare(record),
+        )
+        .pipe(Effect.provide(hooksLayer)),
     );
-    assert.equal(tag, "SessionUnavailable");
+    const record = await readPrepared(prepared);
+    assert.equal(record.digest, TokenDigest.make("digest-1"));
+    const verified = await Effect.runPromise(
+      sessions.verify({ digest: TokenDigest.make("digest-1"), now: at(T0) }),
+    );
+    assert.equal(verified.sessionId, record.sessionId);
   });
 
   it("verify fails closed for unknown and expired sessions", async () => {

@@ -3,6 +3,7 @@ import * as assert from "node:assert/strict";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import { hooksLayer } from "@yielded/auth/Persistence";
 import { LoginIdentifier } from "@yielded/auth/Identity";
 import {
   EncodedPasswordHash,
@@ -189,26 +190,32 @@ describe("PasswordPersistence.addIfAbsent", () => {
     );
   });
 
-  it("rejects ambient use with no commit journal", async () => {
+  it("roots its own commit when no journal is ambient", async () => {
     const store = makeMemoryObjectStore();
     const persistence = makePasswordPersistence(store);
     const { subject } = await Effect.runPromise(
       provisionSubject(store, { displayName: "Scott", identifier: IDENTIFIER }),
     );
-    const tag = await failureTag(
-      persistence.addIfAbsent(
-        mutationInput({
-          expectedRevision: {
-            subjectId: subject.subjectId,
-            securityRevision: subject.securityRevision,
-            credentials: [],
-          },
-          replacement: replacement("verifier-v1"),
-        }),
-        prepareValue,
-      ),
+    // Production shape: no ambient root — the port opens its own,
+    // so the prepared decision reads as soon as the call returns.
+    const prepared = await Effect.runPromise(
+      persistence
+        .addIfAbsent(
+          mutationInput({
+            expectedRevision: {
+              subjectId: subject.subjectId,
+              securityRevision: subject.securityRevision,
+              credentials: [],
+            },
+            replacement: replacement("verifier-v1"),
+          }),
+          prepareValue,
+        )
+        .pipe(Effect.provide(hooksLayer)),
     );
-    assert.equal(tag, "PasswordUnavailable");
+    assert.equal(await readPrepared(prepared), "changed");
+    const snapshot = await someSnapshot(persistence);
+    assert.equal(Redacted.value(snapshot.verifier), "verifier-v1");
   });
 });
 

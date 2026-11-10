@@ -1508,7 +1508,6 @@ const serveRpc = (
 // ---------------------------------------------------------------------------
 
 const GATE_COOKIE = "medina_gate";
-const GATE_COOKIE_MAX_AGE = 30 * 24 * 60 * 60;
 
 const cookieValue = (request: Request, name: string): string | null => {
   const header = request.headers.get("cookie");

@@ -55,6 +55,8 @@ import {
 } from "@yielded/auth/Sessions";
 import {
   CurrentCommitJournal,
+  LifecycleHooks,
+  coordinateCommit,
   type CommitJournal,
 } from "@yielded/auth/Hooks";
 import {
@@ -109,6 +111,40 @@ const requireJournal: Effect.Effect<CommitJournal, SessionUnavailable> =
       : Effect.fail(unavailable),
   );
 
+/**
+ * Run a port call under a commit root. The framework's operations
+ * deliberately run OUTSIDE any commit scope while credentials are
+ * verified (`passwordNoAmbient`), and the completion machinery then
+ * calls the mutating port methods, which require an ambient
+ * CurrentCommitJournal (requireJournal above). The root therefore
+ * lives here, at the native persistence boundary: when the caller
+ * already runs inside a root (the adapter tests do), the ambient
+ * journal is used untouched; otherwise this call opens its own
+ * `coordinateCommit` root, so staged decisions commit — and their
+ * PreparedCommit receipts become readable — exactly when the call's
+ * writes have all succeeded.
+ */
+const rootCommit = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | SessionUnavailable, R> => {
+  // The self-rooted branch's true context gains LifecycleHooks (the
+  // commit coordinator's requirement); every caller of these ports
+  // already runs with the assembly's hooks layer in context, exactly
+  // as it runs with the journal in context when a root is ambient.
+  const rooted = Effect.map(
+    coordinateCommit(() => effect).pipe(
+      Effect.catchTag("HookConfigurationError", () =>
+        Effect.fail(unavailable),
+      ),
+    ),
+    (result) => result.value,
+  ) as Effect.Effect<A, E | SessionUnavailable, R>;
+  return Effect.flatMap(
+    Effect.serviceOption(CurrentCommitJournal),
+    (ambient) => (Option.isSome(ambient) ? effect : rooted),
+  );
+};
+
 const readSession = (store: ObjectStoreShape, digest: string) =>
   readRecord(store, sessionByDigestKey(digest), StoredSessionRecord);
 
@@ -131,7 +167,7 @@ export const makeSessionPersistence = (
   store: ObjectStoreShape,
 ): StatefulSessionPersistence<SessionClaims> => ({
   establish: (input, prepare) =>
-    orUnavailable(
+    rootCommit(orUnavailable(
       Effect.gen(function* () {
         const journal = yield* requireJournal;
         const { session, evidence, pending, now } = input;
@@ -234,7 +270,7 @@ export const makeSessionPersistence = (
         }
         return prepared;
       }),
-    ),
+    )),
 
   verify: (input) =>
     orUnavailable(
@@ -258,7 +294,7 @@ export const makeSessionPersistence = (
     ),
 
   rotate: (input, prepare) =>
-    orUnavailable(
+    rootCommit(orUnavailable(
       Effect.gen(function* () {
         const journal = yield* requireJournal;
         const { record, nextDigest, nextCredentialVersion, nextExpiresAt, now } =
@@ -320,10 +356,10 @@ export const makeSessionPersistence = (
         );
         return prepared;
       }),
-    ),
+    )),
 
   revokeDigest: (digest, prepare) =>
-    orUnavailable(
+    rootCommit(orUnavailable(
       Effect.gen(function* () {
         const journal = yield* requireJournal;
         const stored = yield* readSession(store, digest);
@@ -334,10 +370,10 @@ export const makeSessionPersistence = (
         if (stored !== null) yield* deleteSession(store, stored.value);
         return prepared;
       }),
-    ),
+    )),
 
   revoke: (input, prepare) =>
-    orUnavailable(
+    rootCommit(orUnavailable(
       Effect.gen(function* () {
         const journal = yield* requireJournal;
         const index = yield* readRecord(
@@ -360,10 +396,10 @@ export const makeSessionPersistence = (
         }
         return prepared;
       }),
-    ),
+    )),
 
   revokeAll: (input, prepare) =>
-    orUnavailable(
+    rootCommit(orUnavailable(
       Effect.gen(function* () {
         const journal = yield* requireJournal;
         const subject = yield* readSubject(store, input.subjectId);
@@ -407,7 +443,7 @@ export const makeSessionPersistence = (
         }
         return prepared;
       }),
-    ),
+    )),
 });
 
 // Binding note: unlike PasswordPersistence (an exported service
