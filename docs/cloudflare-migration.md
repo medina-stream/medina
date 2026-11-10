@@ -569,7 +569,7 @@ or this plan). Needed, by stage:
 | --- | --- | --- |
 | `media-transcribe` | `ASSEMBLYAI_API_KEY` — created by Scott Nov 2 ✓; bound to the Worker Nov 3 out-of-band against the existing store secret (Alchemy would reconcile-overwrite the stored value if declared; `scripts/reattach-secrets.ts` keeps the binding across deploys) and verified live from the Worker (transcript list, HTTP 200). The stage still needs the shared `ARTIFACTS_S3` keypair to presign chunk URLs — see §4.3 step 6. | `ASSEMBLYAI_API_URL` → `https://api.assemblyai.com` |
 | `media-normalize` | `TRANSLOADIT_API_KEY` only — created by Scott Nov 2 (scoped key "cloudflare": assemblies read+write). `TRANSLOADIT_AUTH_SECRET` NOT needed: the workspace has Signature Authentication "Not required", verified Nov 2 by an unsigned create+status test from medina-dev (assembly completed). The Worker port authenticates key-only. Bound to the Worker Nov 3 the same out-of-band way as AssemblyAI and verified live from the Worker (empty test assembly completed). The stage also needs the `ARTIFACTS_S3` keypair for presigning/minting — still open, see §4.3 step 6. | none (public API today) |
-| `notes` + `journal` (LLM) | the OpenAI provider key, stored in the **AI Gateway** config (Scott sets it once in the dashboard; Worker code never holds it). Decided Nov 2 (Scott): skip the custom Meta Model API integration; route the journal LLM through **Cloudflare AI Gateway** to the same model used today, `gpt-5.5` (Workers AI proper is Cloudflare-hosted open-weight models only — not a proxy — and does not carry it). `META_MODEL_API_KEY` stays hskping's, unused by Medina. As found Nov 9, 2026: the gateway (`default`) is authenticated (gateway token in the Secrets Store as `AI_GATEWAY_TOKEN`, attached out-of-band) and is running on Cloudflare **unified billing with a zero balance** — authenticated requests answer 402 until Scott adds unified-billing credits in the AI Gateway dashboard or stores a funded provider key; see step 9. | `JOURNAL_LLM_API_URL` → the AI Gateway's OpenAI-compatible endpoint for the account gateway |
+| `notes` + `journal` (LLM) | the OpenAI provider key, stored in the **AI Gateway** config (Scott sets it once in the dashboard; Worker code never holds it). Decided Nov 2 (Scott): skip the custom Meta Model API integration; route the journal LLM through **Cloudflare AI Gateway** to the same model used today, `gpt-5.5` (Workers AI proper is Cloudflare-hosted open-weight models only — not a proxy — and does not carry it). `META_MODEL_API_KEY` stays hskping's, unused by Medina. As found Nov 9, 2026: the gateway (`default`) is authenticated (gateway token in the Secrets Store as `AI_GATEWAY_TOKEN`, attached out-of-band) and runs on Cloudflare unified billing — Scott topped up its credits Nov 9, 2026, clearing the 402s that had blocked step 9's flip; see step 9. | `JOURNAL_LLM_API_URL` → the AI Gateway's OpenAI-compatible endpoint for the account gateway |
 | Drive sources + `inventory` | DONE Nov 2 (Scott): new dedicated service account `medina-drive-reader@medina-492522.iam.gserviceaccount.com` (no project roles; access via folder sharing); `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` in the Secrets Store. One folder shared so far — at cutover, parity-check what the new account sees (listAll) against what the broker credential sees, and flag any gap. | `GOOGLE_TOKEN_URL` broker replaced by Worker-side token exchange |
 | capture-loop ingest (Worker writes) | `INDEX_API_TOKEN` (Medina-internal machine token) | none — `MEDINA_INDEX_URL` is already the public medina-index Worker |
 
@@ -1000,6 +1000,40 @@ HTTP API with the token above.
    paragraph is null until it adopts this step's gateway
    client — a small follow-on now that the client exists, not
    part of this step's flip.
+   **Flip (Nov 9, 2026): LIVE.** Scott topped up the gateway's
+   unified-billing credits, clearing the 402. Re-verified from
+   the Worker first: `GET /journal/verify` — without the
+   gateway-auth header both endpoint shapes still answer 401;
+   with the `AI_GATEWAY_TOKEN` header both answer 200 with a
+   completed tiny completion ("final text 2 chars"). Proof day
+   2026-11-07 then derived end to end in shadow: the derived
+   journal cites exactly the stored server journal's
+   transcript keys (`transcriptKeysMatch`), notes batches
+   1 = 1, chunk headers 7 vs the stored 6, report 1,440 chars
+   vs the stored 1,001 (gpt-5.5 vs the server's gpt-5.4-mini;
+   wording differences expected). Flip batch:
+   `JOURNAL_MODE: "live"` in alchemy.run.ts + deploy
+   (reattach asserted all 40 bindings), and medina-dev's
+   `.env` dropped the `notes-llm` and `journal` tokens from
+   MEDINA_SOURCES (backup `.env.bak-2026-11-09-journal-flip`)
+   + restart. A manual live run deferred 2026-11-09 (its
+   keyed movement artifact was not ready — the stage asked
+   movement for the day and deferred rather than writing
+   without the timeline, as designed); the following cron
+   passes show 8/8 journals present, zero would-write, zero
+   deferred, zero mismatches, zero errors. Bucket proof by
+   direct listing: `journal/journal-v12/2026-11-09/
+   8043aca1….json` landed after the server stood down —
+   `model: gpt-5.5`, status completed, 7 transcript keys —
+   and the serving snapshot's 2026-11-09 entry picked up its
+   preview. Notes needed no proof object this pass: all six
+   checked days' current-key notes were already present at
+   the Worker's keys (the stage writes only what's missing,
+   and live passes now own any gap). Rollback: JOURNAL_MODE
+   back to "shadow" + redeploy; restore the two tokens in
+   medina-dev's `.env` + restart. Step 9 is complete: notes
+   and journal writing now run on the Worker; medina-dev
+   keeps only the Drive sources and the write-in path.
 10. **Drive sources + `inventory`** — needs the Google credential
     row above. **Parity check done Nov 9, 2026 — a real gap,
     Scott's action.** The Worker-side probe (`cloudflare/src/drive.ts`,

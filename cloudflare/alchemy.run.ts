@@ -330,7 +330,7 @@ export const Api = Cloudflare.Worker("Api", {
     // redeploy, and restore the two tokens in medina-dev's .env
     // + restart.
     JournalShadow: Cloudflare.DurableObject("JournalShadow"),
-    JOURNAL_MODE: "shadow",
+    JOURNAL_MODE: "live",
     JOURNAL_LLM_MODEL: "gpt-5.5",
     JOURNAL_LLM_NOTES_MODEL: "gpt-5.4-nano",
     EAGER_WINDOW_DAYS: "7",
