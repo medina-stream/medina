@@ -130,6 +130,30 @@ describe("authhost sign-in loop", () => {
     assert.equal(created.status, 302);
     assert.equal(await Effect.runPromise(host.bootstrapOpen), false);
 
+    // Signing up leaves you signed in: the bootstrap response
+    // itself carries a session cookie and redirects to `next`
+    // (default "/"), and the cookie opens a session-gated read
+    // with no sign-in call in between.
+    assert.equal(created.headers.get("location"), "/");
+    const bootstrapCookie = created.headers.get("set-cookie") ?? "";
+    assert.match(bootstrapCookie, /__Host-effect-auth-session=/);
+    const sessionCookie = bootstrapCookie.split(";")[0]!;
+    const gated = await call(
+      host,
+      new Request(`${ORIGIN}/auth/requireSession`, {
+        method: "GET",
+        headers: { origin: ORIGIN, cookie: sessionCookie },
+      }),
+    );
+    assert.equal(gated.status, 200);
+    const gatedRequest = new Request(`${ORIGIN}/`, {
+      headers: { cookie: sessionCookie },
+    });
+    assert.equal(
+      await Effect.runPromise(host.sessionActive(gatedRequest)),
+      true,
+    );
+
     // Bootstrap is closed now.
     const second = await bootstrap(host, "second@example.com");
     assert.equal(second.status, 404);

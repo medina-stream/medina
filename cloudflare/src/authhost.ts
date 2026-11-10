@@ -41,6 +41,15 @@
  * creation path — Medina has no public sign-up, and password reset
  * stays ineligible until an identifier-verification flow exists
  * (identifiers start unverified by design).
+ *
+ * A successful bootstrap leaves the new account signed in: the
+ * POST completes a session by dispatching the framework's own
+ * signIn operation internally with the just-submitted credentials
+ * (the same session completion sign-in uses — verification,
+ * SessionPersistence.establish, cookie serialization) and carries
+ * the resulting session cookie onto the redirect to `next`. If
+ * that completion ever fails, the response falls back to the
+ * sign-in page rather than failing a successful registration.
  */
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -521,6 +530,45 @@ export const makeAuthHost = (
       return Exit.isSuccess(exit);
     });
 
+  /**
+   * Complete a session for (email, password) through the
+   * framework's signIn operation — an internal dispatch of exactly
+   * the request the sign-in page sends — and return the response's
+   * Set-Cookie values, or null when no session was established.
+   * Reusing the operation (rather than establishing a session
+   * here) keeps one session-completion path: password verification
+   * against the stored verifier, SessionPersistence.establish,
+   * and the framework's cookie serialization all stay the
+   * framework's.
+   */
+  const completeSignIn = (
+    email: string,
+    password: string,
+  ): Effect.Effect<ReadonlyArray<string> | null> =>
+    Effect.promise(async () => {
+      const response = await webHandler.handler(
+        new Request(`${config.origin}/auth/signIn`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: config.origin,
+            "x-effect-auth-csrf": "1",
+          },
+          body: JSON.stringify({
+            payload: { email, password, flowId: crypto.randomUUID() },
+          }),
+        }),
+      );
+      if (!response.ok) return null;
+      const cookies =
+        typeof response.headers.getSetCookie === "function"
+          ? response.headers.getSetCookie()
+          : [response.headers.get("set-cookie")].filter(
+              (value): value is string => value !== null,
+            );
+      return cookies.length > 0 ? cookies : null;
+    }).pipe(Effect.catch(() => Effect.succeed(null)));
+
   const handleBootstrapPost = (
     request: Request,
   ): Effect.Effect<Response> =>
@@ -570,10 +618,27 @@ export const makeAuthHost = (
       if (decision._tag !== "Created") {
         return new Response("not found", { status: 404 });
       }
-      return new Response(null, {
-        status: 302,
-        headers: { location: "/auth/sign-in?next=%2F" },
-      });
+      // Signing up leaves you signed in: complete the session
+      // through sign-in's own path and redirect to `next` with the
+      // session cookie set. Only when that completion fails do we
+      // fall back to sending the new account to the sign-in page.
+      const rawNext = new URL(request.url).searchParams.get("next") ?? "/";
+      const next =
+        rawNext.startsWith("/") && !rawNext.startsWith("//")
+          ? rawNext
+          : "/";
+      const cookies = yield* completeSignIn(email, password);
+      if (cookies === null) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: `/auth/sign-in?next=${encodeURIComponent(next)}`,
+          },
+        });
+      }
+      const headers = new Headers({ location: next });
+      for (const cookie of cookies) headers.append("set-cookie", cookie);
+      return new Response(null, { status: 302, headers });
     });
 
   const handle: AuthHost["handle"] = (request) =>
