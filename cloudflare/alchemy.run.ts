@@ -333,6 +333,26 @@ export const Api = Cloudflare.Worker("Api", {
     JOURNAL_MODE: "live",
     JOURNAL_LLM_MODEL: "gpt-5.5",
     JOURNAL_LLM_NOTES_MODEL: "gpt-5.4-nano",
+    // Milestone 4 step 10 (Drive sources): the stage's notebook
+    // (pass reports + the hourly inventory marker) and mode,
+    // same pattern — "shadow" discovers and compares without
+    // writing or firing; "live" performs, with medina-dev's
+    // Drive sources standing down in the same batch
+    // (MEDINA_SOURCES without "audio" / "allow" / "inventory").
+    // The service account's credentials are the Secrets Store
+    // secrets GOOGLE_SERVICE_ACCOUNT_EMAIL /
+    // GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY, attached out-of-band
+    // by scripts/reattach-secrets.ts — never declared here.
+    // GDRIVE_FOLDER_ID and SOURCE_LATEST are plain variables
+    // mirroring medina-dev's .env (the folder id is an
+    // identifier, not a credential): the folder is Easy Voice
+    // Recorder, targeted by id — never by name, because the
+    // account also sees a same-named twin "AudioRec Recordings"
+    // folder from an earlier mistaken share.
+    DriveShadow: Cloudflare.DurableObject("DriveShadow"),
+    DRIVE_MODE: "shadow",
+    GDRIVE_FOLDER_ID: "1jPV5VAlHuU-9FtGewJZPqDM5ekoKgG5q",
+    SOURCE_LATEST: "10",
     EAGER_WINDOW_DAYS: "7",
     HOME_TZ: "America/Los_Angeles",
     // The media stages presign R2 URLs and mint temporary R2

@@ -162,7 +162,12 @@ import {
   type JournalEnv,
 } from "./journaling.ts";
 import { probeGateway } from "./llm.ts";
-import { driveVisibilityProbe } from "./drive.ts";
+import {
+  drivePlatformLayer,
+  driveVisibilityProbe,
+  runDrivePass,
+  type DriveStageEnv,
+} from "./drive.ts";
 import {
   parseS3Credentials,
   presignGetUrl,
@@ -188,6 +193,7 @@ export { DayIndexShadow } from "./dayindex.ts";
 export { TranscriptSearchShadow } from "./search.ts";
 export { MovementShadow } from "./movement.ts";
 export { JournalShadow } from "./journaling.ts";
+export { DriveShadow } from "./drive.ts";
 
 // Minimal structural types for the Workers runtime surface this file
 // uses, so the file stands alone without @cloudflare/workers-types —
@@ -271,6 +277,7 @@ interface Env {
   readonly TranscriptSearchShadow: DurableObjectNamespaceLike;
   readonly MovementShadow: DurableObjectNamespaceLike;
   readonly JournalShadow: DurableObjectNamespaceLike;
+  readonly DriveShadow: DurableObjectNamespaceLike;
   /** Secrets Store binding (declared in alchemy.run.ts): the
    * medina-index Bearer token, read via .get() at call time. */
   readonly INDEX_API_TOKEN: SecretsStoreSecretLike;
@@ -342,6 +349,16 @@ interface Env {
   /** Step 9: the notes extraction model (medina-dev's
    * JOURNAL_LLM_NOTES_MODEL role); unset = the journal model. */
   readonly JOURNAL_LLM_NOTES_MODEL?: string;
+  /** Step 10: "live" makes the Drive sources perform; else
+   * shadow (discover + compare only). */
+  readonly DRIVE_MODE?: string;
+  /** Step 10: medina-dev's GDRIVE_FOLDER_ID (the audio folder —
+   * an identifier, not a credential), as a plain deploy
+   * variable; unset disables audio-drive, as on the server. */
+  readonly GDRIVE_FOLDER_ID?: string;
+  /** Step 10: medina-dev's SOURCE_LATEST (the audio folder's
+   * per-pass listing size); unset = the server's default 25. */
+  readonly SOURCE_LATEST?: string;
   /** medina-dev's eager window for movement/journal enumeration
    * (EAGER_WINDOW_DAYS there); unset = no window. */
   readonly EAGER_WINDOW_DAYS?: string;
@@ -420,6 +437,30 @@ const journalEnv = (env: Env): JournalEnv => ({
 
 const journalMode = (env: Env): "live" | "shadow" =>
   env.JOURNAL_MODE === "live" ? "live" : "shadow";
+
+const driveEnv = (env: Env): DriveStageEnv => {
+  const latest = Number(env.SOURCE_LATEST);
+  return {
+    artifacts: env.ARTIFACTS,
+    notebook: env.DriveShadow,
+    serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? null,
+    serviceAccountPrivateKey: env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY ?? null,
+    folderId:
+      typeof env.GDRIVE_FOLDER_ID === "string" &&
+      env.GDRIVE_FOLDER_ID.trim().length > 0
+        ? env.GDRIVE_FOLDER_ID.trim()
+        : null,
+    sourceLatest:
+      env.SOURCE_LATEST !== undefined &&
+      Number.isFinite(latest) &&
+      latest > 0
+        ? Math.floor(latest)
+        : 25,
+  };
+};
+
+const driveMode = (env: Env): "live" | "shadow" =>
+  env.DRIVE_MODE === "live" ? "live" : "shadow";
 
 const eagerWindowDays = (env: Env): number | null => {
   const parsed = Number(env.EAGER_WINDOW_DAYS);
@@ -554,13 +595,14 @@ const stagePlatform = (env: Env) =>
           capturePlatformLayer(captureEnv(env)),
           artifactCatalogLayer(env.ARTIFACTS),
         );
+        const normalize = normalizePlatformLayer(
+          normalizeEnv(env, artifactsS3),
+        ).pipe(Layer.provide(base));
         return Layer.mergeAll(
           base,
           starsPlatformLayer(starsEnv(env)).pipe(Layer.provide(base)),
           archivePlatformLayer(archiveEnv(env)).pipe(Layer.provide(base)),
-          normalizePlatformLayer(normalizeEnv(env, artifactsS3)).pipe(
-            Layer.provide(base),
-          ),
+          normalize,
           transcribePlatformLayer(transcribeEnv(env, artifactsS3)).pipe(
             Layer.provide(base),
           ),
@@ -572,6 +614,12 @@ const stagePlatform = (env: Env) =>
           movementPlatformLayer(movementEnv(env)).pipe(Layer.provide(base)),
           journalingPlatformLayer(journalEnv(env)).pipe(
             Layer.provide(base),
+          ),
+          // Step 10 (Drive): the allowlist flow consumes the
+          // normalize stage's vendor + data services, so its
+          // layer is provided the base plus normalize's.
+          drivePlatformLayer(driveEnv(env)).pipe(
+            Layer.provide(Layer.mergeAll(base, normalize)),
           ),
         );
       }),
@@ -1644,6 +1692,69 @@ const serveDriveProbe = (
   });
 
 /**
+ * Manual trigger for one Drive sources pass (§4.3 step 10), same
+ * device-token gate — rehearsal tooling: in shadow mode it
+ * discovers and compares only; in live mode it performs.
+ * `?inventory=1` forces the hourly crawl; `?bytecheck=smallest`
+ * (or a file id) downloads one receipted audio file through the
+ * service account and verifies its sha256 against its receipt.
+ */
+const serveDriveRun = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const byteCheck = url.searchParams.get("bytecheck");
+    const outcome = yield* runDrivePass({
+      mode: "manual",
+      now: new Date(),
+      perform: driveMode(env) === "live",
+      inventory:
+        url.searchParams.get("inventory") === "1" ? "force" : "skip",
+      ...(byteCheck !== null ? { byteCheck } : {}),
+    }).pipe(
+      Effect.provide(stagePlatform(env)),
+      Effect.map((report) => ({ ok: true as const, report })),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          ok: false as const,
+          error: String(cause).slice(0, 500),
+        }),
+      ),
+    );
+    return json(outcome, outcome.ok ? 200 : 500);
+  });
+
+/** The Drive notebook (last report), same gate. */
+const serveDriveStatus = (
+  env: Env,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response> =>
+  Effect.gen(function* () {
+    if (!(yield* isValidToken(env, gateToken(request, url)))) {
+      return fail(404, "not found");
+    }
+    const stub = env.DriveShadow.get(
+      env.DriveShadow.idFromName("drive-shadow-v1"),
+    );
+    const response = yield* Effect.promise(() =>
+      stub.fetch(new Request("http://drive-shadow/status")),
+    );
+    if (!response.ok) return fail(500, "drive status unavailable");
+    return new Response(response.body, {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+/**
  * Manual trigger for one media-normalize pass (§4.3 step 5), same
  * device-token gate — parity tooling: in shadow mode it diffs the
  * census slice named by `?offset=`/`?limit=` (defaults 0/500), or
@@ -2188,6 +2299,12 @@ const handle = (request: Request, env: Env): Effect.Effect<Response> => {
   if (request.method === "GET" && url.pathname === "/drive/probe") {
     return serveDriveProbe(env, request, url);
   }
+  if (request.method === "GET" && url.pathname === "/drive/status") {
+    return serveDriveStatus(env, request, url);
+  }
+  if (request.method === "POST" && url.pathname === "/drive/run") {
+    return serveDriveRun(env, request, url);
+  }
   if (request.method === "POST" && url.pathname === "/journal/refresh") {
     return serveJournalRefresh(env, request, url);
   }
@@ -2649,6 +2766,33 @@ export default {
           Effect.provide(stagePlatform(env)),
           Effect.catch((cause) =>
             Effect.logError("journal pass failed", cause),
+          ),
+        ),
+      ),
+    );
+    // The Drive sources (§4.3 step 10): audio-drive + drive-allow
+    // ride the minute (the server's ingest cadence); the
+    // inventory crawl rides its own hourly marker inside the
+    // pass. In live mode the pass performs — downloads, blob
+    // writes, Transloadit imports, the inventory rewrite; in
+    // shadow mode it discovers and compares only. Same failure
+    // posture: log and swallow, the next tick self-heals.
+    ctx.waitUntil(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const report = yield* runDrivePass({
+            mode: "cron",
+            now: new Date(controller.scheduledTime),
+            perform: driveMode(env) === "live",
+            inventory: "auto",
+          });
+          yield* Effect.logInfo(
+            `drive pass (${driveMode(env)}): audio discovered ${report.audio.discovered} (ingested ${report.audio.ingested}, cached ${report.audio.cached}, skipped ${report.audio.skipped}, would-ingest ${report.audio.wouldIngest.length}, failures ${report.audio.failures.length}), allow listed ${report.allow.listed} (ingested ${report.allow.ingested}, cached ${report.allow.cached}, skipped ${report.allow.skipped}, missing ${report.allow.missing.length}, failures ${report.allow.failures.length}), inventory ${report.inventory === null ? "not run" : `${report.inventory.files} files / ${report.inventory.folders} folders, changed ${report.inventory.changed}, written ${report.inventory.written}`}, errors ${report.errors.length}`,
+          );
+        }).pipe(
+          Effect.provide(stagePlatform(env)),
+          Effect.catch((cause) =>
+            Effect.logError("drive pass failed", cause),
           ),
         ),
       ),

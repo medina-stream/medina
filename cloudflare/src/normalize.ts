@@ -94,7 +94,7 @@ const WORKFLOW_VERSION = "remote-media-v1";
 /** Import presign + store-credential lifetime (lib: JOB_TTL_SECONDS). */
 const JOB_TTL_SECONDS = 24 * 60 * 60;
 const MAX_CHUNKS = 200;
-const MAX_CHUNK_ATTEMPTS = 3;
+export const MAX_CHUNK_ATTEMPTS = 3;
 const CHUNK_NAME_PATTERN = /_(\d+)\.ogg$/;
 const DIRECT_CODECS = new Set(["opus", "aac"]);
 
@@ -1851,8 +1851,10 @@ type PerformError =
 /** Fire one chunk assembly and return its receipt (lib's
  * createChunkReceipt): mint the import credential and presign the
  * source, mint the prefix-scoped store credential, build the
- * params, create. */
-const fireChunkReceipt = (options: {
+ * params, create. Exported for the Drive allowlist flow (§4.3
+ * step 10), whose job receipts run the same chunk phase at a
+ * different receipt key. */
+export const fireChunkReceipt = (options: {
   readonly captureId: string;
   readonly sourceKey: string;
   readonly originalKey: string;
